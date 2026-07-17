@@ -116,3 +116,12 @@ temp/
 .codex/sessions/
 .codex/worktrees/
 .codex/tmp/
+
+# Only reviewed, stable project configuration is trackable under .codex.
+.codex/*
+!.codex/config.toml
+!.codex/config.example.toml
+
+# Local external ZTA35G research package.
+# Integrity is tracked by docs/acceptance/sem-package-manifest.json.
+/SEM/
