@@ -1,0 +1,44 @@
+# Normalize ordinary text in Git and keep the repository default at LF.
+* text=auto eol=lf
+
+# Make the intended treatment of common source and documentation files explicit.
+*.py text eol=lf
+*.ps1 text eol=lf
+*.psm1 text eol=lf
+*.psd1 text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.js text eol=lf
+*.jsx text eol=lf
+*.vue text eol=lf
+
+# Images, archives, databases, model weights, and serialized models are binary.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.7z binary
+*.gz binary
+*.db binary
+*.sqlite binary
+*.sqlite3 binary
+*.pt binary
+*.pth binary
+*.ckpt binary
+*.pkl binary
+*.pickle binary
+*.joblib binary
+*.onnx binary
+*.safetensors binary
+*.h5 binary
+*.hdf5 binary
+*.npy binary
+*.npz binary
