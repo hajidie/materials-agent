@@ -2,11 +2,63 @@
 
 > 状态：已确认设计基线
 >
-> 修订日期：2026-07-15
+> 修订日期：2026-07-16
 >
 > 前置文档：`2026-07-13-sem-mvp-stage-0-architecture-design.md`（已确认设计基线）
 >
-> 事实依据：本轮重新检查当前仓库并完整读取第一节和第二节最新文档；未修改或运行 `SEM/`，未导入模型、未加载权重、未安装依赖，也未执行训练或推理。
+> 事实依据：本轮重新检查当前仓库并完整读取第一节、第二节和第三节最新文档；第二节架构与产品行为保持不变，仅同步普通知识问答、Tool 路由和追问默认由一次 `CHAT_ORCHESTRATION` LLMCall 完成。未修改或运行 `SEM/`，未导入模型、未加载权重、未安装依赖，也未执行训练或推理。
+
+## 项目负责人审阅层
+
+本节要说明的是：用户发出请求后，系统如何一路处理到最终返回，以及在缺参数、执行失败、图片保存失败或解释失败时，平台怎样保留清楚、可追溯的事实。项目负责人不需要关注数据库实现语法，只需确认下面的产品行为符合预期。
+
+### 1. 用户请求进入系统后的主要流程
+
+系统先保存用户消息和任务，再判断这是普通知识问答，还是需要调用 `zta35g_sem_virtual_lab`。如果是知识问答，系统直接形成助手回答；如果需要 Tool，系统先整理候选参数并做确定性校验，只有输入完整合法时才真正执行 Tool。Tool 返回后，平台先保存必须保留的图片，再保存结构化结果，最后基于结构化结果生成自然语言解释。
+
+### 2. `NEEDS_INPUT` 与直接失败
+
+当系统已经判断用户要使用 Tool，但缺少参数、缺少明确单位，或存在不能安全消解的歧义时，Task 进入 `NEEDS_INPUT`。此时不会执行 Tool，系统保存当前输入快照并向用户追问；用户补充后继续使用同一个 Task，重新对完整输入做校验。
+
+如果输入已经完整，但材料不支持、精度或单位非法、参数越界、请求输出非法，则直接失败，不进入 `NEEDS_INPUT`。Tool 或 Runtime 不可用、SEM 生成失败、必需图片无法保存、结构化结果无法提交，也属于执行或持久化失败。HTTP/JSON 包络本身无法解析时，可以在创建 Task 前直接拒绝。
+
+### 3. 三种 Tool 请求模式
+
+MVP 只有三种模式：
+
+1. 只请求 `sem_image`：生成并返回一张 SEM 图片，不执行性能预测。
+2. 只请求 `mechanical_properties`：Tool 内部仍先生成 SEM，再完成性能预测；平台保留这张中间 SEM，保证性能结果可追溯。
+3. 同时请求两项：只生成一张 SEM，并复用同一张图片完成性能预测，避免同一任务出现两张来源不同的图片。
+
+### 4. 成功、部分成功与失败
+
+- 成功：用户请求的输出均已完成，必需图片和结构化结果均已可靠保存，必要解释也已完成。
+- 部分成功：至少有一项用户请求输出可用，或者结构化 ToolResult 已成功但自然语言解释失败。可用结果仍然返回，失败部分明确说明。
+- 失败：没有用户请求输出可用，或必需图片、结构化结果等关键事实无法可靠保存。只请求性能时，即使中间 SEM 已保存，但性能失败，用户目标仍算失败。
+
+### 5. Tool 重试不会覆盖旧结果
+
+整体 Tool 重试沿用同一个 Task，但每次创建新的 ToolRun。旧 ToolRun、旧图片、旧结构化结果、旧错误和 diagnostics 均保留且不覆盖。新尝试产生自己的图片和性能结果；Task 只通过明确的 selected 引用选择当前采用哪一次结果，不能按“最新一次”猜测，也不能把不同尝试的图片和性能拼在一起。
+
+### 6. 图片为什么采用 `PENDING → MinIO → AVAILABLE`
+
+图片本体保存在 MinIO，但平台需要先有一个稳定的图片记录，才能知道上传失败、上传成功但状态未更新，或对象与记录不一致时应该恢复哪一项。因此先建立 `PENDING` 锚点，再上传 MinIO，最后确认 `AVAILABLE`。只有 `AVAILABLE` 图片才能进入成功结果。失败时可以落到 `FAILED` 或 `ORPHANED`，避免出现“界面说成功，但图片实际找不到”的情况。
+
+### 7. Explanation 失败不影响结构化结果
+
+ToolResult 是正式结构化事实，NaturalLanguageExplanation 是对它的后续说明。解释只能读取已经保存的 ToolResult。解释失败不会把已成功的图片、性能数据或 ToolRun 改成失败；平台返回结构化结果和解释错误，后续只重试 Explanation，不重新执行 Tool，也不覆盖旧解释尝试。
+
+### 8. 如何通过结构化日志定位主要故障
+
+结构化日志使用 `request_id`、`task_id` 和适用时的 `tool_run_id` 串联链路，并记录主要环节：请求接收、聊天编排、输入标准化、输入校验、Tool 启动、SEM 生成、性能预测、图片保存、结果保存、解释生成和响应完成。项目负责人或运维人员可以据此判断故障发生在输入、Tool/Runtime、图片、结果、解释还是最终响应，而不需要查看模型内部张量或完整 Prompt。
+
+### 9. 对未来 Tool、登录系统和 SSE 的影响
+
+新增 Tool 时继续复用 Task、ToolRun、Asset、ToolResult 和 Explanation，只增加新的 Tool 定义及输入输出结构，不重写现有核心关系。未来登录系统通过 Actor 所有权增加访问控制，不迁移历史结果。未来 SSE 只消费 TaskProgressReporter 提供的临时进度；断线或进度丢失不改变 PostgreSQL/MinIO 中的最终事实，也不要求现在建设事件重放系统。
+
+### 10. 项目负责人验收重点
+
+项目负责人只需确认：缺参数会追问而不是误执行；非法完整输入会直接失败；三种 Tool 模式符合产品预期；图片与性能结果始终可追溯到同一次 ToolRun；重试保留旧结果；图片未可靠保存时不误报性能成功；解释失败不覆盖结构化结果；日志能定位主要故障环节；未来 Tool、登录和 SSE 不要求重写当前核心流程。
 
 ## 1. 范围、非范围与本节结论
 
@@ -155,10 +207,11 @@ flowchart TD
     C -->|"同 key 不同请求"| C2["409 冲突"]
     C -->|"新提交"| D["提交 Conversation / UserMessage / Task PENDING / 幂等绑定"]
     D --> E["Task RUNNING"]
-    E --> F["LangChain 生成结构化意图与候选参数"]
-    F -->|"知识问答"| G["知识回答路径"]
-    F -->|"缺少或歧义"| H["保存 revision；Task NEEDS_INPUT"]
-    F -->|"Tool 候选完整"| I["确定性标准化与完整校验"]
+    E --> F["创建 LLMCall(CHAT_ORCHESTRATION)"]
+    F --> F1["事务外调用一次 LLM"]
+    F1 -->|"无需 Tool，直接知识回答"| G["同一次调用保存 AssistantMessage；Task SUCCEEDED"]
+    F1 -->|"Tool 意图明确但缺少或歧义"| H["候选参数 + 追问建议；保存 revision；Task NEEDS_INPUT"]
+    F1 -->|"需要 Tool 且候选完整"| I["tool_id + 候选参数 + requested_outputs；确定性标准化与完整校验"]
     I -->|"失败"| J["Task FAILED；不创建 ToolRun"]
     I -->|"通过"| K["创建新的 ToolRun"]
     K --> L["MaterialTool.execute 一次"]
@@ -228,19 +281,24 @@ Runtime 只监听本机回环地址，只接收已校验四维参数、requested
 
 ```text
 UserMessage + Task
-→ LangChain 判断无需 Tool
-→ LLM 调用
-→ 同一 PostgreSQL 本地事务保存 AssistantMessage、LLM 调用终态和 Task 终态
+→ 创建 LLMCall(CHAT_ORCHESTRATION)
+→ 在数据库事务外调用一次 LLM
+→ 返回以下三类结果之一：
+   1. 无需 Tool，直接返回知识回答；
+   2. 需要 Tool，返回 tool_id、候选参数和 requested_outputs；
+   3. Tool 意图明确但缺失/歧义，返回候选参数和追问建议。
+→ 知识问答成功时，同一 CHAT_ORCHESTRATION 的终结事务保存 LLMCall SUCCEEDED、AssistantMessage 和 Task SUCCEEDED
 → API 返回 AssistantMessage
 ```
 
-知识问答不创建 ToolRun、Asset 或 ToolResult。LLM 失败时 Task `FAILED`；进程内文本片段不构成正式回答。若文本已生成但数据库提交失败，不返回成功文本。
+知识问答不创建第二个固定的知识回答 LLMCall，也不创建 ToolRun、Asset 或 ToolResult。`CHAT_ORCHESTRATION` 失败时 Task `FAILED`；进程内文本片段不构成正式回答。若文本已生成但数据库提交失败，不返回成功文本。只有后续实际质量验证证明单次路由与回答不足时，才重新评估拆分意图识别和知识回答。
 
 ### 4.2 进入 `NEEDS_INPUT`
 
 当 Tool 意图明确但缺少参数/单位或存在不能确定消解的歧义时：
 
 ```text
+同一次 CHAT_ORCHESTRATION 返回候选参数和追问建议
 Task = NEEDS_INPUT
 不创建 ToolRun
 不调用 MaterialTool
@@ -608,7 +666,7 @@ Tx2 提交后，Application 才能把 `asset_id` 放入成功 ToolResult。MinIO
 5. Asset FAILED/ORPHANED；
 6. ToolResult、ToolRun 终态、Task selected 引用；
 7. Explanation/LLM 调用和 Task 最终状态；
-8. 知识回答 AssistantMessage/LLM/Task。
+8. CHAT_ORCHESTRATION 终结时的 LLMCall/AssistantMessage/Task。
 
 模型推理、Runtime HTTP/RPC 调用、MinIO 上传和 LLM 网络调用不得包在长数据库事务中。
 
@@ -1012,38 +1070,41 @@ Redis / Event Store / Worker
 | MinIO 成功、AVAILABLE 失败 | 保持 PENDING；核验后恢复/ORPHANED | 当前 ToolRun/Task 失败或可识别非终态 | 不误报成功 |
 | ToolResult 保存失败 | 保留 Asset/diagnostics | ToolRun/Task `FAILED` | 不返回内存结果 |
 | ToolResult 成功、Explanation 失败 | Explanation/LLM FAILED | ToolRun 不变；Task 部分成功 | 返回结构化结果 + 解释错误 |
-| 知识 LLM 失败 | LLM FAILED | Task `FAILED` | 不伪造回答 |
+| CHAT_ORCHESTRATION LLM 失败 | LLMCall FAILED | Task `FAILED` | 不伪造知识回答、Tool 候选或追问 |
 | 日志或 ProgressReporter 失败 | 不改变业务事实 | 状态不变 | API 读持久化事实 |
 
 ## 14. 第二节验收标准
 
-1. 普通知识问答不创建 ToolRun、Asset 或 ToolResult。
-2. 输入缺失使 Task `NEEDS_INPUT`，补充时保留 task_id、新建 request_id、追加 revision。
-3. 硬校验失败不创建 ToolRun。
-4. 每次实际 Tool 执行只有一次公共 `MaterialTool.execute` 调用和一个新 tool_run_id。
-5. Application 不调用 `generate_sem`/`predict_mechanical_properties`，不管理 Tool 内部张量或阶段身份。
-6. 只请求 SEM 时只保存一张 requested SEM Asset。
-7. 只请求性能时 Tool 返回中间 SEM，Application 先保存为 AVAILABLE，再提交性能成功结果。
-8. 同时请求两项只生成、编码、保存一张 SEM。
-9. 同时请求两项而性能失败时，成功 SEM 可形成部分成功。
-10. 只请求性能而性能失败时，中间 SEM 不使用户任务部分成功。
-11. 图片保存失败时不提交不可追溯性能成功结果。
-12. ToolResult 成功、Explanation 失败时只重试 Explanation。
-13. ToolRun diagnostics 能表达两个主要步骤、时间、耗时和安全错误。
-14. 不存在 InferenceRun、StageRun、PredictorRawOutput 独立实体或强制表。
-15. Task 只需 selected_tool_run_id 和 selected_result_id。
-16. 整体重试保留 task_id，新建 request_id/tool_run_id，旧运行不可变且产物不混合。
-17. Task/ToolRun 状态集合不含 CANCELLED/TIMED_OUT，MVP 不强制状态历史表。
-18. 资产采用 PENDING→MinIO→AVAILABLE，失败具有 FAILED/ORPHANED 锚点。
-19. orphan object、stale PENDING 和 broken AVAILABLE reference 可区分。
-20. 正式 PNG 是单张 8-bit mode L 灰度图，无装饰且不静默改尺寸。
-21. SHA-256 对最终 PNG 文件用于完整性检查，不承诺跨编码器相同 bytes。
-22. ToolResult 必填字段与第一节一致，Unsupported capability 字段不编造。
-23. API 不返回 object key，Explanation 不覆盖 ToolResult。
-24. 结构化日志能够串联 request_id/task_id/tool_run_id 和关键步骤。
-25. TaskProgressReporter 与日志职责分开，丢失进度不改变业务事实。
-26. 双 Conda 环境通过 127.0.0.1 Runtime 连接，但平台核心仍是模块化单体。
-27. 未来新增 Tool、SSE 或登录系统不要求重写 MaterialTool、Task、Asset、ToolResult 核心关系。
+1. UserMessage + Task 只创建一次 `LLMCall(CHAT_ORCHESTRATION)`，并在事务外调用一次 LLM。
+2. 同一次 CHAT_ORCHESTRATION 只能明确映射为知识回答、Tool 候选或 NEEDS_INPUT 追问三类结果之一。
+3. 普通知识问答成功时，同一次调用保存 LLMCall SUCCEEDED、AssistantMessage 和 Task SUCCEEDED，不固定增加第二次知识回答调用。
+4. 普通知识问答不创建 ToolRun、Asset 或 ToolResult。
+5. 输入缺失使 Task `NEEDS_INPUT`，补充时保留 task_id、新建 request_id、追加 revision。
+6. 硬校验失败不创建 ToolRun。
+7. 每次实际 Tool 执行只有一次公共 `MaterialTool.execute` 调用和一个新 tool_run_id。
+8. Application 不调用 `generate_sem`/`predict_mechanical_properties`，不管理 Tool 内部张量或阶段身份。
+9. 只请求 SEM 时只保存一张 requested SEM Asset。
+10. 只请求性能时 Tool 返回中间 SEM，Application 先保存为 AVAILABLE，再提交性能成功结果。
+11. 同时请求两项只生成、编码、保存一张 SEM。
+12. 同时请求两项而性能失败时，成功 SEM 可形成部分成功。
+13. 只请求性能而性能失败时，中间 SEM 不使用户任务部分成功。
+14. 图片保存失败时不提交不可追溯性能成功结果。
+15. ToolResult 成功、Explanation 失败时只重试 Explanation；该解释仍使用 Tool 执行后的独立 LLMCall。
+16. ToolRun diagnostics 能表达两个主要步骤、时间、耗时和安全错误。
+17. 不存在 InferenceRun、StageRun、PredictorRawOutput 独立实体或强制表。
+18. Task 只需 selected_tool_run_id 和 selected_result_id。
+19. 整体重试保留 task_id，新建 request_id/tool_run_id，旧运行不可变且产物不混合。
+20. Task/ToolRun 状态集合不含 CANCELLED/TIMED_OUT，MVP 不强制状态历史表。
+21. 资产采用 PENDING→MinIO→AVAILABLE，失败具有 FAILED/ORPHANED 锚点。
+22. orphan object、stale PENDING 和 broken AVAILABLE reference 可区分。
+23. 正式 PNG 是单张 8-bit mode L 灰度图，无装饰且不静默改尺寸。
+24. SHA-256 对最终 PNG 文件用于完整性检查，不承诺跨编码器相同 bytes。
+25. ToolResult 必填字段与第一节一致，Unsupported capability 字段不编造。
+26. API 不返回 object key，Explanation 不覆盖 ToolResult。
+27. 结构化日志能够串联 request_id/task_id/tool_run_id 和关键步骤。
+28. TaskProgressReporter 与日志职责分开，丢失进度不改变业务事实。
+29. 双 Conda 环境通过 127.0.0.1 Runtime 连接，但平台核心仍是模块化单体。
+30. 未来新增 Tool、SSE 或登录系统不要求重写 MaterialTool、Task、Asset、ToolResult 核心关系。
 
 ## 15. 阶段 1A / 1B 待验证事项
 

@@ -8,7 +8,63 @@
 >
 > 适用范围：阶段 0 逻辑数据模型设计
 >
-> 事实依据：第一节与第二节均为已确认设计基线；本轮重新检查仓库状态并完整复核第三节，只修订第三节，未修改或运行 SEM/，未加载模型或权重。
+> 事实依据：本轮重新检查仓库状态并完整读取第一节、第二节和第三节最新文档；项目负责人已确认第三节五项核心设计，本轮仅补充聊天时间线的稳定 Task 锚点并确认本节基线。不修改第一节正文，不修改或运行 `SEM/`，不加载模型或权重。
+
+## 项目负责人审阅层
+
+本节解决的是“平台需要长期保存什么，以及这些数据怎样避免混淆”。它不是建表说明，也不要求项目负责人理解数据库实现细节。需要确认的是：用户消息、任务、每次 Tool 尝试、图片、结构化结果和解释能否各自找到来源，重试后旧事实是否仍然保留，聊天历史能否按同一规则展示。
+
+### 1. 十一个核心对象的通俗含义
+
+- **Actor**：资源归谁所有。MVP 是稳定的本地匿名身份，未来可以关联真实登录用户。
+- **Conversation**：一次持续对话的容器。
+- **Message**：用户消息、知识回答或追问。已保存的消息不覆盖。
+- **Task**：用户想完成的稳定目标。补参数、整体 Tool 重试和解释重试仍属于同一个 Task。
+- **TaskInputRevision**：某一时刻形成的完整输入快照，记录它来自哪些 Message。每次补充都新增 revision。
+- **ToolRun**：一次真实 Tool 执行尝试。重试一定新建 ToolRun。
+- **Asset**：图片等文件的关系型记录；文件本体只保存在 MinIO。
+- **ToolResult**：Tool 产生的正式结构化结果。
+- **NaturalLanguageExplanation**：对某个 ToolResult 的自然语言说明，重试时新增记录。
+- **LLMCall**：一次聊天编排或结果解释的外部 LLM 调用记录，用于排错和耗时追踪。
+- **IdempotencyRecord**：防止网络重试重复创建消息、输入快照、ToolRun 或 Explanation 的保护记录。
+
+### 2. 为什么 Task 和 ToolRun 要分开
+
+Task 表示稳定用户目标，ToolRun 表示一次实际执行。一个 Task 可以先失败，再由用户明确重试形成新的 ToolRun。这样旧运行的图片、结果、错误和诊断不会被覆盖，也不会因重试而失去追溯能力。Task 只明确指出当前选择哪一个 ToolRun 和 ToolResult，不通过“最后一次”猜测。
+
+### 3. 为什么补充参数保存 revision
+
+进入 `NEEDS_INPUT` 后，用户可能分多次补充温度、时间、单位或 requested outputs。平台保留每条不可变 Message，并为每次解析结果新增一个完整 TaskInputRevision。revision 中保存 `source_message_ids`，可以追溯本快照依据了哪些消息。旧 revision 不覆盖，因此能够还原“用户最初说了什么、后来补了什么、系统最终执行了哪一版输入”。
+
+### 4. 为什么图片和性能结果必须来自同一个 ToolRun
+
+每次 ToolRun 都可能使用不同 seed、运行参数或模型执行状态。图片来自尝试 A、性能来自尝试 B 时，结果已经失去科学和业务含义。因此 ToolResult、生成 Asset 和 ResultAssetLink 必须沿同一 Task、同一 ToolRun 链路提交。Application 在一个短事务中锁定并校验来源，自动化测试覆盖跨 Task、跨 ToolRun 的非法混合。
+
+### 5. 普通列与 JSONB 的边界
+
+经常查询、排序或用于来源判断的内容使用普通列，例如各种 ID、状态、时间、Tool/Schema 版本、错误码、文件尺寸和 checksum。Tool 特有且会随 Schema 演进的内容使用受控 JSONB，例如输入快照、实际执行载荷、diagnostics、ToolResult.data、warnings、provenance 和 LLM 安全结构化摘要。关键关系不能只藏在大 JSONB 中。
+
+### 6. 三类恢复如何保存
+
+- **Tool 重试**：保留 Task，新建 ToolRun、Asset 和 ToolResult；旧尝试全部保留。
+- **Explanation 重试**：继续引用同一 ToolResult，新建 Explanation 和 LLMCall；不重新执行 Tool。
+- **`NEEDS_INPUT` 恢复**：保留 Task，追加 UserMessage 和 TaskInputRevision；完整合法后才创建 ToolRun。
+
+### 7. 哪些模型内部内容不进入数据库
+
+数据库不保存 Tensor、CUDA 对象、DenseNet 特征、SVR 中间值、模型激活、图片 bytes、完整 Prompt、完整 provider 响应或流式 token。Tool 内部步骤只保留轻量 diagnostics；模型 bundle 只做静态轻量溯源，不建设模型版本表。
+
+### 8. Tool 任务在聊天时间线中的呈现
+
+数据库事实继续分层：Message 保存知识回答和追问，ToolResult 保存结构化结果，Asset 保存文件引用，NaturalLanguageExplanation 保存结果说明。ToolResult 和 Explanation 不复制进 Message 正文。Application/API 查询层把一次 Tool 请求聚合为稳定的 Task 时间线项：以发起该 Task 的初始 UserMessage.created_at 为主锚点，无法使用时回退到 Task.created_at；Task 状态、Tool 重试或 Explanation 重试只更新卡片内部内容，不改变卡片在历史中的主位置。知识回答 AssistantMessage 继续按 Message.created_at 独立展示。未来若界面需要简短助手气泡，它只是展示投影，不能覆盖或替代 ToolResult。
+
+### 9. 对未来 Tool、登录和 SSE 的影响
+
+新 Tool 继续复用 Task、TaskInputRevision、ToolRun、Asset、ToolResult、ResultAssetLink 和 Explanation；Tool 特有差异进入受控 JSONB。登录后通过 Actor/user 所有权增加访问控制，不迁移历史资源。SSE 只消费 TaskProgressReporter 的临时进度，最终事实仍从核心实体读取，不提前建设事件表或重放系统。
+
+### 10. 项目负责人如何验收
+
+项目负责人应重点确认：知识问答与 Tool 结果不会重复保存；聊天时间线能统一展示两类路径，旧 Task 卡不会因状态更新或重试在历史中移动；一个 Task 可以保留多次不可变 ToolRun；输入补充不会覆盖旧 revision；图片与性能不能跨 ToolRun 混合；图片未 `AVAILABLE` 时不能成为成功结果；Explanation 失败不改变 ToolResult；结构化日志和 LLMCall/ToolRun/Asset/Result 能定位完整故障链；新增 Tool、登录和 SSE 不需要重写核心表。
 
 ## 1. 范围与非范围
 
@@ -17,7 +73,7 @@
 本节把第一节的核心实体和第二节的持久化顺序落成逻辑数据模型，回答：
 
 - 哪些业务事实需要进入 PostgreSQL；
-- Actor、Conversation、Message、Task、ToolRun、Asset、ToolResult、Explanation 和 LLMCall 如何关联；
+- Actor、Conversation、Message、Task、TaskInputRevision、IdempotencyRecord、ToolRun、Asset、ToolResult、Explanation 和 LLMCall 如何关联；
 - 哪些字段必须使用普通列、外键和约束，哪些 Tool 特有内容适合 JSONB；
 - 如何保证 selected ToolRun/Result 一致且不同执行尝试的产物不混合；
 - 幂等、NEEDS_INPUT、资产检查点、结果提交和解释重试分别落到哪些实体；
@@ -39,7 +95,7 @@
 - 阶段 1 实施计划或阶段 1A/1B 实施工作；
 - git commit。
 
-公共 API 路径和本地 Runtime 协议留到阶段 0 第四节。
+公共 HTTP API 与聊天时间线契约留到阶段 0 第四节 A；本地 ZTA35G Tool Runtime 通信协议留到后续第四节 B。
 
 ### 1.3 本节结论
 
@@ -47,13 +103,13 @@
 
 1. 标识、普通外键、状态、版本、时间、错误码、来源、选择关系和资产文件元数据使用普通列。
 2. Tool 特有输入输出、运行参数、diagnostics、provenance 和安全 LLM structured output summary 使用受控 JSONB。
-3. requested/completed/failed outputs 已确认使用 PostgreSQL text array，不放进任意 JSONB。
-4. ToolResult 的 artifacts 已确认使用 ResultAssetLink 关联 Asset，不把 asset_id 列表藏在 JSONB。
+3. requested/completed/failed outputs 使用 PostgreSQL text array，不放进任意 JSONB。
+4. ToolResult 的 artifacts 使用 ResultAssetLink 关联 Asset，不把 asset_id 列表藏在 JSONB。
 5. 每个 ToolRun 最多产生一个 ToolResult；一个 Task 可以有多个不可变 ToolRun。
-6. Task 的 selected_tool_run_id 与 selected_result_id 使用少量高价值复合约束保证来自同一 Task 和同一 ToolRun。
+6. Task 的 selected_tool_run_id 与 selected_result_id 保持显式；来源一致性优先由简单外键、必要唯一约束、Application 短事务校验、数据库锁或条件更新和自动化契约测试保证。复合外键只作为阶段 1A 验证后的可选增强。
 7. Asset 归属于 Actor/Task；producer_tool_run_id 仅表示生成来源并允许为空。当前 MVP 只创建 GENERATED Asset，未来 UPLOADED Asset 不需要伪造 ToolRun。
 8. ToolRun 只引用 task_input_revision_id，并保存实际发送给 MaterialTool.execute 的 execution_input，不重复保存 raw/normalized input。
-9. 自然语言意图与参数提取使用 LLMCall(INTENT_AND_PARAMETER_EXTRACTION) 记录；TaskInputRevision 仍是 Application 处理后的输入事实。
+9. 自然语言请求默认只使用一次 LLMCall(CHAT_ORCHESTRATION)：无需 Tool 时直接产生知识回答，需要 Tool 时返回 tool_id、候选参数和 requested_outputs，缺失或歧义时同时给出追问建议。TaskInputRevision 仍是 Application 处理后的输入事实。
 10. Message、TaskInputRevision、ToolRun 和 LLMCall 保存 request_id 关联，但不建立 Request 表或新运行层级。
 11. Task 不保存 duration_ms；总墙钟时间由时间戳计算，实际耗时保存在 ToolRun/LLMCall/Explanation。
 12. Explanation 重试追加新的 NaturalLanguageExplanation 和 LLMCall，继续引用同一 ToolResult。
@@ -71,11 +127,12 @@ PostgreSQL 中的核心事实是：
 - 每次实际 Tool 执行尝试；
 - 文件元数据与跨存储状态；
 - 结构化 ToolResult；
-- 意图/参数提取、知识回答、Explanation 三类 LLM 调用尝试。
+- 聊天编排和 Explanation 两类 LLM 调用尝试。
 
 下列内容只是投影或临时数据，不建设独立业务实体：
 
 - Tool Catalog：从代码级 Tool Registry 生成的只读投影；
+- 对话统一时间线：从 Message、Task/ToolRun、ToolResult、Asset 和 Explanation 组装，不建立 TimelineItem 业务表；
 - TaskProgressReporter 进度：MVP 不持久化；
 - 结构化日志：进入日志系统，不进入业务表；
 - Tool 内部步骤：进入 ToolRun.diagnostics，不建立 StageRun；
@@ -88,14 +145,11 @@ PostgreSQL 中的核心事实是：
 |---|---|---|---|
 | 所有内容放入大 JSONB | 初期字段少 | 外键、唯一性、排序、状态筛选和所有权难以约束 | 拒绝 |
 | 将每个输入、输出、warning 和 diagnostic 完全拆表 | 关系最细 | 表数量和迁移成本过高，且把 Tool 内部差异固化进平台 | 拒绝 |
-| 关系型核心列 + 受控 JSONB + 两个轻量关联实体 | 核心完整性可约束，Tool Schema 可演进 | 需要明确 JSONB 边界和应用层 Schema 校验 | 采用 |
+| 关系型核心列 + 受控 JSONB + 一个轻量结果资产关联实体 | 核心关系清楚，Tool Schema 可演进 | 需要明确 JSONB 边界和应用层 Schema 校验 | 采用 |
 
-两个轻量关联实体是：
+MVP 只保留一个轻量关联实体 ResultAssetLink，用于以关系表达 ToolResult 的 artifacts。TaskInputRevision 直接保存受控的 `source_message_ids`，不再强制建立 TaskInputRevisionMessage。只有未来出现真实的按 Message 反查 Revision、高复杂度审计或大量多对多查询需求时，才升级为独立关联表。
 
-- TaskInputRevisionMessage：记录一个输入快照依据了哪些不可变消息；
-- ResultAssetLink：以外键表达 ToolResult 的 artifacts，并强制 Asset 与 Result 来源一致。
-
-它们不是运行层级、事件或状态机。未来上传文件作为 Tool 输入时可以再增加轻量输入资产关联，但当前不创建 Upload 实体或 ToolRunInputAssetLink。
+ResultAssetLink 不是运行层级、事件或状态机。未来上传文件作为 Tool 输入时可以再增加轻量输入资产关联，但当前不创建 Upload 实体或 ToolRunInputAssetLink。
 
 ### 2.3 不可变与可变边界
 
@@ -132,9 +186,8 @@ erDiagram
     TASK ||--o{ MESSAGE : groups
 
     TASK ||--o{ TASK_INPUT_REVISION : snapshots
-    TASK_INPUT_REVISION ||--|{ TASK_INPUT_REVISION_MESSAGE : cites
-    MESSAGE ||--o{ TASK_INPUT_REVISION_MESSAGE : contributes
-    LLM_CALL o|--o{ TASK_INPUT_REVISION : may_extract
+    MESSAGE }o--o{ TASK_INPUT_REVISION : cited_by_ids
+    LLM_CALL o|--o{ TASK_INPUT_REVISION : may_orchestrate
 
     TASK ||--o{ IDEMPOTENCY_RECORD : protects
     TASK ||--o{ TOOL_RUN : attempts
@@ -146,7 +199,7 @@ erDiagram
     TOOL_RUN ||--o| TOOL_RESULT : produces
 
     TOOL_RESULT ||--o{ RESULT_ASSET_LINK : exposes
-    ASSET ||--o| RESULT_ASSET_LINK : referenced_by
+    ASSET ||--o{ RESULT_ASSET_LINK : referenced_by
 
     TOOL_RESULT ||--o{ NATURAL_LANGUAGE_EXPLANATION : explained_by
     NATURAL_LANGUAGE_EXPLANATION ||--|| LLM_CALL : generated_by
@@ -159,9 +212,11 @@ erDiagram
 
 - Task.selected_tool_run_id 是可空外键；
 - Task.selected_result_id 是可空外键；
-- 二者通过复合外键共同指向同一 Task 下同一 ToolRun 产生的 ToolResult。
+- Application 在结果提交短事务中校验二者属于同一 Task，且 selected_result_id 来自 selected_tool_run_id；阶段 1A 优先使用简单外键和必要唯一约束，复合外键不是起步强制条件。
 
 Asset 对 ToolRun 是可选来源关系：每个 Asset 必须属于一个 Actor 和 Task，但 producer_tool_run_id 可以为空；GENERATED Asset 必须有 producer ToolRun，未来 UPLOADED Asset 必须没有 producer ToolRun。
+
+Message 与 TaskInputRevision 的逻辑来源关系由 `TaskInputRevision.source_message_ids` 表达，不代表 MVP 存在独立关联实体。每个来源 Message 必须属于同一个 Task 和 Conversation，由创建 revision 的 Application 短事务校验。
 
 ### 3.2 普通知识问答路径
 
@@ -170,19 +225,18 @@ flowchart LR
     A["Actor"] --> C["Conversation"]
     C --> U["User Message"]
     C --> T["Task"]
-    U --> I["LLMCall: INTENT_AND_PARAMETER_EXTRACTION"]
-    I -->|"判定为知识问答"| L["LLMCall: KNOWLEDGE_ANSWER"]
-    L --> M["Assistant Message"]
+    U --> L["LLMCall: CHAT_ORCHESTRATION"]
+    L -->|"无需 Tool，直接回答"| M["Assistant Message"]
     T -. "不创建" .-> X["ToolRun / Asset / ToolResult"]
 ~~~
 
-自然语言知识问答先保存意图提取 LLMCall 及安全 structured_output_summary，再执行 KNOWLEDGE_ANSWER 调用。知识回答成功时保存 AssistantMessage；整个路径不创建 ToolRun、Asset 或 ToolResult。任一 LLM 失败时保存失败 LLMCall 和 Task 错误，不创建伪造的 AssistantMessage。
+自然语言知识问答默认只执行一次 CHAT_ORCHESTRATION。该调用在判断无需 Tool 时直接返回知识回答，成功后保存 AssistantMessage；整个路径不创建 ToolRun、Asset 或 ToolResult。调用失败时保存失败 LLMCall 和 Task 错误，不创建伪造的 AssistantMessage。只有后续真实验证证明单次路由质量不足时，才重新评估拆分意图识别与知识回答。
 
 ### 3.3 Tool 路径
 
 ~~~mermaid
 flowchart TD
-    M["Message"] --> I["LLM structured output / optional"]
+    M["Message"] --> I["LLMCall: CHAT_ORCHESTRATION / optional"]
     I --> R1["TaskInputRevision.raw_input"]
     R1 --> R2["TaskInputRevision.normalized_input"]
     R2 --> E["ToolRun.execution_input"]
@@ -202,7 +256,40 @@ flowchart TD
     S --> O2
 ~~~
 
-直接结构化请求或完全确定性的补充可以跳过 I，使 TaskInputRevision.source_llm_call_id 为空。任何 ResultAssetLink 都只能连接同一个 task_id 下、producer_tool_run_id 等于 Result.tool_run_id 的 AVAILABLE Asset。旧尝试的图片不能与新尝试的性能结果组合。
+直接结构化请求或完全确定性的补充可以跳过 I，使 TaskInputRevision.source_llm_call_id 为空。自然语言 Tool 请求由同一次 CHAT_ORCHESTRATION 返回 tool_id、候选参数、requested_outputs 以及可选追问建议。任何 ResultAssetLink 创建时，Application 都必须确认 Result、Asset、ToolRun 和 Task 来源一致且 Asset 为 AVAILABLE。旧尝试的图片不能与新尝试的性能结果组合。
+
+### 3.4 对话统一时间线投影
+
+~~~mermaid
+flowchart TD
+    U["初始 UserMessage<br/>稳定锚点"] --> T["Tool Task 时间线项<br/>当前状态"]
+    T --> H["selected ToolRun / 历史 ToolRun 摘要"]
+    H --> R["ToolResult"]
+    R --> A["Asset 引用"]
+    R --> E["NaturalLanguageExplanation"]
+    T --> X["错误或部分成功信息"]
+    M["知识回答 AssistantMessage<br/>按 Message.created_at 独立展示"] --> TL["统一聊天时间线"]
+    T --> TL
+~~~
+
+数据库事实保持分层：
+
+```text
+Message
+ToolResult
+Asset
+NaturalLanguageExplanation
+```
+
+1. 知识问答以 AssistantMessage 作为正式回答事实。
+2. Tool 路径以 ToolResult、Asset 和 NaturalLanguageExplanation 作为正式事实。
+3. ToolResult 和 Explanation 不复制进 Message 正文，也不为了统一展示而复制完整结果。
+4. Tool 路径以 Task 为聚合时间线项，至少包含初始 UserMessage、Task 当前状态、selected ToolRun、默认折叠的历史 ToolRun 摘要、ToolResult、Asset 引用、NaturalLanguageExplanation、追问/补充上下文以及错误或部分成功信息。
+5. 如果未来聊天界面需要简短助手气泡，该气泡是查询投影或展示组装，不覆盖 ToolResult，也不形成第二份正式结果。
+6. 每个 Tool Task 时间线项的稳定锚点优先使用发起该 Task 的初始 UserMessage.created_at；初始消息无法使用时回退到 Task.created_at。Task.updated_at、ToolRun 重试、Explanation 重试和状态变化都不得改变该主锚点。
+7. ToolRun 在 Task 项内部按 created_at、attempt_no、tool_run_id 稳定排序；ToolResult 和 Asset 跟随其来源 ToolRun；Explanation 在对应 Result 内按 created_at、completed_at、explanation_id 排序。
+8. 知识回答 AssistantMessage 继续按 Message.created_at 独立展示。顶层项时间相同时，使用固定资源类型优先级 `USER_MESSAGE → ASSISTANT_MESSAGE → TOOL_TASK`，再以资源 ID 排序；查询层定义排序，前端不得自行猜测。
+9. 具体 TimelineItem API Schema 留到第四节 A；本节只确认查询层必须能组装上述统一时间线。
 
 ## 4. 实体逐项定义
 
@@ -220,7 +307,7 @@ flowchart TD
 
 - 主键：actor_id。
 - 外键：MVP 不建立 User 表，因此 user_id 暂不设业务外键。
-- 唯一约束：actor_id。已确认一个未来 user_id 可以关联多个 actor_id，因此 Actor.user_id 不设唯一约束。
+- 唯一约束：actor_id。本轮继续保留一个未来 user_id 可以关联多个 actor_id 的规则，因此 Actor.user_id 不设唯一约束。
 - 状态字段：无。Actor 不是认证状态机。
 - 时间字段：created_at、linked_at。
 - 错误字段：无。
@@ -252,7 +339,7 @@ flowchart TD
 
 采用统一 Message 实体，通过 role 区分 UserMessage 与 AssistantMessage。统一表更适合按会话时间排序，也避免两张表重复实现所有权和不可变规则。
 
-用途：保存对话中已提交的用户文本、助手知识回答和追问文本。
+用途：保存对话中已提交的用户文本、助手知识回答和追问文本。Tool 路径的结构化结果、资产和解释不复制进 Message。
 
 | 字段 | 必填 | 逻辑类型 | 说明 |
 |---|---|---|---|
@@ -274,7 +361,7 @@ flowchart TD
   - task_id → Task；
   - actor_id → Actor；
   - llm_call_id → LLMCall，可空。
-- 唯一约束：llm_call_id 在非空时唯一，确保一个知识回答调用最多落成一个 AssistantMessage。
+- 唯一约束：llm_call_id 在非空时唯一，确保一个 CHAT_ORCHESTRATION 最多落成一个知识回答或追问 AssistantMessage。
 - 检查约束：
   - role=USER 时 generation_source=USER 且 llm_call_id 为空；
   - generation_source=LLM 时 role=ASSISTANT 且 llm_call_id 非空；
@@ -284,7 +371,7 @@ flowchart TD
 - request_id：普通关联列，不设外键，MVP 默认不单独建索引。
 - 错误字段：无；生成失败记录在 LLMCall 和 Task，不创建伪成功消息。
 - JSONB：structured_content 可空；普通文本必须保留为普通列。
-- 不保存：完整 Prompt、流式 token 片段、模型内部响应对象、图片 bytes 或可变消息草稿。
+- 不保存：ToolResult/Asset/Explanation 的完整副本、完整 Prompt、流式 token 片段、模型内部响应对象、图片 bytes 或可变消息草稿。
 
 ### 4.4 Task
 
@@ -319,11 +406,12 @@ Task 状态只允许：
 - 外键：
   - conversation_id → Conversation；
   - actor_id → Actor；
-  - (task_id, selected_tool_run_id) → ToolRun 的同 Task 候选键；
-  - (task_id, selected_tool_run_id, selected_result_id) → ToolResult 的同来源候选键。
-- 唯一约束：task_id。除 selected 来源一致性所需约束外，不为重复所有权建立多层复合候选键。
+  - selected_tool_run_id → ToolRun.tool_run_id，可空；
+  - selected_result_id → ToolResult.result_id，可空。
+- 唯一约束：task_id。不为 selected 来源一致性预先建立复合候选键。
 - 选择约束：
   - selected_result_id 非空时 selected_tool_run_id 必须非空；
+  - Application 在更新 selected 引用的同一短事务中锁定并校验 selected ToolRun 属于本 Task、selected Result 属于该 ToolRun；
   - Tool 结果导致的 SUCCEEDED/PARTIALLY_SUCCEEDED 必须同时具有两个 selected 引用；
   - NEEDS_INPUT 与 KNOWLEDGE_QA 不得具有 selected Tool 引用；
   - FAILED 可以只选择失败 ToolRun 而没有 ToolResult。
@@ -347,7 +435,8 @@ Task 状态只允许：
 | task_input_revision_id | 是 | opaque id | 主键 |
 | task_id | 是 | opaque id | 所属 Task |
 | request_id | 是 | opaque correlation id | 形成该 Revision 的请求；无 Request 表或外键 |
-| source_llm_call_id | 否 | opaque id | 自然语言意图/参数提取 LLMCall；确定性输入可空 |
+| source_llm_call_id | 否 | opaque id | 自然语言 CHAT_ORCHESTRATION LLMCall；确定性输入可空 |
+| source_message_ids | 是 | controlled JSONB 或 ID array | 形成该快照的不可变 Message ID，至少一个；物理类型留到阶段 1A 验证 |
 | revision | 是 | positive integer | Task 内从 1 递增 |
 | raw_input | 是 | JSONB | 用户原始数值、单位、材料和 requested outputs 快照 |
 | normalized_input | 否 | JSONB | 确定性标准化后的完整输入；未完成时可空或不完整 |
@@ -362,9 +451,12 @@ Task 状态只允许：
   - source_llm_call_id → LLMCall.llm_call_id，可空。
 - 唯一约束：(task_id, revision) 唯一。
 - 来源规则：
-  - 自然语言经 LangChain 提取形成的 Revision 可以引用 purpose=INTENT_AND_PARAMETER_EXTRACTION 的 LLMCall；
+  - 每个 Revision 必须通过 source_message_ids 追溯到形成快照的 Message；
+  - source Message 必须属于同一个 Task 和 Conversation；
+  - Message 不可变，Revision 只追加不覆盖；
+  - 自然语言经 LangChain 编排形成的 Revision 可以引用 purpose=CHAT_ORCHESTRATION 的 LLMCall；
   - 直接结构化请求或完全确定性的补充可以为空；
-  - Application 校验 source LLMCall 属于同一 Task/request，并区分“LLM 提取错误”和“标准化/校验错误”；
+  - Application 在创建 Revision 的同一短事务中校验 source_message_ids 和 source LLMCall 的 Task/Conversation/request 来源；
   - LLM structured output 只是候选，TaskInputRevision.raw_input/normalized_input 始终保存 Application 处理后的快照。
 - 状态字段：无；缺失、歧义和错误由内容表达，不复制 Task 状态机。
 - 时间字段：created_at。
@@ -373,29 +465,13 @@ Task 状态只允许：
 - JSONB：
   - raw_input、normalized_input 适合 JSONB，因为输入由 schema_version 定义且会随 Tool 演进；
   - ambiguous_fields、validation_errors 适合结构化数组；
+  - source_message_ids 可使用受控 JSONB ID 数组或 PostgreSQL ID array，阶段 1A 根据 ORM 映射和校验清晰度决定；
   - missing_fields 使用文本数组，便于判断是否为空。
 - 不保存：后续 Tool 输出、LLM Prompt、完整 Message 副本、Tensor 或模型运行参数。
 
-### 4.6 TaskInputRevisionMessage
+MVP 不建立 TaskInputRevisionMessage。只有出现真实的按 Message 反查 Revision、高复杂度审计或大量多对多查询需求时，才在未来升级为独立关联表。
 
-用途：把第二节中的 source_message_ids 变为可校验的关系，记录一个输入快照依据了哪些不可变 Message。
-
-| 字段 | 必填 | 逻辑类型 | 说明 |
-|---|---|---|---|
-| task_input_revision_id | 是 | opaque id | 输入快照 |
-| message_id | 是 | opaque id | 来源 Message |
-| source_order | 是 | nonnegative integer | 在该快照中的来源顺序 |
-
-- 主键：(task_input_revision_id, message_id)。
-- 外键：
-  - task_input_revision_id → TaskInputRevision；
-  - message_id → Message。
-- 唯一约束：(task_input_revision_id, source_order) 唯一。
-- 同一 Task 一致性由创建 Revision 的 Application 短事务校验，不为该冗余所有权建立复合候选键。
-- 状态、时间、错误、JSONB：均无。
-- 不保存：消息文本副本。
-
-### 4.7 IdempotencyRecord
+### 4.6 IdempotencyRecord
 
 用途：在 Actor 与操作作用域内绑定幂等 key、请求摘要和实际创建的业务资源，阻止网络重试重复追加 Message、Revision、ToolRun 或 Explanation。
 
@@ -425,7 +501,7 @@ Task 状态只允许：
 - JSONB：无。request_digest 必须是普通列并可唯一作用域查询。
 - 不保存：完整请求正文、完整 Prompt、响应缓存或事件历史。
 
-### 4.8 ToolRun
+### 4.7 ToolRun
 
 用途：表示一次实际 MaterialTool.execute 尝试，是 Tool 输入、输出摘要、diagnostics、资产和结果的共同来源锚点。
 
@@ -469,12 +545,11 @@ ToolRun 状态只允许：
   - task_input_revision_id → TaskInputRevision。
 - 唯一约束：
   - (task_id, attempt_no) 唯一；
-  - (task_id, tool_run_id) 候选键；
   - 不设置 active run 唯一约束。
 - 输入链路：
 
       Message
-      → LLM structured output（适用时）
+      → LLMCall(CHAT_ORCHESTRATION) structured output（适用时）
       → TaskInputRevision.raw_input
       → TaskInputRevision.normalized_input
       → ToolRun.execution_input
@@ -496,7 +571,7 @@ ToolRun 状态只允许：
 - JSONB：execution_input、actual_runtime_parameters、diagnostics、output_summary。
 - 不保存：图片 bytes、torch.Tensor、DenseNet 特征、SVR 中间值、模型激活、Remote 临时 token 或内部模型对象。
 
-### 4.9 Asset
+### 4.8 Asset
 
 用途：保存 MinIO 文件的关系型元数据和跨存储生命周期。对象本体只进入 MinIO。
 
@@ -533,8 +608,7 @@ ToolRun 状态只允许：
   - actor_id → Actor；
   - producer_tool_run_id → ToolRun，可空。
 - 唯一约束：
-  - object_key 全局唯一；
-  - (task_id, producer_tool_run_id, asset_id) 候选键，供生成资产的 ResultAssetLink 校验来源。
+  - object_key 全局唯一。
 - 来源约束：
   - source_type=GENERATED 时 producer_tool_run_id 必填；
   - source_type=UPLOADED 时 producer_tool_run_id 必须为空；
@@ -551,7 +625,7 @@ ToolRun 状态只允许：
 - JSONB：只有 orphan_details 适合 JSONB；常查文件元数据全部为普通列。
 - 不保存：PNG bytes、MinIO 密钥、永久公开 URL、宿主机路径、Tensor 或模型特征。
 
-### 4.10 ToolResult
+### 4.9 ToolResult
 
 用途：保存一个 ToolRun 规范化后的不可变结构化业务结果。它与自然语言 Explanation 分离。
 
@@ -582,8 +656,7 @@ ToolRun 状态只允许：
   - tool_run_id → ToolRun；
   - actor_id → Actor。
 - 唯一约束：
-  - tool_run_id 唯一，即一个 ToolRun 最多一个 ToolResult；
-  - (task_id, tool_run_id, result_id) 候选键，供 Task selected 复合外键和 ResultAssetLink 使用。
+  - tool_run_id 唯一，即一个 ToolRun 最多一个 ToolResult。
 - 输出集合约束与 ToolRun 相同；ToolResult 的集合必须与来源 ToolRun 终态快照一致。
 - 版本一致性：tool_id、tool_version、schema_version 必须与来源 ToolRun 一致，由结果提交 Application 短事务校验；不为这些重复快照增加额外复合外键。
 - 状态约束：
@@ -595,14 +668,12 @@ ToolRun 状态只允许：
 - JSONB：data、warnings、provenance、error。
 - 不保存：完整文件 bytes、object_key、Tensor、DenseNet 特征、SVR 中间值、模型激活、完整 Prompt、编造的 confidence/OOD/applicability。
 
-### 4.11 ResultAssetLink
+### 4.10 ResultAssetLink
 
 用途：把 ToolResult.artifacts 映射为可受外键约束的 Asset 集合，并阻止跨 ToolRun 混合。
 
 | 字段 | 必填 | 逻辑类型 | 说明 |
 |---|---|---|---|
-| task_id | 是 | opaque id | 来源 Task |
-| tool_run_id | 是 | opaque id | 来源 ToolRun |
 | result_id | 是 | opaque id | ToolResult |
 | asset_id | 是 | opaque id | Asset |
 | artifact_order | 是 | nonnegative integer | API 展示的稳定顺序 |
@@ -610,19 +681,21 @@ ToolRun 状态只允许：
 
 - 主键：(result_id, asset_id)。
 - 外键：
-  - (task_id, tool_run_id, result_id) → ToolResult；
-  - (task_id, tool_run_id, asset_id) → Asset(task_id, producer_tool_run_id, asset_id)。
+  - result_id → ToolResult.result_id；
+  - asset_id → Asset.asset_id。
 - 唯一约束：
-  - asset_id 唯一，MVP 中一个 Asset 最多进入一个 ToolResult；
   - (result_id, artifact_order) 唯一。
-- 检查约束：
-  - 两个高价值复合外键直接保证 Result 与生成 Asset 的 task_id/tool_run_id 来源一致；
-  - 关联时 Asset.status 必须为 AVAILABLE；这是跨行事务不变量，由结果提交服务在同一短事务中锁定并复核；
+- 来源校验：
+  - 创建 Link 时，Application 在同一短事务中锁定 Result、Asset、来源 ToolRun 和 Task；
+  - Result.tool_run_id 必须等于 Asset.producer_tool_run_id，二者的 task_id 必须一致；
+  - Asset.status 必须为 AVAILABLE；
   - UPLOADED Asset 没有 producer_tool_run_id，不能直接进入当前生成结果的 ResultAssetLink。未来输入资产关系由届时新增的轻量关联表达。
 - 状态、错误、JSONB：均无。
 - 不保存：Asset 元数据副本或 object_key。
 
-### 4.12 NaturalLanguageExplanation
+阶段 1A 只有在复合外键实现清晰、不会造成循环依赖或明显增加迁移复杂度时，才可把上述来源校验中的高价值部分增加为数据库复合外键；业务不变量本身不因实现选择而改变。
+
+### 4.11 NaturalLanguageExplanation
 
 用途：保存对同一 ToolResult 的一次自然语言解释尝试。重试追加新行，不覆盖旧尝试。
 
@@ -658,11 +731,11 @@ ToolRun 状态只允许：
   - Explanation 只能读取已持久化 ToolResult。
 - 时间字段：created_at、started_at、completed_at、duration_ms。
 - JSONB：MVP 不需要；生成参数在 LLMCall。
-- 不保存：ToolResult 副本、Prompt、流式 token、模型原始响应对象。
+- 不保存：ToolResult 副本、Message 副本、Prompt、流式 token、模型原始响应对象。
 
-### 4.13 LLMCall
+### 4.12 LLMCall
 
-用途：记录意图/参数提取、知识回答或 ToolResult Explanation 的一次外部 LLM 调用尝试，满足输入变化、结构化提取、耗时、模型标识、参数和安全错误排查。
+用途：记录 Chat Orchestration 或 ToolResult Explanation 的一次外部 LLM 调用尝试，满足路由、候选参数、知识回答、追问建议、耗时、模型标识、参数和安全错误排查。
 
 | 字段 | 必填 | 逻辑类型 | 说明 |
 |---|---|---|---|
@@ -670,7 +743,7 @@ ToolRun 状态只允许：
 | task_id | 是 | opaque id | 所属 Task |
 | conversation_id | 是 | opaque id | 所属 Conversation |
 | request_id | 是 | opaque correlation id | 发起本次调用的请求；无 Request 表或外键 |
-| purpose | 是 | short text | INTENT_AND_PARAMETER_EXTRACTION、KNOWLEDGE_ANSWER 或 TOOL_RESULT_EXPLANATION |
+| purpose | 是 | short text | CHAT_ORCHESTRATION 或 TOOL_RESULT_EXPLANATION |
 | input_result_id | 否 | opaque id | Explanation 调用的输入 ToolResult |
 | provider | 是 | text | LLM 提供方标识 |
 | model_name | 是 | text | 实际调用模型标识 |
@@ -678,7 +751,7 @@ ToolRun 状态只允许：
 | prompt_template_version | 否 | text | 模板版本 |
 | prompt_digest | 否 | fixed digest | 对受控规范 Prompt 的摘要，不是 Prompt 内容 |
 | generation_parameters | 是 | JSONB object | temperature、max tokens 等实际参数 |
-| structured_output_summary | 否 | JSONB object | 安全结构化摘要；意图提取调用使用 |
+| structured_output_summary | 否 | JSONB object | 安全结构化摘要；CHAT_ORCHESTRATION 使用 |
 | usage | 否 | JSONB object | provider 返回的 token/usage 安全摘要 |
 | provider_request_id | 否 | text | 外部提供方请求标识，用于排错 |
 | status | 是 | short text | PENDING、RUNNING、SUCCEEDED、FAILED |
@@ -698,12 +771,14 @@ ToolRun 状态只允许：
   - (provider, provider_request_id) 在 provider_request_id 非空时可设唯一；
   - 不以模型响应文本做唯一判断。
 - purpose 约束：
-  - INTENT_AND_PARAMETER_EXTRACTION 的 input_result_id 必须为空；structured_output_summary 可以保存知识/Tool 意图、候选 tool_id、参数值与单位候选、requested_outputs、missing_fields 和 ambiguous_fields 的安全摘要；
+  - CHAT_ORCHESTRATION 的 input_result_id 必须为空；structured_output_summary 可以保存路由结果、候选 tool_id、参数值与单位候选、requested_outputs、missing_fields、ambiguous_fields、追问建议和安全知识回答摘要；
+  - CHAT_ORCHESTRATION 判定无需 Tool 时，同一次调用直接产生 AssistantMessage；
+  - CHAT_ORCHESTRATION 判定需要 Tool 时，其结构化候选用于创建 TaskInputRevision；
+  - CHAT_ORCHESTRATION 判断缺失或歧义时，同一次调用可以产生追问建议，并由 AssistantMessage 保存正式追问；
   - TOOL_RESULT_EXPLANATION 必须有 input_result_id，并由 NaturalLanguageExplanation 引用；
-  - KNOWLEDGE_ANSWER 的 input_result_id 必须为空，成功时由一个 AssistantMessage 引用；
-  - 失败意图调用可以没有 TaskInputRevision，失败知识调用可以没有 AssistantMessage。
+  - 失败的 CHAT_ORCHESTRATION 可以没有 TaskInputRevision 或 AssistantMessage。
 - 排错边界：
-  - TaskInputRevision.source_llm_call_id 允许把“LLM 提取结果”与后续 Application 标准化/校验分开定位；
+  - TaskInputRevision.source_llm_call_id 允许把“LLM 编排候选”与后续 Application 标准化/校验分开定位；
   - structured_output_summary 不是最终输入事实，不得绕过确定性标准化、范围和精度校验；
   - task_id、conversation_id、input_result_id 与输出实体的冗余一致性由对应 Application 短事务校验。
 - 状态与时间约束与 Explanation 相同。
@@ -721,7 +796,8 @@ ToolRun 状态只允许：
 | Conversation → Task | 1:N | 每个 Task 只属于一个 Conversation |
 | Task → Message | 1:N | 初始消息、补充消息和回答均绑定稳定 Task |
 | Task → TaskInputRevision | 1:N | Tool 路径至少一个；知识问答可以为零 |
-| LLMCall → TaskInputRevision | 1:0..N | 每个 Revision 最多引用一个意图提取调用；确定性输入可以不引用 |
+| Message → TaskInputRevision | N:M 逻辑来源 | MVP 由 Revision.source_message_ids 保存，不建立关联实体 |
+| LLMCall → TaskInputRevision | 1:0..N | 每个 Revision 最多引用一个 CHAT_ORCHESTRATION；确定性输入可以不引用 |
 | Task → ToolRun | 1:N | 每次实际执行或整体重试追加一个 |
 | Actor/Task → Asset | 1:N | 每个 Asset 必须有所有者和所属 Task |
 | ToolRun → Asset | 1:0..N | GENERATED Asset 有一个 producer；UPLOADED Asset 没有 producer |
@@ -729,7 +805,7 @@ ToolRun 状态只允许：
 | ToolResult → Asset | 1:N，经 ResultAssetLink | 当前 artifacts 只引用同 producer ToolRun 的 AVAILABLE GENERATED Asset |
 | ToolResult → Explanation | 1:N | 每次解释重试追加一个尝试 |
 | Explanation → LLMCall | 1:1 | 每个解释尝试只对应一次调用 |
-| LLMCall → AssistantMessage | 1:0..1 | 仅知识回答成功时产生 |
+| LLMCall → AssistantMessage | 1:0..1 | 知识回答或追问成功时产生 |
 
 ### 5.2 selected 引用
 
@@ -742,42 +818,38 @@ Task 的选择不是“最新创建”或“最后完成”的隐式规则：
 5. ToolRun 失败且没有 ToolResult 时，可以只选择该 ToolRun，用其错误解释 Task 失败。
 6. 知识问答和 NEEDS_INPUT 的两个引用均为空。
 
-这两组属于需要数据库优先直接保证的少量高价值复合外键：
-
-    Task(task_id, selected_tool_run_id)
-      → ToolRun(task_id, tool_run_id)
-
-    Task(task_id, selected_tool_run_id, selected_result_id)
-      → ToolResult(task_id, tool_run_id, result_id)
+MVP 起步实现优先采用 selected_tool_run_id → ToolRun.tool_run_id、selected_result_id → ToolResult.result_id 的简单外键，并在同一短事务中锁定目标行、校验 Task/ToolRun/Result 来源、再同时更新两个引用。只有阶段 1A 验证复合外键实现清晰、不会造成循环依赖或明显增加迁移复杂度时，才增加对应复合外键。
 
 ### 5.3 Asset 与 ToolResult 不混合
 
-ResultAssetLink 同时携带 task_id 和 tool_run_id，并分别对 ToolResult 与 Asset(task_id, producer_tool_run_id, asset_id) 使用复合外键。因此数据库可阻止：
+ResultAssetLink 只保存 result_id、asset_id 和展示顺序，避免重复保存可由 Result/Asset 推导的 task_id、tool_run_id。创建 Link 时，Application 在同一短事务中锁定 ToolResult、Asset、ToolRun 和 Task，并阻止：
 
 - ToolRun A 的 Result 引用 ToolRun B 的 Asset；
 - Task A 的 Result 引用 Task B 的 Asset；
-- 一个已属于旧 Result 的 Asset 被新 Result 重用；
+- 不同 ToolRun 的 Result 与 Asset 被错误组合；
 - 没有 producer ToolRun 的 UPLOADED Asset 被当作当前生成结果 artifact。
 
-Asset.status=AVAILABLE 需要在结果提交事务中锁定并复核；普通静态外键不能表达跨行状态条件。
+Asset.status=AVAILABLE 也在结果提交事务中锁定并复核。上述规则必须有自动化契约测试；阶段 1A 可以在实现清晰时再增加高价值复合外键，但不把它作为逻辑正确性的唯一保证。
 
-### 5.4 意图提取与执行输入链
+### 5.4 Chat Orchestration 与执行输入链
 
 自然语言 Tool 请求的数据链路为：
 
     Message(request_id)
-    → LLMCall(INTENT_AND_PARAMETER_EXTRACTION, request_id)
+    → LLMCall(CHAT_ORCHESTRATION, request_id)
     → structured_output_summary（候选）
     → TaskInputRevision.raw_input
     → TaskInputRevision.normalized_input
     → ToolRun.execution_input
     → MaterialTool.execute
 
-- LLMCall 摘要可以表达候选 tool_id、值/单位、requested outputs、missing/ambiguous fields；
-- TaskInputRevision.source_llm_call_id 用于追溯提取来源；
+- LLMCall 摘要可以表达候选 tool_id、值/单位、requested outputs、missing/ambiguous fields 和追问建议；
+- 同一次调用若判定无需 Tool，可以直接生成知识回答 AssistantMessage；
+- TaskInputRevision.source_llm_call_id 用于追溯编排来源；
 - Application 必须把 LLM 候选转成 raw_input，并执行确定性标准化和完整校验后才能形成 normalized_input；
 - ToolRun.execution_input 是唯一 attempt 级执行载荷，不能反向覆盖 Revision；
-- 直接结构化请求或完全确定性的补充可以不创建意图提取 LLMCall，source_llm_call_id 为空。
+- 直接结构化请求或完全确定性的补充可以不创建 CHAT_ORCHESTRATION LLMCall，source_llm_call_id 为空；
+- 当前不固定增加第二次 KNOWLEDGE_ANSWER 调用；若阶段 1A 真实质量验证不足，再重新评估拆分。
 
 ### 5.5 只请求性能的中间 SEM
 
@@ -791,8 +863,8 @@ Asset.status=AVAILABLE 需要在结果提交事务中锁定并复核；普通静
 
 ### 5.6 NEEDS_INPUT 与幂等
 
-- NEEDS_INPUT 恢复保留 Task，追加带新 request_id 的 User Message、TaskInputRevision 和来源关联。
-- 自然语言补充可以创建新的 INTENT_AND_PARAMETER_EXTRACTION LLMCall 并由新 Revision 引用；确定性补充可以不调用 LLM。
+- NEEDS_INPUT 恢复保留 Task，追加带新 request_id 的 User Message 和包含 source_message_ids 的 TaskInputRevision。
+- 自然语言补充可以创建新的 CHAT_ORCHESTRATION LLMCall 并由新 Revision 引用；确定性补充可以不调用 LLM。
 - 不覆盖旧 Message 或 Revision。
 - 同一补充 operation/key/digest 命中 IdempotencyRecord 时，直接返回原 Task 当前事实。
 - 唯一约束冲突必须先读取既有 request_digest；相同则复用，差异则冲突。
@@ -813,6 +885,7 @@ Asset.status=AVAILABLE 需要在结果提交事务中锁定并复核；普通静
 | error_code、safe_error_message（Task/ToolRun/Asset/Explanation/LLMCall） | 普通列 | 高频排错 |
 | TaskInputRevision.raw_input | JSONB object | Tool 特有原始结构 |
 | TaskInputRevision.normalized_input | JSONB object | Tool 特有标准化结构 |
+| TaskInputRevision.source_message_ids | 受控 JSONB ID array 或 PostgreSQL ID array | MVP 轻量来源追溯；物理类型留阶段 1A |
 | missing_fields | text array | 小集合、常判断是否为空 |
 | ambiguous_fields、validation_errors | JSONB array | 结构化详情会演进 |
 | ToolRun.requested/completed/failed outputs | text array | 需要集合约束，不使用任意 JSON |
@@ -823,10 +896,10 @@ Asset.status=AVAILABLE 需要在结果提交事务中锁定并复核；普通静
 | ToolResult.data | JSONB object | Tool 特有结构化结果 |
 | ToolResult.warnings | JSONB array | 警告集合会扩展 |
 | ToolResult.provenance | JSONB object | 低频、版本化来源详情 |
-| ToolResult.error | JSONB object/空 | Result 级可变错误详情 |
+| ToolResult.error | JSONB object/空 | Result 级结构化错误详情 |
 | ToolResult.artifacts | 关系投影 | ResultAssetLink + Asset，保留外键完整性 |
 | LLM generation_parameters | JSONB object | provider 参数存在差异 |
-| LLM structured_output_summary | JSONB object/空 | 意图、候选 Tool/参数/单位/outputs/missing/ambiguous 的安全摘要 |
+| LLM structured_output_summary | JSONB object/空 | 路由、候选 Tool/参数/单位/outputs/missing/ambiguous、追问和安全回答摘要 |
 | LLM usage | JSONB object | MVP 不计费，provider 字段存在差异 |
 | Message.content_text | 普通 text | 展示、检索和不可变事实 |
 
@@ -838,7 +911,7 @@ Asset.status=AVAILABLE 需要在结果提交事务中锁定并复核；普通静
 4. 不在 MVP 为 JSONB 建通用 GIN 索引；只有出现稳定查询路径后再增加表达式或局部索引。
 5. diagnostics 保持主要步骤摘要，不保存完整 Trace/Span、Tensor 统计或模型激活。
 6. JSONB 中禁止 object_key、密钥、完整 Prompt、图片 bytes 和敏感用户数据。
-7. LLM structured_output_summary 只保留安全候选摘要；TaskInputRevision 才是 Application 处理后的输入快照，ToolRun.execution_input 才是实际执行载荷。
+7. LLM structured_output_summary 只保留安全编排摘要；TaskInputRevision 才是 Application 处理后的输入快照，ToolRun.execution_input 才是实际执行载荷。
 
 ### 6.3 outputs 为什么不用 JSONB
 
@@ -849,11 +922,11 @@ requested/completed/failed outputs 是每个 ToolRun/ToolResult 都存在的公�
 - completed/failed 是 requested 子集；
 - 状态与集合一致。
 
-因此已确认使用 PostgreSQL text array。它比三张输出明细表简单，又比 JSONB 更容易做集合检查。当前不为数组建立 GIN 索引，因为 MVP 没有“按某个 output 搜索所有历史结果”的实际查询。
+因此本轮继续使用 PostgreSQL text array。它比三张输出明细表简单，又比 JSONB 更容易做集合检查。当前不为数组建立 GIN 索引，因为 MVP 没有“按某个 output 搜索所有历史结果”的实际查询。
 
 ## 7. 唯一约束、外键与检查约束
 
-### 7.1 数据库优先直接保证的高价值不变量
+### 7.1 数据库优先直接保证的基础不变量
 
 | 不变量 | 逻辑约束 |
 |---|---|
@@ -862,10 +935,10 @@ requested/completed/failed outputs 是每个 ToolRun/ToolResult 都存在的公�
 | ToolRun attempt_no 唯一 | (task_id, attempt_no) UNIQUE |
 | Asset object_key 唯一 | object_key UNIQUE |
 | 每个 ToolRun 最多一个 ToolResult | ToolResult.tool_run_id UNIQUE |
-| ResultAssetLink 不混合不同 Task/ToolRun 的生成 Asset | Link 对 ToolResult(task_id, tool_run_id, result_id) 和 Asset(task_id, producer_tool_run_id, asset_id) 使用复合外键 |
-| Task selected ToolRun/Result 来源一致 | Task 对 ToolRun(task_id, tool_run_id) 和 ToolResult(task_id, tool_run_id, result_id) 使用复合外键 |
+| ResultAssetLink 唯一引用 | (result_id, asset_id) PRIMARY KEY、(result_id, artifact_order) UNIQUE |
+| Task selected 引用存在 | selected_tool_run_id、selected_result_id 使用简单可空外键 |
 
-数据库还应直接保证主键、必要普通外键、ResultAssetLink 主键/asset_id 唯一、(result_id, attempt_no)、非空 LLM Message/Explanation 的 llm_call_id 唯一，以及简单行内 CHECK。这些约束具有明确业务价值，不是为了重复所有权而堆叠候选键。
+数据库还应直接保证主键、必要普通外键、非空 LLM Message/Explanation 的 llm_call_id 唯一，以及简单行内 CHECK。这些约束具有明确业务价值，不是为了重复所有权而堆叠候选键。
 
 ### 7.2 Application 短事务校验的冗余一致性
 
@@ -873,13 +946,15 @@ requested/completed/failed outputs 是每个 ToolRun/ToolResult 都存在的公�
 
 - Message.actor_id 与其 Task/Conversation.actor_id 一致；
 - Message、TaskInputRevision、ToolRun、LLMCall 的 request_id 与当前操作关联正确；
-- TaskInputRevision.source_llm_call_id 属于同一 Task/request，且 purpose 为 INTENT_AND_PARAMETER_EXTRACTION；
-- TaskInputRevisionMessage 中的 Message 与 Revision 属于同一 Task；
+- TaskInputRevision.source_message_ids 中每个 Message 属于同一 Task 和 Conversation；
+- TaskInputRevision.source_llm_call_id 属于同一 Task/request，且 purpose 为 CHAT_ORCHESTRATION；
 - LLMCall.conversation_id 与 Task.conversation_id 一致；
-- KNOWLEDGE_ANSWER、TOOL_RESULT_EXPLANATION 和 INTENT_AND_PARAMETER_EXTRACTION 的输入/输出实体匹配 purpose；
+- CHAT_ORCHESTRATION、TOOL_RESULT_EXPLANATION 的输入/输出实体匹配 purpose；
 - ToolRun.task_input_revision_id 属于同一 Task，execution_input 由该 Revision 的 normalized_input 生成；
 - GENERATED Asset 的 producer ToolRun 属于同一 Task；UPLOADED Asset 没有 producer；
 - ToolResult.actor_id、tool_id、tool_version、schema_version 与 Task/ToolRun 重复快照一致；
+- Task.selected_tool_run_id 属于该 Task，selected_result_id 属于 selected ToolRun；
+- ResultAssetLink 的 Result 与 Asset 属于同一 Task，且 Result.tool_run_id 等于 Asset.producer_tool_run_id；
 - Explanation.task_id、result_id、llm_call_id 属于同一解释尝试；
 - IdempotencyRecord 的可选 message/revision/tool_run/explanation 引用属于同一 Task/Actor。
 
@@ -904,7 +979,7 @@ requested/completed/failed outputs 是每个 ToolRun/ToolResult 都存在的公�
 - Explanation 只读取已提交 ToolResult；
 - 并发分配 revision、attempt_no 和 explanation attempt_no 时正确处理唯一冲突。
 
-阶段 1A 不要求使用数据库触发器，也不要求把所有冗余一致性升级为复合外键。优先采用直接外键、上述少量高价值复合约束、短事务与 Repository 条件更新。
+阶段 1A 不要求使用数据库触发器，也不要求把 selected 来源或 ResultAssetLink 来源一开始就升级为复合外键。优先采用简单主键/外键、必要唯一约束、短事务锁定或条件更新和自动化契约测试。
 
 ## 8. 索引建议
 
@@ -921,7 +996,7 @@ requested/completed/failed outputs 是每个 ToolRun/ToolResult 都存在的公�
 | stale Asset | Asset(status, pending_since)；可做 PENDING/ORPHANED 局部索引 | 恢复与 orphan 扫描 |
 | object_key 查找 | Asset(object_key) UNIQUE | Storage 回查与完整性 |
 | ToolRun 的 Result | ToolResult(tool_run_id) UNIQUE | 一次运行最多一个结果 |
-| Result/语言的最近成功 Explanation | NaturalLanguageExplanation(result_id, language, completed_at DESC, explanation_id DESC)，status=SUCCEEDED 局部索引 | 已确认确定性读取规则 |
+| Result/语言的最近成功 Explanation | NaturalLanguageExplanation(result_id, language, completed_at DESC, explanation_id DESC)，status=SUCCEEDED 局部索引 | 确定性读取规则 |
 | Task 的 LLM 调用 | LLMCall(task_id, created_at, llm_call_id) | 知识问答/解释排错 |
 | 幂等命中 | IdempotencyRecord(actor_id, operation, idempotency_key) UNIQUE | 并发去重 |
 
@@ -979,16 +1054,21 @@ MVP 不默认为 sha256 建索引，原因：
 
 这些实体必须共同成功，否则会出现无消息 Task、无 Task 消息或不能重放的幂等占位。意图解析 LLM 网络调用不进入该事务。
 
-### 9.3 意图与参数提取 LLMCall
+### 9.3 Chat Orchestration LLMCall
 
-自然语言请求在 Task/User Message 已提交后使用“准备短事务 → 网络调用 → 终结短事务”：
+自然语言请求在 Task/User Message 已提交后只使用一次“准备短事务 → 网络调用 → 终结短事务”的 CHAT_ORCHESTRATION：
 
-1. 准备事务创建 LLMCall PENDING，purpose=INTENT_AND_PARAMETER_EXTRACTION，并保存 task_id、conversation_id、request_id、模板/模型/参数安全元数据。
-2. 在数据库事务外调用 LLM，提取知识/Tool 意图、候选 tool_id、参数值/单位、requested outputs 和 missing/ambiguous fields。
+1. 准备事务创建 LLMCall PENDING，purpose=CHAT_ORCHESTRATION，并保存 task_id、conversation_id、request_id、模板/模型/参数安全元数据。
+2. 在数据库事务外调用 LLM；该调用返回以下三类结果之一：
+   - 无需 Tool：直接给出知识回答；
+   - 需要 Tool：给出 tool_id、候选参数、requested_outputs；
+   - Tool 意图明确但缺失/歧义：给出候选参数、missing/ambiguous fields 和追问建议。
 3. 终结事务保存 LLMCall SUCCEEDED/FAILED、耗时、错误及 structured_output_summary；不保存完整 Prompt 或 provider 响应。
-4. Application 在事务外把成功候选执行确定性标准化和校验，再进入 Revision 事务。
+4. 无需 Tool 且调用成功时，同一终结短事务创建 AssistantMessage 并将 Task 置为 SUCCEEDED。
+5. 需要 Tool 时，Application 在事务外把成功候选执行确定性标准化和校验，再进入 Revision 事务。
+6. 缺失/歧义时，追问 AssistantMessage、Revision 和 Task NEEDS_INPUT 在事务 2 中共同提交，并继续引用同一 LLMCall。
 
-直接结构化请求或完全确定性的补充可以跳过该 LLMCall。失败意图调用不创建伪造 Revision；Task 保存可定位错误或进入明确的恢复路径。
+直接结构化请求或完全确定性的补充可以跳过该 LLMCall。调用失败时保存 LLMCall/Task 错误，不创建伪造 Revision 或 AssistantMessage。当前不固定增加第二次 KNOWLEDGE_ANSWER；只有后续真实质量验证不足时才重新评估拆分。
 
 ### 9.4 事务 2：NEEDS_INPUT revision 追加
 
@@ -997,11 +1077,12 @@ MVP 不默认为 sha256 建索引，原因：
 - 新 IdempotencyRecord；
 - 新带 request_id 的 User Message；
 - 新 TaskInputRevision，保存 request_id 和可空 source_llm_call_id；
-- TaskInputRevisionMessage 来源关联；
+- TaskInputRevision.source_message_ids；
+- 缺失/歧义时可选的追问 AssistantMessage，并引用同一 CHAT_ORCHESTRATION LLMCall；
 - Task.current_status 更新为 NEEDS_INPUT、RUNNING 或 FAILED；
 - 必要的安全校验错误。
 
-同 key 同 digest 命中既有记录时，这些实体一个也不追加。全量标准化在事务前完成，事务只保存 Application 已处理快照；不锁表等待 LLM。source_llm_call_id 只用于来源排错，不能让 LLM 候选绕过最终校验。
+同 key 同 digest 命中既有记录时，这些实体一个也不追加。全量标准化在事务前完成，事务只保存 Application 已处理快照；不锁表等待 LLM。事务内校验 source_message_ids 中所有 Message 均属于同一 Task 和 Conversation。source_llm_call_id 只用于来源排错，不能让 LLM 候选绕过最终校验。
 
 初次解析即发现缺失/歧义时，也使用相同 Revision 事务保存 revision 1。初次输入完整合法时，可在事务 3 中把 revision 1 与 ToolRun 一起提交。
 
@@ -1009,7 +1090,7 @@ MVP 不默认为 sha256 建索引，原因：
 
 实际执行前的短事务共同提交：
 
-- 若尚无最终合法 Revision，则创建该 TaskInputRevision 及来源关联；
+- 若尚无最终合法 Revision，则创建该 TaskInputRevision，并校验/保存 source_message_ids；
 - 创建新 ToolRun，保存当前 request_id、分配 attempt_no/tool/version/schema，并写入从该 Revision 派生的 execution_input；
 - 显式重试时同时创建/绑定 IdempotencyRecord；
 - Task 进入 RUNNING；
@@ -1048,7 +1129,8 @@ MinIO put/head/delete 发生在这些事务之间，不跨事务持锁。状态�
 - 创建 ResultAssetLink；
 - 将 ToolRun 更新到 SUCCEEDED/PARTIALLY_SUCCEEDED/FAILED；
 - 更新 Task.current_status、selected_tool_run_id、selected_result_id 和错误；
-- 复核输出集合、版本、ResultAssetLink 来源复合外键和 selected 来源复合外键。
+- 复核输出集合、版本、Result/Asset/ToolRun/Task 来源一致性和 selected 来源一致性；
+- 使用简单外键、必要唯一约束、行锁或条件更新防止并发写入混搭。
 
 这组事实不能拆开，否则可能出现 Task 指向不存在的 Result、Result 引用非 AVAILABLE Asset，或 ToolRun 已成功但 Result 未提交。
 
@@ -1066,16 +1148,13 @@ MinIO put/head/delete 发生在这些事务之间，不跨事务持锁。状态�
 
 ToolResult 与 ToolRun 不因解释失败而改写。重试继续引用同一 result_id。
 
-### 9.10 事务 8：知识问答 AssistantMessage/LLMCall + Task
+### 9.10 对话时间线读取投影
 
-意图提取 LLMCall 已判定为知识问答后，回答调用使用“准备短事务 → 网络调用 → 终结短事务”：
+时间线是查询层组装，不是新的写入事务或业务实体。查询层分别读取 Message、Task/ToolRun、ToolResult、ResultAssetLink/Asset 和 NaturalLanguageExplanation。Tool 路径先按 Task 聚合，再计算稳定锚点：优先取发起该 Task 的初始 UserMessage.created_at，无法使用时取 Task.created_at；Task.updated_at 只表示当前事实更新时间，不能参与顶层位置计算。
 
-1. 创建 LLMCall PENDING，purpose=KNOWLEDGE_ANSWER，并保存当前 request_id。
-2. 在事务外调用 LLM。
-3. 成功终结事务共同创建带同 request_id 的 AssistantMessage、置 LLMCall SUCCEEDED、置 Task SUCCEEDED。
-4. 失败终结事务置 LLMCall/Task FAILED，不创建 AssistantMessage。
+Task 项内部按来源关系和稳定时间排序 ToolRun、ToolResult、Asset 与 Explanation。知识回答 AssistantMessage 仍按 Message.created_at 独立进入时间线；相同顶层时间戳使用固定资源类型优先级和资源 ID 排序。ToolResult/Explanation 不复制为 AssistantMessage；未来简短助手气泡也只作为投影返回。
 
-整个路径不创建 ToolRun、Asset、ToolResult 或 NaturalLanguageExplanation。
+具体公共 API 响应结构留到第四节 A。本节只要求查询实现能够在不复制正式事实的前提下返回统一时间线。
 
 ## 10. 主要场景的数据落点
 
@@ -1085,33 +1164,34 @@ ToolResult 与 ToolRun 不因解释失败而改写。重试继续引用同一 re
     → Conversation
     → User Message(request_id)
     → Task
-    → LLMCall(INTENT_AND_PARAMETER_EXTRACTION, request_id)
-    → LLMCall(KNOWLEDGE_ANSWER)
+    → LLMCall(CHAT_ORCHESTRATION, request_id)
     → Assistant Message(request_id)
 
-Task selected 引用为空。意图提取摘要只保存安全结构化候选；任一 LLMCall 失败时都不伪造后续事实。
+Task selected 引用为空。同一次 CHAT_ORCHESTRATION 完成路由和知识回答；失败时不伪造 AssistantMessage。
 
 ### 10.2 NEEDS_INPUT 与恢复
 
 初次不完整：
 
     User Message(request_id)
-    → LLMCall(INTENT_AND_PARAMETER_EXTRACTION，可选)
-    → TaskInputRevision revision 1(request_id, source_llm_call_id)
+    → LLMCall(CHAT_ORCHESTRATION，可选)
+    → TaskInputRevision revision 1(request_id, source_llm_call_id, source_message_ids)
+    → Assistant Message（追问，可选）
     → Task NEEDS_INPUT
     → 无 ToolRun
 
 补充后仍不完整：
 
     新 User Message(request_id)
-    → 新意图提取 LLMCall（适用时）
-    → TaskInputRevision revision 2(request_id, source_llm_call_id)
+    → 新 CHAT_ORCHESTRATION LLMCall（适用时）
+    → TaskInputRevision revision 2(request_id, source_llm_call_id, source_message_ids)
+    → 新 Assistant Message（继续追问，可选）
     → Task 仍 NEEDS_INPUT
 
 补充后完整合法：
 
     新 User Message(request_id)
-    → TaskInputRevision revision 3(request_id, source_llm_call_id 可空)
+    → TaskInputRevision revision 3(request_id, source_llm_call_id 可空, source_message_ids)
     → Task RUNNING
     → 新 ToolRun
 
@@ -1177,7 +1257,31 @@ Task selected 引用为空。意图提取摘要只保存安全结构化候选；
     + 不创建 ToolRun
     + 不修改 ToolResult
 
-所有失败和成功尝试保留。MVP 已确认不增加 selected_explanation_id；展示层对同一 result_id/language 过滤 SUCCEEDED，并按 completed_at DESC、explanation_id DESC 确定性读取最近一次成功解释。ToolResult 始终是事实来源。
+所有失败和成功尝试保留。本轮继续不增加 selected_explanation_id；展示层对同一 result_id/language 过滤 SUCCEEDED，并按 completed_at DESC、explanation_id DESC 确定性读取最近一次成功解释。ToolResult 始终是事实来源。
+
+### 10.9 统一聊天时间线
+
+查询层的数据落点为：
+
+```text
+UserMessage / AssistantMessage
++ Task / ToolRun 当前状态
++ ToolResult 摘要
++ ResultAssetLink → Asset 引用
++ NaturalLanguageExplanation
++ Task/ToolResult/Explanation 错误或部分成功信息
+→ 统一时间线投影
+```
+
+- 知识问答的正式回答只来自 AssistantMessage。
+- Tool 路径的正式事实只来自 ToolResult、Asset 和 NaturalLanguageExplanation。
+- ToolResult/Explanation 不复制到 Message；简短助手气泡仅为投影。
+- Tool 路径以 Task 为聚合项，初始 UserMessage 是该项的发起上下文；Task 当前状态、selected ToolRun、历史 ToolRun、Result、Asset、Explanation、错误和部分成功信息均在该项内部展示。
+- Task 项的 anchor_at 优先取初始 UserMessage.created_at，无法使用时回退到 Task.created_at；Task.updated_at、Tool 重试和 Explanation 重试不得改变 anchor_at。
+- ToolRun 在 Task 项内部按 created_at/attempt_no/tool_run_id 排序；ToolResult 和 Asset 跟随来源 ToolRun；Explanation 按 created_at/completed_at/explanation_id 在对应 Result 内排序。
+- 知识回答 AssistantMessage 按 Message.created_at 独立展示；顶层时间相同时按固定资源类型优先级和资源 ID 稳定排序。
+- Asset 默认跟随关联 ToolResult 展示，避免把同一文件同时作为独立顶层事实和结果附件重复显示。
+- 公共 API 的 TimelineItem 字段、分页和错误包络留到第四节 A。
 
 ## 11. 登录、Tool 扩展与 SSE 兼容边界
 
@@ -1188,7 +1292,7 @@ Task selected 引用为空。意图提取摘要只保存安全结构化候选；
 - 不回写或迁移每一条历史业务记录；资源仍以 actor_id 为稳定所有权锚点。
 - Task 查询、Conversation 查询和 Asset 下载必须先验证当前 ActorContext 是否拥有目标 actor_id；未来可通过 Actor.user_id 识别已认领身份。
 - 认证令牌、密码、角色矩阵、多租户、project_id 和 tenant_id 不进入本节。
-- 已确认一个 user_id 可以关联多个既有 actor_id，Actor.user_id 不设唯一约束。授权查询需要解析“该用户已安全认领的 Actor 集合”。
+- 本轮继续保留一个 user_id 可以关联多个既有 actor_id 的规则，Actor.user_id 不设唯一约束。授权查询需要解析“该用户已安全认领的 Actor 集合”。
 
 ### 11.2 未来上传资产边界
 
@@ -1214,31 +1318,33 @@ Task selected 引用为空。意图提取摘要只保存安全结构化候选；
 - 不建立 Event、TaskEvent、Event Store 或进度历史表。
 - 进度仍由 TaskProgressReporter.report(task_id, tool_run_id, step, status, message, progress) 提供。
 - SSE Adapter 未来只消费进度报告；断线、丢失或乱序不改变业务事实。
-- Task、ToolRun、Asset、ToolResult、Explanation 与 LLMCall 是最终事实来源。
+- Message、Task、ToolRun、Asset、ToolResult、Explanation 与 LLMCall 是最终事实来源。
 - 客户端重新连接时读取当前事实，而不是要求 MVP 事件重放。
 
 ## 12. 阶段 1A 待验证事项
 
 以下只是在阶段 1A 实施前/中需要验证的逻辑门槛，不是本轮实施计划：
 
-1. PostgreSQL/ORM 只实现并验证两类高价值复合来源约束：Task selected 引用和 ResultAssetLink 生成资产来源；不把全部所有权重复列升级为复合候选键。
-2. Task selected 引用与 ToolRun → Task 的循环插入顺序使用可空后更新或等价简单方式，不要求为了逻辑模型引入复杂迁移技巧。
-3. 已确认的 PostgreSQL text array 及 requested/completed/failed 集合 CHECK 能正确映射。
-4. 并发创建 revision、ToolRun attempt_no、Explanation attempt_no 时的锁粒度与唯一冲突恢复。
-5. 同幂等 key 并发请求只能创建一个 Message/Revision/ToolRun/Explanation。
-6. ResultAssetLink 能阻止 Result 引用不同 task_id 或不同 producer_tool_run_id 的 Asset。
-7. GENERATED/UPLOADED 与 producer_tool_run_id 的行内 CHECK 生效；MVP 测试只创建 GENERATED。
-8. Asset PENDING/AVAILABLE/FAILED/ORPHANED 的条件更新、stale 查询和 object_key 冲突恢复。
-9. MinIO 成功但 AVAILABLE 提交失败、broken AVAILABLE reference 的恢复。
-10. SHA-256 无索引时的实际恢复查询足够；只有真实慢查询才添加。
-11. JSONB Schema 校验覆盖 TaskInputRevision、ToolRun.execution_input/diagnostics、ToolResult 和 LLM structured_output_summary。
-12. INTENT_AND_PARAMETER_EXTRACTION LLMCall 能记录安全候选摘要，并通过 source_llm_call_id 区分提取错误与 Application 校验错误。
-13. Message/TaskInputRevision/ToolRun/LLMCall.request_id 能与结构化日志串联，且在无实际查询需求时不建立额外索引。
-14. Task 不含 duration_ms；ToolRun、LLMCall、Explanation 耗时与 Task 墙钟时间语义清晰。
-15. 不保存完整 Prompt，只保存已确认的模板身份/版本、digest、输入引用、模型、参数、usage 和安全摘要。
-16. 一个 user_id 关联多个 actor_id 时的安全认领与访问控制查询。
-17. 数据保留、硬删除和 MinIO 删除补偿在正式登录/合规设计前保持 RESTRICT。
-18. ID 的物理类型、时区时间类型、digest 存储类型等在实施前统一，但不改变本文逻辑身份。
+1. `TaskInputRevision.source_message_ids` 在受控 JSONB ID array 与 PostgreSQL ID array 之间选择物理类型，并验证 ORM 映射、非空校验和同 Task/Conversation 来源校验是否清晰。
+2. Task selected 引用优先使用简单外键、行锁/条件更新和 Application 校验；只有复合外键不会造成循环依赖或明显增加迁移复杂度时，才增加高价值复合约束。
+3. ResultAssetLink 优先使用 result_id/asset_id 简单外键和结果提交短事务校验；只有实现清晰时，才考虑增加 Result/Asset/ToolRun 来源复合外键。
+4. PostgreSQL text array 及 requested/completed/failed 集合 CHECK 能正确映射。
+5. 并发创建 revision、ToolRun attempt_no、Explanation attempt_no 时的锁粒度与唯一冲突恢复。
+6. 同幂等 key 并发请求只能创建一个 Message/Revision/ToolRun/Explanation。
+7. 自动化契约测试覆盖 Task selected 跨 Task、selected Result 跨 ToolRun、ResultAssetLink 跨 Task/ToolRun、source_message_ids 跨 Task/Conversation 的非法引用。
+8. GENERATED/UPLOADED 与 producer_tool_run_id 的行内 CHECK 生效；MVP 测试只创建 GENERATED。
+9. Asset PENDING/AVAILABLE/FAILED/ORPHANED 的条件更新、stale 查询和 object_key 冲突恢复。
+10. MinIO 成功但 AVAILABLE 提交失败、broken AVAILABLE reference 的恢复。
+11. SHA-256 无索引时的实际恢复查询足够；只有真实慢查询才添加。
+12. JSONB Schema 校验覆盖 TaskInputRevision、ToolRun.execution_input/diagnostics、ToolResult 和 LLM structured_output_summary。
+13. CHAT_ORCHESTRATION 单次调用的知识回答、Tool 候选和追问三类输出能稳定映射；只有质量验证不足时才评估拆分。
+14. Message/TaskInputRevision/ToolRun/LLMCall.request_id 能与结构化日志串联，且在无实际查询需求时不建立额外索引。
+15. 统一时间线以初始 UserMessage.created_at（回退 Task.created_at）作为 Tool Task 稳定锚点，Task.updated_at 不参与顶层位置计算；ToolRun/Result/Asset/Explanation 在 Task 项内部确定性排序，且不复制 ToolResult/Explanation 为 Message。
+16. Task 不含 duration_ms；ToolRun、LLMCall、Explanation 耗时与 Task 墙钟时间语义清晰。
+17. 不保存完整 Prompt，只保存模板身份/版本、digest、输入引用、模型、参数、usage 和安全摘要。
+18. 一个 user_id 关联多个 actor_id 时的安全认领与访问控制查询。
+19. 数据保留、硬删除和 MinIO 删除补偿在正式登录/合规设计前保持 RESTRICT。
+20. ID 的物理类型、时区时间类型、digest 存储类型等在实施前统一，但不改变本文逻辑身份。
 
 ## 13. 验收场景
 
@@ -1246,43 +1352,55 @@ Task selected 引用为空。意图提取摘要只保存安全结构化候选；
 2. 一个未来 user_id 可以关联多个 actor_id，Actor.user_id 不设唯一约束。
 3. Conversation 消息能按 created_at + message_id 稳定排序。
 4. Message、TaskInputRevision、ToolRun 和 LLMCall 保存 request_id，且不建立 Request 表。
-5. 自然语言输入先创建 purpose=INTENT_AND_PARAMETER_EXTRACTION 的 LLMCall。
-6. 意图调用的 structured_output_summary 能表达候选意图、tool_id、值/单位、requested outputs 和 missing/ambiguous fields，但不保存完整 Prompt/provider 响应。
-7. 自然语言形成的 TaskInputRevision 可以通过 source_llm_call_id 追溯意图提取调用。
-8. 直接结构化请求或确定性补充可以令 source_llm_call_id 为空。
-9. LLM 候选不能直接成为执行事实；TaskInputRevision 保存 Application 处理后的 raw_input/normalized_input。
-10. 普通知识问答使用意图提取与知识回答 LLMCall，只创建 AssistantMessage，不创建 ToolRun/Asset/ToolResult。
-11. LLM 失败时不创建伪造的 Revision 或 AssistantMessage，并保存安全错误。
-12. 缺少输入时 Task 为 NEEDS_INPUT，不创建 ToolRun。
-13. 补充输入保留 task_id，追加 Message 与 TaskInputRevision，不覆盖旧快照。
-14. 同一补充幂等 key/digest 重放不追加 Message 或 Revision。
-15. 每次实际 Tool 执行创建新 tool_run_id 和 Task 内唯一 attempt_no。
-16. ToolRun 通过 task_input_revision_id 追溯输入，只保存 execution_input 和可空 actual_runtime_parameters，不再保存 input_snapshot/normalized_input。
-17. execution_input 与实际传给 MaterialTool.execute 的载荷一致。
-18. 当前 SEM Asset 的 source_type=GENERATED 且 producer_tool_run_id 必填。
-19. 数据模型允许未来 source_type=UPLOADED 且 producer_tool_run_id 为空，但 MVP 不实现上传 API、Upload 实体或 ToolRunInputAssetLink。
-20. Actor/Task 可以拥有 Asset，ToolRun 只产生 0..N GENERATED Asset。
-21. ResultAssetLink 复合来源约束阻止不同 Task/ToolRun 的生成 Asset 与 Result 混合。
-22. Task selected_tool_run_id 和 selected_result_id 必须指向同一来源链。
-23. 只请求性能时，中间 SEM 仍保存为 producer_tool_run_id 指向本次 ToolRun 的 Asset。
-24. 中间 SEM AVAILABLE 而性能失败时，completed_outputs 仍为空且 Task FAILED。
-25. Asset 非 AVAILABLE 时不能建立成功 ResultAssetLink。
-26. object_key 全局唯一；API 投影不暴露 object_key。
-27. requested/completed/failed outputs 使用 PostgreSQL text array。
-28. 一个 ToolRun 最多产生一个 ToolResult。
-29. ToolResult 通过 ResultAssetLink 组装 artifacts，不把 asset_id 外键藏在 JSONB。
-30. ToolResult 成功而 Explanation 失败时，ToolRun/ToolResult 不改写，Task 部分成功。
-31. Explanation 重试引用同一 result_id，创建新的 explanation_id 和 llm_call_id。
-32. 不增加 selected_explanation_id；同一 Result/语言按 completed_at DESC、explanation_id DESC 读取最近一次成功解释。
-33. Task 只有 created_at/started_at/updated_at/completed_at，不保存 duration_ms；执行耗时保存在 ToolRun/LLMCall/Explanation。
-34. 数据库直接保证幂等、revision、attempt_no、object_key、单 Result、ResultAssetLink 来源和 selected 来源等高价值不变量。
-35. 重复所有权、LLM conversation、版本快照等一致性由 Application 短事务校验，不要求多层复合候选键。
-36. 整体 Tool 重试保留 task_id，新建 request_id/ToolRun/Asset/Result，旧事实不可变。
-37. 结构化日志和 TaskProgressReporter 不进入业务表。
-38. 不存在 model_version、InferenceRun、StageRun、PredictorRawOutput、Event 或状态历史实体。
-39. 新增第二个不同类型 Tool 不需要新增一套 Task/ToolRun/Asset/ToolResult 表。
-40. 未来 SSE 读取 TaskProgressReporter，最终状态仍从核心实体查询。
-41. 数据库事务不跨 Runtime、MinIO 或 LLM 网络调用。
+5. 自然语言输入创建 purpose=CHAT_ORCHESTRATION 的 LLMCall，不强制创建 INTENT_AND_PARAMETER_EXTRACTION → KNOWLEDGE_ANSWER 两步链路。
+6. 同一次 CHAT_ORCHESTRATION 能返回知识回答、Tool 候选或追问建议，并保存安全 structured_output_summary，不保存完整 Prompt/provider 响应。
+7. 普通知识问答成功时，一次 LLMCall 直接产生 AssistantMessage，不创建 ToolRun、Asset 或 ToolResult。
+8. Tool 请求使用同一次 LLMCall 的 tool_id、候选参数和 requested_outputs 创建 TaskInputRevision。
+9. 缺失或歧义时，同一次 LLMCall 可产生追问 AssistantMessage，Task 为 NEEDS_INPUT，不创建 ToolRun。
+10. LLM 失败时不创建伪造的 Revision 或 AssistantMessage，并保存安全错误。
+11. TaskInputRevision 保存非空 source_message_ids，能够追溯形成快照的 Message。
+12. source_message_ids 跨 Task 或跨 Conversation 的非法引用被 Application 短事务拒绝，并有自动化测试覆盖。
+13. 自然语言形成的 TaskInputRevision 可以通过 source_llm_call_id 追溯 CHAT_ORCHESTRATION；直接结构化请求或确定性补充可以为空。
+14. LLM 候选不能直接成为执行事实；TaskInputRevision 保存 Application 处理后的 raw_input/normalized_input。
+15. 补充输入保留 task_id，追加 Message 与 TaskInputRevision，不覆盖旧消息或旧 revision。
+16. 同一补充幂等 key/digest 重放不追加 Message 或 Revision。
+17. MVP 实体清单和 ER 图中不存在 TaskInputRevisionMessage；未来只有真实反查/审计需求时才升级。
+18. 每次实际 Tool 执行创建新 tool_run_id 和 Task 内唯一 attempt_no。
+19. ToolRun 通过 task_input_revision_id 追溯输入，只保存 execution_input 和可空 actual_runtime_parameters，不重复保存 input_snapshot/normalized_input。
+20. execution_input 与实际传给 MaterialTool.execute 的载荷一致。
+21. 当前 SEM Asset 的 source_type=GENERATED 且 producer_tool_run_id 必填。
+22. 数据模型允许未来 source_type=UPLOADED 且 producer_tool_run_id 为空，但 MVP 不实现上传 API、Upload 实体或 ToolRunInputAssetLink。
+23. Actor/Task 可以拥有 Asset，ToolRun 只产生 0..N GENERATED Asset。
+24. ResultAssetLink 继续保留，只保存 result_id、asset_id、展示顺序和创建时间，不重复保存 task_id/tool_run_id。
+25. 创建 ResultAssetLink 时，Application 在同一短事务中锁定并校验 Result、Asset、ToolRun、Task 来源一致。
+26. 自动化测试拒绝 Result 引用不同 Task 或不同 producer_tool_run_id 的 Asset。
+27. Task selected_tool_run_id 必须属于该 Task，selected_result_id 必须属于 selected ToolRun；跨 Task/ToolRun 非法引用被拒绝。
+28. selected 来源和 ResultAssetLink 来源优先使用简单外键、必要唯一约束、短事务锁/条件更新和契约测试保证；复合外键不是阶段 1A 起步强制项。
+29. 只请求性能时，中间 SEM 仍保存为 producer_tool_run_id 指向本次 ToolRun 的 Asset。
+30. 中间 SEM AVAILABLE 而性能失败时，completed_outputs 仍为空且 Task FAILED。
+31. Asset 非 AVAILABLE 时不能建立成功 ResultAssetLink。
+32. object_key 全局唯一；API 投影不暴露 object_key。
+33. requested/completed/failed outputs 使用 PostgreSQL text array。
+34. 一个 ToolRun 最多产生一个 ToolResult。
+35. ToolResult 通过 ResultAssetLink 组装 artifacts，不把 asset_id 外键藏在 JSONB。
+36. ToolResult 成功而 Explanation 失败时，ToolRun/ToolResult 不改写，Task 部分成功。
+37. Explanation 重试引用同一 result_id，创建新的 explanation_id 和 llm_call_id，不重新执行 Tool。
+38. 不增加 selected_explanation_id；同一 Result/语言按 completed_at DESC、explanation_id DESC 读取最近一次成功解释。
+39. 知识问答以 AssistantMessage 为正式回答事实；Tool 路径以 ToolResult、Asset 和 NaturalLanguageExplanation 为正式事实。
+40. ToolResult 和 Explanation 不复制进 Message；未来简短助手气泡只作为查询投影。
+41. 统一聊天时间线至少包含 UserMessage、AssistantMessage、Tool Task 状态、ToolResult 摘要、Asset 引用、Explanation、错误或部分成功信息。
+42. Tool Task 时间线项以初始 UserMessage.created_at 为稳定锚点，无法使用时回退到 Task.created_at；Task.updated_at 或后续重试不会使旧卡片移动。
+43. ToolRun 重试按 created_at/attempt_no/tool_run_id 在 Task 项内部排序，ToolResult/Asset 跟随来源 ToolRun，Explanation 在对应 Result 内按 created_at/completed_at/explanation_id 排序。
+44. 知识回答 AssistantMessage 按 Message.created_at 独立展示；相同顶层时间戳使用固定资源类型优先级和资源 ID 稳定排序。
+45. Task 只有 created_at/started_at/updated_at/completed_at，不保存 duration_ms；执行耗时保存在 ToolRun/LLMCall/Explanation。
+46. 数据库直接保证幂等、revision、attempt_no、object_key、单 Result 和必要普通外键/唯一约束。
+47. 重复所有权、LLM conversation、selected 来源、ResultAssetLink 来源和版本快照等一致性由 Application 短事务校验并由契约测试保护。
+48. 整体 Tool 重试保留 task_id，新建 request_id/ToolRun/Asset/Result，旧事实不可变。
+49. 结构化日志和 TaskProgressReporter 不进入业务表。
+50. 不存在 model_version、InferenceRun、StageRun、PredictorRawOutput、Event 或状态历史实体。
+51. 新增第二个不同类型 Tool 不需要新增一套 Task/ToolRun/Asset/ToolResult 表。
+52. 未来 SSE 读取 TaskProgressReporter，最终状态仍从核心实体查询。
+53. 数据库事务不跨 Runtime、MinIO 或 LLM 网络调用。
 
 ## 14. 已确认设计决定
 
@@ -1296,19 +1414,41 @@ Task selected 引用为空。意图提取摘要只保存安全结构化候选；
 
 ### 14.3 ToolResult artifacts 的关系表示
 
-已确认：保留 ResultAssetLink。它直接保证生成 Asset 与 Result 的 Task/ToolRun 来源一致，并支持一个 Tool 返回多个文件。
+已确认：保留 ResultAssetLink，以支持一个 ToolResult 关联多个 Asset。MVP 起步通过简单外键、Application 短事务校验、锁/条件更新和契约测试保证生成 Asset 与 Result 的 Task/ToolRun 来源一致；复合外键仅为阶段 1A 可选增强。
 
 ### 14.4 LLM Prompt 留存
 
-已确认：MVP 不保存完整 Prompt，只保存输入引用、模板身份/版本、prompt digest、generation parameters、模型标识、usage、耗时、structured output 安全摘要和安全错误。未来如确有科研复现需求，必须另行设计脱敏、保留期和访问控制，不能改变本基线的 MVP 默认。
+已确认：MVP 不保存完整 Prompt，只保存输入引用、模板身份/版本、prompt digest、generation parameters、模型标识、usage、耗时、structured output 安全摘要和安全错误。未来如确有科研复现需求，必须另行设计脱敏、保留期和访问控制。
 
 ### 14.5 Explanation 选择
 
 已确认：MVP 不增加 selected_explanation_id。展示层对同一 result_id 和 language 过滤 SUCCEEDED，并按 completed_at DESC、explanation_id DESC 确定性读取最近一次成功解释；ToolResult 始终是事实来源。
 
-本节没有待项目负责人确认的遗留设计选择。
+### 14.6 项目负责人本轮确认的五项设计
 
-## 15. 一致性与结束边界
+1. 知识问答、Tool 路由和追问默认由一次 CHAT_ORCHESTRATION 完成。
+2. ToolResult、Asset 和 NaturalLanguageExplanation 不复制为 AssistantMessage，由查询层组装统一聊天时间线。
+3. TaskInputRevision 使用 source_message_ids，MVP 不建立 TaskInputRevisionMessage。
+4. selected 来源和 ResultAssetLink 来源优先使用简单外键、短事务校验、锁或条件更新及自动化契约测试保证。
+5. 当前复杂度已经达到 MVP 所需收敛程度，不继续增加或删除核心实体。
+
+`source_message_ids` 的物理类型、两类复合外键是否值得增加、具体锁/条件更新写法以及 ID/时间/digest 物理类型仍属于阶段 1A 待验证事项，不影响本节已确认状态。
+
+## 15. 过度复杂度复核、一致性与结束边界
+
+### 15.1 过度复杂度复核
+
+1. **重复事实**：ToolResult、Asset、Explanation 不复制进 Message；ResultAssetLink 不重复保存 task_id/tool_run_id；ToolRun 不重复保存 Revision 的 raw/normalized input。
+2. **遥远未来实体**：删除强制 TaskInputRevisionMessage；不增加 Upload、ToolRunInputAssetLink、Event、StageRun、模型版本表或状态历史表。
+3. **数据库约束强度**：selected 来源与 ResultAssetLink 来源不强制起步使用复杂复合外键，优先采用简单外键、唯一约束、短事务校验、锁/条件更新和测试。
+4. **JSONB 边界**：关键 ID、状态、时间、版本、错误和文件元数据保持普通列；JSONB 只承载 Tool/LLM 特有且受 Schema 控制的内容。
+5. **ZTA35G 特例**：四维参数和性能字段保留在受控输入/输出 JSONB，不升级为平台核心普通列；公共列只保留跨 Tool 稳定关系。
+6. **未来扩展**：新 Tool 复用核心实体；登录增加 Actor 所有权校验；SSE 消费临时进度，不重写核心事实表。
+7. **全链路排错**：Task 定位稳定目标，ToolRun/diagnostics 定位执行，Asset 定位文件，ToolResult 定位结构化结果，LLMCall/Explanation 定位编排与解释；结合 request_id 和结构化日志可以串联完整链路。
+
+未发现仍需为 MVP 新增实体的真实查询需求。非阻塞实现选择已收敛到第 12 节“阶段 1A 待验证事项”，不继续扩张阶段 0。
+
+### 15.2 一致性与结束边界
 
 本文没有重新引入：
 
@@ -1330,7 +1470,8 @@ Task selected 引用为空。意图提取摘要只保存安全结构化候选；
     TaskInputRevision / IdempotencyRecord
     Task → 多个 ToolRun
     Message / TaskInputRevision / ToolRun / LLMCall request_id
-    INTENT_AND_PARAMETER_EXTRACTION LLMCall
+    CHAT_ORCHESTRATION LLMCall
+    TaskInputRevision.source_message_ids
     ToolRun.execution_input
     ToolRun diagnostics JSONB
     Asset producer_tool_run_id 可空
@@ -1341,4 +1482,4 @@ Task selected 引用为空。意图提取摘要只保存安全结构化候选；
     TaskProgressReporter 非持久化边界
     新 Tool、SSE 和登录系统的最小兼容边界
 
-本文未发现需要修改第一节或第二节已确认基线正文的真实逻辑冲突。第三节已完成简化和补充并确认为“已确认设计基线”；这不表示进入阶段 1。
+本文未发现需要修改第一节已确认基线正文或重写第二节其他技术正文的真实逻辑冲突。第二节只同步单次 CHAT_ORCHESTRATION 语义。第三节已经项目负责人确认，状态为“已确认设计基线”。本轮新增第四节 A，不创建第四节 B，不进入阶段 1，也不执行 git commit。
