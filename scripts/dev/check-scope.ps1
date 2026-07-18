@@ -65,7 +65,7 @@ $globalAllowedPaths = @(
     'docs/progress/phase-1-current-status.md'
 )
 
-# M0 is the only milestone configured in M0. G0 and M1-M16 are recognized so
+# M0 and M1 have reviewed exact allowlists. G0 and M2-M16 are recognized so
 # callers receive a stable configuration error until their exact plan allowlist
 # is reviewed and added; this deliberately avoids inventing future scope.
 $milestoneAllowlists = @{
@@ -77,6 +77,22 @@ $milestoneAllowlists = @{
         'environments/README.md'
         'scripts/dev/check-scope.ps1'
         'docs/acceptance/phase-1-checklist.md'
+    )
+    M1 = @(
+        'scripts/dev/check-scope.ps1'
+        'environments/materialsagent-backend.yml'
+        'backend/pyproject.toml'
+        'backend/src/materialsagent/__init__.py'
+        'backend/src/materialsagent/main.py'
+        'backend/src/materialsagent/api/__init__.py'
+        'backend/src/materialsagent/api/routes/__init__.py'
+        'backend/src/materialsagent/api/routes/health.py'
+        'backend/src/materialsagent/infrastructure/__init__.py'
+        'backend/src/materialsagent/infrastructure/config.py'
+        'backend/src/materialsagent/infrastructure/logging.py'
+        'backend/tests/conftest.py'
+        'backend/tests/unit/test_config.py'
+        'backend/tests/api/test_health.py'
     )
 }
 
