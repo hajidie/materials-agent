@@ -1,6 +1,6 @@
 # 阶段 1 当前执行状态
 
-> 本文件只保存当前状态、最近一次完成摘要和下一步。完整历史由未来经项目负责人验收后的 Git commit 保存。
+> 本文件只保存当前状态、最近一次工作单元摘要和下一步。完整历史由未来经项目负责人验收后的 Git commit 保存。
 
 ## 当前状态
 
@@ -8,39 +8,36 @@
 |---|---|
 | 当前阶段 | 阶段 1A |
 | 当前里程碑 | M2：PostgreSQL、MinIO 与基础持久化 |
-| 当前工作单元 | M2-B PostgreSQL、SQLAlchemy、Alembic 与 Actor |
-| 状态 | `READY_FOR_M2_B` |
-| 上一已完成工作单元 | M2-A |
+| 当前工作单元 | M2-C MinIO、StorageService 与依赖 ready 探针 |
+| 状态 | `READY_FOR_M2_C` |
+| 上一已完成工作单元 | M2-B |
 | 当前 branch | `main` |
-| Git 事实获取方式 | 本工作单元开始时重新执行 `git branch --show-current`、`git rev-parse HEAD`、`git log -1 --oneline`、`git status --short`、`git diff --check`、`git diff --cached --name-only` |
+| M2-B 起点 HEAD | `1e9313b61a4bee5689dd5eaa5930eaf4c9f608be` |
 | 已确认设计基线 | 第一节、第二节、第三节、第四节 A、第四节 B，共五份；本轮未修改 |
-| 阶段 1 实施计划路径 | `docs/superpowers/plans/2026-07-17-sem-mvp-phase-1-implementation-plan.md`（状态：已确认实施计划；本轮未修改） |
+| 阶段 1 实施计划 | `docs/superpowers/plans/2026-07-17-sem-mvp-phase-1-implementation-plan.md`；本轮未修改 |
 | 是否处于项目负责人暂停点 | 否 |
-| 更新时间 | `2026-07-18T16:44:56+08:00` |
+| 更新时间 | `2026-07-18T19:31:07+08:00` |
 
-## 最近一次完成摘要
+## M2-B 最近完成摘要
 
-- 工作单元边界：M2-A 已通过项目负责人审阅；本收尾对话只修正 `.env.example` 注释、补记完整 M1 回归、建立被 Git 忽略的本地 `.env` 并形成 M2-A 独立 commit。未实现数据库模型、Alembic、Actor、UnitOfWork、Repository、StorageService、Backend 依赖探针或 bucket 初始化，未开始 M2-B、M2-C 或 M3。
-- 起点门禁：branch 为 `main`，HEAD 为 `b4931011ddc4e1dcd792067270733edb66117f51`，最近提交为 `b493101 feat: add backend health skeleton`；开始时工作区干净、暂存区为空，六条 Git 门禁命令均符合项目负责人给定预期。
-- Docker 能力：Docker Client/Engine 为 `29.6.1`，Docker Desktop 为 `4.82.0 (233772)`，Docker Compose 为 `v5.3.0`，Engine 为 `linux/amd64`；开始前没有容器、Compose project、volume，宿主端口 `5432/9000/9001` 均无监听冲突。
-- PostgreSQL 镜像：使用 `postgres:17.10-bookworm@sha256:4f736ae292687621d4dbe0d499ffd024a36bd2ee7d8ca6f2ccd4c800f047b394`；本机标签 RepoDigest 精确包含批准 digest，平台为 `linux/amd64`。固定镜像内的 `pg_isready 17.10` 已用 `--pull never` 实测可用。
-- MinIO 镜像：使用 `minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e`；本机标签 RepoDigest 精确包含批准 digest，平台为 `linux/amd64`。固定镜像内的 `/usr/bin/curl 8.11.0` 已用 `--pull never` 实测可用。
-- Compose 配置：`docker-compose.yml` 的 project name 为 `materialsagent`，service 精确为 `minio,postgresql`，没有第三个 service；两项 image 同时保留批准 tag 与 digest，均设置 `platform: linux/amd64` 和 `pull_policy: never`。两次完整 `docker compose config` 均退出 0，脱敏配置摘要完全一致，SHA-256 均为 `2d30a4700f839e0c42f8f499efb0b6b2a3f8c201a4d80cc856fab1c6c72c43e3`。
-- 配置负面测试：在隔离子 PowerShell 中清除必填 `POSTGRES_PASSWORD` 后，`docker compose config --quiet` 退出 1，并明确报告该变量缺失；未启动容器、未创建 volume，仓库状态未变化。该负面测试在本地 `.env` 建立前完成，只使用安全占位值，未记录完整密码。
-- 端口与数据：PostgreSQL 为 `127.0.0.1:5432->5432`；MinIO API 为 `127.0.0.1:9000->9000`，Console 为 `127.0.0.1:9001->9001`。数据分别使用 `materialsagent_postgresql_data` 与 `materialsagent_minio_data` 两个稳定命名 volume，没有仓库 bind mount。
-- `.env.example`：仅因原文件缺少 Compose 所需的 MinIO API/Console 宿主端口变量而增加 `MINIO_API_PORT` 和 `MINIO_CONSOLE_PORT`；已有 `MINIO_ACCESS_KEY`/`MINIO_SECRET_KEY` 映射为容器内 `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD`，未重复增加同义凭据变量，未写入本机值或真实 Secret。
-- 本地配置连续性：已创建被 Git 忽略的根 `.env`，使用与 M2-A 首次初始化现有 PostgreSQL/MinIO volumes 完全相同的本地配置；未在仓库、本状态文件或汇报中记录凭据值。清除 Shell 同名变量后，`docker compose config --quiet` 退出 0，`docker compose up -d --pull never postgresql minio` 复用两个既有 volume 且未重建；PostgreSQL `pg_isready` 和 TCP 密码认证只读查询成功，MinIO ready 为 HTTP 200。随后 `docker compose down` 退出 0，容器为 0、两个 volume 保留；`.env` 未被跟踪、未暂存、未出现在 Git status。
-- 启动与健康：`docker compose up -d --pull never postgresql minio` 退出 0，未执行任何 pull。PostgreSQL 达到 `healthy` 且 `pg_isready` 退出 0；MinIO 达到 `healthy` 且 `/minio/health/ready` 返回 HTTP 200。未创建业务表、schema、migration、bucket 或对象。
-- 运行镜像身份：PostgreSQL 容器反查 image ID 为批准的 `sha256:4f736ae292687621d4dbe0d499ffd024a36bd2ee7d8ca6f2ccd4c800f047b394`，RepoDigest 与 `linux/amd64` 均匹配；MinIO 容器反查 image ID 为批准的 `sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e`，RepoDigest 与 `linux/amd64` 均匹配。结论来自运行容器与 image inspect，不只来自 Compose 文本。
-- 重启稳定性：`docker compose restart postgresql minio` 退出 0；两个服务重新达到 `healthy`，重启后的 `pg_isready` 再次退出 0，MinIO ready endpoint 再次返回 HTTP 200。
-- Backend 边界：未修改 `backend/**`。`backend/tests/api/test_health.py` 单独执行得到 `6 passed in 0.55s`；随后完整重新执行 `backend/tests/unit` 和 `backend/tests/api/test_health.py`，得到 `8 passed in 0.44s`、退出码 0。`/api/v1/health/ready` 仍保持 M1 的 HTTP 503、`NOT_READY`，尚未接入 PostgreSQL/MinIO 探针。
-- 停止与保留：验收后执行不带 `-v` 的 `docker compose down` 并退出 0；本项目运行容器和已停止容器均为 0，`5432/9000/9001` 无遗留监听；两个命名 volume 均保留，未执行 volume/image/system prune。
-- 范围检查：M2 修改前为 `SCRIPT_CONFIGURATION_ERROR`/6；加入 M2-A 精确 allowlist 后为 `SCOPE_OK M2`/0。临时根文件得到 `OUT_OF_SCOPE_CHANGES M2`/5 后已删除；M3 继续为 `SCRIPT_CONFIGURATION_ERROR`/6。M0、M1 规则及全局 current status 允许路径保持不变。
-- SEM 与 Git 边界：`scripts/dev/check-sem-integrity.ps1` 为 `SEM_INTEGRITY_OK`，仍为 57 个文件、2,043,071,133 字节、aggregate fingerprint `62bbb0878ed5d659490755e401fba0e3e09f1f36e3a67667ea04227927546b4a`。`git diff --check` 退出 0；本地 `.env` 被正确忽略，没有临时日志、临时 Compose 副本或 Backend/M2-B/M2-C 文件，暂存区为空。
-- 镜像操作：本轮未执行 `docker pull`、`docker compose pull`、镜像删除、重新打标签或 prune；所有临时能力检查和正式启动均使用 `--pull never`，未切换镜像版本。
-- 已知风险：两个命名 volume 保留了使用安全本地配置初始化的服务数据；PostgreSQL 初始化凭据只在空数据目录首次初始化时生效。被忽略的本地 `.env` 已固定同一套配置并完成复用验证，不得删除、提交或用不同凭据覆盖。M2-B 尚未开始，Backend ready 尚不能证明依赖可用。
-- 阻塞事项：无。M2-A 已通过项目负责人验收并准备形成独立 commit。
+- 验收、起点与范围：M2-B 已通过项目负责人验收。本工作单元从 `main` / `1e9313b61a4bee5689dd5eaa5930eaf4c9f608be` 开始，开始时工作区干净、暂存区为空。SQLAlchemy、Alembic、Actor、Repository、UnitOfWork 和幂等 bootstrap 已完成；未实现 MinIO SDK、StorageService、bucket 初始化或 ready 依赖探针，M2-C 尚未开始，未进入 M3。
+- 本地配置：根 `.env` 仍存在、由 `.gitignore` 命中、未被 Git 跟踪或显示在 status。Backend 与 Alembic 均通过同一 `load_settings()` 读取根 `.env`；显式 mapping 和直接 `AppSettings` 构造保持测试隔离。未复制或记录 `.env` 值。
+- 依赖：先执行 pip dry-run，再以 `backend/pyproject.toml` 为唯一事实来源安装。新增直接依赖及实际版本为 SQLAlchemy `2.0.51`、Alembic `1.18.5`、psycopg/psycopg-binary `3.3.4`、pydantic-settings `2.14.2`。未做全环境升级，未使用 force-reinstall/ignore-installed/no-deps/prune，未删除环境中既有包。`pip check` 返回 `No broken requirements found.`
+- SQLAlchemy：使用同步 SQLAlchemy 2.x 和同步 psycopg 3，与已确认基线无冲突，并避免在当前单实体 MVP 引入 async engine/session 复杂度。模块 import 不创建全局 engine/Session、不连接数据库、不运行 migration 或 bootstrap。
+- 连接安全：PostgreSQL URL 使用 SQLAlchemy `URL.create` 根据五个配置项构造，特殊字符由库处理；engine 显式创建且设置 `hide_parameters`，不记录密码或完整 URL。错误端口子进程返回稳定 `DatabaseUnavailableError:Database unavailable.`，输出不含密码、完整 URL、`.env`、SQL、绝对路径或堆栈。
+- Alembic：基线只有 `backend/alembic/versions/0001_create_actor.py`；`heads` 和主库 `current` 均为 `0001_create_actor (head)`，`alembic check` 为 `No new upgrade operations detected.`。主开发库只执行 `upgrade head`；`downgrade base → upgrade head` 只在一次性测试库中验证。
+- 主库事实：迁移前 public schema 无表；迁移后表精确为 `actor`、`alembic_version`。未出现 Conversation、Message、Task、Asset、ToolRun 或 ToolResult 等未来表。PostgreSQL 复用既有 `materialsagent_postgresql_data` volume，未删除、重建或重新初始化；MinIO 本轮未启动。
+- Actor 契约：`actor_id` 为 opaque text 主键且非空；`user_id` 可空、无 User 外键、无唯一约束；`actor_origin` 为非空短文本且 MVP 限定 `LOCAL_ANONYMOUS`；`created_at` 为非空带时区 UTC；`linked_at` 可空。未增加认证、权限、租户、计费、metadata JSONB 或软删除字段。Domain Actor 是纯 Python dataclass，不依赖 SQLAlchemy、FastAPI 或 PostgreSQL。
+- Repository/UoW：Actor Repository 只负责 `get/add`，不自行 commit；SQLAlchemy UnitOfWork 在上下文中创建短生命周期 Session，统一 commit/rollback/close，不存在全局长生命周期 Session。故障注入测试确认异常后 Actor 不落库、Session 关闭且后续事务可用。
+- UnitOfWork 审查修复：`commit()` 在 `IntegrityError` / `DBAPIError` / 其他 `SQLAlchemyError` 后统一复用已脱敏的 `rollback()` 路径，不再直接调用底层 `session.rollback()`。即使二次 rollback 自身失败，`DBAPIError` 也只转换为 `DatabaseUnavailableError("Database unavailable.")`，其他 `SQLAlchemyError` 只转换为 `PersistenceError("Persistence operation failed.")`；不泄露原始 SQL、参数、密码、URL、驱动或内部异常文本。聚焦 fake Session 测试先以 2 failed 证明原始异常逃逸，最小修复后为 2 passed，并确认上下文退出后 Session 仍 close/清空；普通业务异常和正常 commit 语义未改变。
+- bootstrap：`LOCAL_ACTOR_ID` 只来自 Backend 配置层的根 `.env`/环境变量，未记录其实际值，不接受客户端 `user_id`。主库连续调用两次返回同一 actor_id，`created_at` 未覆盖，最终 Actor 只有 1 行，`actor_origin=LOCAL_ANONYMOUS`、`user_id/linked_at` 为空。两线程真实主键竞争测试强制两个事务先同时观察到缺行，冲突被安全回滚并读回胜出行，最终仍只 1 行且不外泄 IntegrityError。
+- 测试与隔离：严格先红测，首次因 Alembic 尚未安装而预期失败；UnitOfWork 审查修复的两个聚焦测试也先证明二次 rollback 原始异常逃逸，再转绿。最终 M2-B 数据库套件为 `17 passed`、退出 0，M1 完整回归为 `8 passed`、退出 0。测试库使用仅含安全字符的 `materialsagent_test_<random>` 名称，以 autocommit 创建/删除，fixture 最终终止本轮连接并删库；最终只读查询确认遗留数为 0。
+- 安全与回归：单独 import `config`、`db.session`、`application.bootstrap` 在错误数据库配置子进程中仍成功，不自动连接、迁移或写 Actor。M1 `/live` 和 `/ready` 未修改，回归仍为 8 passed。
+- 范围与 SEM：M2 allowlist 已替换为本轮精确文件，不使用 `backend/**` 或 migration wildcard，不允许 `docker-compose.yml`/`.env.example`。正面检查为 `SCOPE_OK M2`；临时范围外根文件返回 `OUT_OF_SCOPE_CHANGES M2`/5 后已删除；M3 仍为 `SCRIPT_CONFIGURATION_ERROR`/6。`SEM_INTEGRITY_OK`：57 个文件、2,043,071,133 字节、aggregate fingerprint `62bbb0878ed5d659490755e401fba0e3e09f1f36e3a67667ea04227927546b4a`。
+- 停止与保留：验证后执行不带 `-v` 的 `docker compose down`，容器为 0、宿主 `5432` 监听为 0；`materialsagent_postgresql_data` 和 `materialsagent_minio_data` 均仍存在。未执行 pull、volume/image/system prune、主库 downgrade、drop table 或 drop database。
+- Git 边界：M2-B 已通过项目负责人验收；批准提交范围精确为 18 个 M2-B 文件，不包含 `.env`、Compose 变更、M1 文件、M2-C 或 M3 文件。
+- 已知风险：首次 migration 和稳定 Actor 已写入保留的主开发数据库 volume，该结构和行是已验收事实，不得通过删 volume、主库 downgrade 或手工 drop 回退。根 `.env` 必须继续保留与 M2-A 初始化 volume 相同的配置。Actor origin 的当前 CHECK 只允许 MVP `LOCAL_ANONYMOUS`；未来真实认证来源必须通过新 migration 显式演进，不应修改历史 migration。Backend ready 仍不能证明 PostgreSQL/MinIO 依赖就绪，该工作与 MinIO/StorageService 全部留到 M2-C。
 
 ## 下一步
 
-M2-A 已通过项目负责人验收并准备形成独立 commit。只有 commit 成功且工作区干净后，才允许在新的 Codex 对话中开始 M2-B。M2-B 当前尚未开始。
+M2-B 已通过项目负责人验收，状态为 `READY_FOR_M2_C`，但 M2-C 尚未开始。必须在新的 Codex 对话中重新恢复 Git、Docker、根 `.env` 和两个既有 volume 的实际状态后，才能执行 M2-C；本轮提交完成后立即停止，不进入 M2-C 或 M3。

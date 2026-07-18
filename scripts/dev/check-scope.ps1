@@ -95,9 +95,23 @@ $milestoneAllowlists = @{
         'backend/tests/api/test_health.py'
     )
     M2 = @(
-        'docker-compose.yml'
         'scripts/dev/check-scope.ps1'
-        '.env.example'
+        'backend/pyproject.toml'
+        'backend/alembic.ini'
+        'backend/alembic/env.py'
+        'backend/alembic/script.py.mako'
+        'backend/alembic/versions/0001_create_actor.py'
+        'backend/src/materialsagent/infrastructure/config.py'
+        'backend/src/materialsagent/infrastructure/db/base.py'
+        'backend/src/materialsagent/infrastructure/db/session.py'
+        'backend/src/materialsagent/infrastructure/db/actor.py'
+        'backend/src/materialsagent/infrastructure/db/unit_of_work.py'
+        'backend/src/materialsagent/domain/models/actor.py'
+        'backend/src/materialsagent/domain/ports/unit_of_work.py'
+        'backend/src/materialsagent/application/bootstrap.py'
+        'backend/tests/integration/db/conftest.py'
+        'backend/tests/integration/db/test_migrations.py'
+        'backend/tests/integration/db/test_actor_persistence.py'
     )
 }
 
