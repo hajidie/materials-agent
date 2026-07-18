@@ -65,7 +65,7 @@ $globalAllowedPaths = @(
     'docs/progress/phase-1-current-status.md'
 )
 
-# M0 and M1 have reviewed exact allowlists. G0 and M2-M16 are recognized so
+# M0-M2 have reviewed exact allowlists. G0 and M3-M16 are recognized so
 # callers receive a stable configuration error until their exact plan allowlist
 # is reviewed and added; this deliberately avoids inventing future scope.
 $milestoneAllowlists = @{
@@ -93,6 +93,11 @@ $milestoneAllowlists = @{
         'backend/tests/conftest.py'
         'backend/tests/unit/test_config.py'
         'backend/tests/api/test_health.py'
+    )
+    M2 = @(
+        'docker-compose.yml'
+        'scripts/dev/check-scope.ps1'
+        '.env.example'
     )
 }
 
