@@ -1,6 +1,15 @@
 import pytest
 
 
+MINIO_CONFIGURATION = {
+    "MINIO_ENDPOINT": "http://storage.example:9000",
+    "MINIO_ACCESS_KEY": "test-access-key",
+    "MINIO_SECRET_KEY": "test-secret-key",
+    "MINIO_BUCKET": "test-bucket",
+    "MINIO_SECURE": "false",
+}
+
+
 def test_safe_defaults_create_m1_settings() -> None:
     from materialsagent.infrastructure.config import load_settings
 
@@ -27,3 +36,192 @@ def test_invalid_configuration_uses_sanitized_error() -> None:
     assert message == "Invalid application configuration."
     assert secret_value not in message
     assert "secret-provider-key" not in message
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "secure", "expected_endpoint", "expected_secure"),
+    [
+        ("http://storage.example", "false", "storage.example", False),
+        ("http://storage.example:9000", "false", "storage.example:9000", False),
+        ("https://storage.example", "true", "storage.example", True),
+        ("http://[2001:db8::1]:9000", "false", "[2001:db8::1]:9000", False),
+        ("https://[2001:db8::1]", "true", "[2001:db8::1]", True),
+    ],
+)
+def test_complete_minio_configuration_is_safely_parsed(
+    endpoint: str,
+    secure: str,
+    expected_endpoint: str,
+    expected_secure: bool,
+) -> None:
+    from materialsagent.infrastructure.config import (
+        load_settings,
+        parse_minio_config,
+    )
+
+    settings = load_settings(
+        {
+            **MINIO_CONFIGURATION,
+            "MINIO_ENDPOINT": endpoint,
+            "MINIO_SECURE": secure,
+        }
+    )
+
+    parsed = parse_minio_config(settings)
+
+    assert parsed.endpoint == expected_endpoint
+    assert parsed.secure is expected_secure
+    assert parsed.access_key == "test-access-key"
+    assert parsed.secret_key == "test-secret-key"
+    assert parsed.bucket == "test-bucket"
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "secure"),
+    [
+        ("http://storage.example:9000", "true"),
+        ("https://storage.example:9000", "false"),
+    ],
+)
+def test_minio_scheme_and_secure_flag_must_match(
+    endpoint: str,
+    secure: str,
+) -> None:
+    from materialsagent.infrastructure.config import (
+        ConfigurationError,
+        load_settings,
+        parse_minio_config,
+    )
+
+    settings = load_settings(
+        {
+            **MINIO_CONFIGURATION,
+            "MINIO_ENDPOINT": endpoint,
+            "MINIO_SECURE": secure,
+        }
+    )
+
+    with pytest.raises(
+        ConfigurationError,
+        match=r"^Invalid object storage configuration\.$",
+    ):
+        parse_minio_config(settings)
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "ftp://storage.example:9000",
+        "http://user:password@storage.example:9000",
+        "http://storage.example:9000/path",
+        "http://storage.example:9000?query=value",
+        "http://storage.example:9000#fragment",
+    ],
+)
+def test_minio_endpoint_rejects_unsafe_url_parts(endpoint: str) -> None:
+    from materialsagent.infrastructure.config import (
+        ConfigurationError,
+        load_settings,
+        parse_minio_config,
+    )
+
+    settings = load_settings(
+        {**MINIO_CONFIGURATION, "MINIO_ENDPOINT": endpoint}
+    )
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        parse_minio_config(settings)
+
+    assert str(exc_info.value) == "Invalid object storage configuration."
+    assert endpoint not in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "secure"),
+    [
+        ("http://storage.example:", "false"),
+        ("https://storage.example:", "true"),
+        ("http://storage.example:0", "false"),
+        ("http://storage.example:65536", "false"),
+        ("http://storage.example:not-a-port", "false"),
+    ],
+)
+def test_minio_endpoint_rejects_empty_or_invalid_explicit_port(
+    endpoint: str,
+    secure: str,
+) -> None:
+    from materialsagent.infrastructure.config import (
+        ConfigurationError,
+        load_settings,
+        parse_minio_config,
+    )
+
+    settings = load_settings(
+        {
+            **MINIO_CONFIGURATION,
+            "MINIO_ENDPOINT": endpoint,
+            "MINIO_SECURE": secure,
+        }
+    )
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        parse_minio_config(settings)
+
+    message = str(exc_info.value)
+    assert message == "Invalid object storage configuration."
+    assert endpoint not in message
+    assert MINIO_CONFIGURATION["MINIO_ACCESS_KEY"] not in message
+    assert MINIO_CONFIGURATION["MINIO_SECRET_KEY"] not in message
+    assert MINIO_CONFIGURATION["MINIO_BUCKET"] not in message
+
+
+@pytest.mark.parametrize(
+    "missing_name",
+    [
+        "MINIO_ENDPOINT",
+        "MINIO_ACCESS_KEY",
+        "MINIO_SECRET_KEY",
+        "MINIO_BUCKET",
+        "MINIO_SECURE",
+    ],
+)
+def test_missing_minio_configuration_is_safely_rejected(
+    missing_name: str,
+) -> None:
+    from materialsagent.infrastructure.config import (
+        ConfigurationError,
+        load_settings,
+        parse_minio_config,
+    )
+
+    values = dict(MINIO_CONFIGURATION)
+    del values[missing_name]
+    settings = load_settings(values)
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        parse_minio_config(settings)
+
+    message = str(exc_info.value)
+    assert message == "Invalid object storage configuration."
+    for actual_value in MINIO_CONFIGURATION.values():
+        assert actual_value not in message
+
+
+def test_explicit_mapping_does_not_read_env_file(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from materialsagent.infrastructure import config
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "MINIO_ENDPOINT=https://must-not-be-read.example\n"
+        "MINIO_ACCESS_KEY=must-not-be-read\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config, "ROOT_ENV_FILE", env_file)
+
+    settings = config.load_settings({})
+
+    assert settings.minio_endpoint is None
+    assert settings.minio_access_key is None

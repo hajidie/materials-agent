@@ -1,16 +1,24 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Protocol
 
 from materialsagent.domain.models.actor import Actor
 from materialsagent.domain.ports.unit_of_work import (
     PersistenceConflictError,
     UnitOfWork,
 )
+from materialsagent.domain.ports.storage import StorageError
 from materialsagent.infrastructure.config import AppSettings, ConfigurationError
 
 
 UnitOfWorkFactory = Callable[[], UnitOfWork]
+
+
+class BucketBootstrapStorage(Protocol):
+    def bucket_exists(self) -> bool: ...
+
+    def create_bucket(self) -> None: ...
 
 
 def ensure_local_actor(
@@ -37,3 +45,15 @@ def ensure_local_actor(
             if existing is not None:
                 return existing
         raise PersistenceConflictError("Persistence conflict.") from None
+
+
+def ensure_object_storage_bucket(
+    storage: BucketBootstrapStorage,
+) -> None:
+    try:
+        if not storage.bucket_exists():
+            storage.create_bucket()
+    except StorageError:
+        raise
+    except Exception:
+        raise StorageError("Storage operation failed.") from None

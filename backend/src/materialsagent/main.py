@@ -4,14 +4,26 @@ from uuid import uuid4
 from fastapi import FastAPI, Request, Response
 
 from materialsagent.api.routes.health import router as health_router
-from materialsagent.infrastructure.config import load_settings
+from materialsagent.application.readiness import (
+    ReadinessService,
+    build_readiness_service,
+)
+from materialsagent.infrastructure.config import AppSettings, load_settings
 from materialsagent.infrastructure.logging import configure_logging
 
 
-def create_app() -> FastAPI:
-    settings = load_settings()
-    request_logger = configure_logging(settings.log_level)
+def create_app(
+    *,
+    settings: AppSettings | None = None,
+    readiness_service: ReadinessService | None = None,
+) -> FastAPI:
+    resolved_settings = settings or load_settings()
+    resolved_readiness_service = readiness_service or build_readiness_service(
+        resolved_settings
+    )
+    request_logger = configure_logging(resolved_settings.log_level)
     app = FastAPI(title="Materials Agent Backend", version="0.1.0")
+    app.state.readiness_service = resolved_readiness_service
 
     @app.middleware("http")
     async def add_request_context(

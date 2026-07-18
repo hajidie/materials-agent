@@ -1,6 +1,8 @@
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlparse
 
 from pydantic import Field, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -11,6 +13,15 @@ ROOT_ENV_FILE = Path(__file__).resolve().parents[4] / ".env"
 
 class ConfigurationError(RuntimeError):
     """Safe application configuration error without input value disclosure."""
+
+
+@dataclass(frozen=True, slots=True)
+class MinioConfig:
+    endpoint: str
+    access_key: str
+    secret_key: str
+    bucket: str
+    secure: bool
 
 
 class AppSettings(BaseSettings):
@@ -31,6 +42,12 @@ class AppSettings(BaseSettings):
     postgres_user: str | None = None
     postgres_password: str | None = None
 
+    minio_endpoint: str | None = None
+    minio_access_key: str | None = None
+    minio_secret_key: str | None = None
+    minio_bucket: str | None = None
+    minio_secure: bool | None = None
+
 
 ENVIRONMENT_FIELDS = {
     "APP_ENV": "app_env",
@@ -41,6 +58,11 @@ ENVIRONMENT_FIELDS = {
     "POSTGRES_DB": "postgres_db",
     "POSTGRES_USER": "postgres_user",
     "POSTGRES_PASSWORD": "postgres_password",
+    "MINIO_ENDPOINT": "minio_endpoint",
+    "MINIO_ACCESS_KEY": "minio_access_key",
+    "MINIO_SECRET_KEY": "minio_secret_key",
+    "MINIO_BUCKET": "minio_bucket",
+    "MINIO_SECURE": "minio_secure",
 }
 
 
@@ -57,3 +79,61 @@ def load_settings(environ: Mapping[str, str] | None = None) -> AppSettings:
         return AppSettings(_env_file=None, **values)
     except ValidationError:
         raise ConfigurationError("Invalid application configuration.") from None
+
+
+def parse_minio_config(settings: AppSettings) -> MinioConfig:
+    endpoint = settings.minio_endpoint
+    access_key = settings.minio_access_key
+    secret_key = settings.minio_secret_key
+    bucket = settings.minio_bucket
+    secure = settings.minio_secure
+
+    if (
+        endpoint is None
+        or not endpoint.strip()
+        or endpoint != endpoint.strip()
+        or access_key is None
+        or not access_key.strip()
+        or secret_key is None
+        or not secret_key
+        or bucket is None
+        or not bucket.strip()
+        or secure is None
+    ):
+        raise ConfigurationError("Invalid object storage configuration.")
+
+    try:
+        parsed = urlparse(endpoint)
+        parsed_port = parsed.port
+    except ValueError:
+        raise ConfigurationError(
+            "Invalid object storage configuration."
+        ) from None
+
+    expected_secure = parsed.scheme == "https"
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.netloc.endswith(":")
+        or parsed.hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+        or any(character.isspace() for character in parsed.netloc)
+        or secure is not expected_secure
+    ):
+        raise ConfigurationError("Invalid object storage configuration.")
+
+    if parsed_port is not None and not 1 <= parsed_port <= 65535:
+        raise ConfigurationError("Invalid object storage configuration.")
+
+    return MinioConfig(
+        endpoint=parsed.netloc,
+        access_key=access_key,
+        secret_key=secret_key,
+        bucket=bucket,
+        secure=secure,
+    )

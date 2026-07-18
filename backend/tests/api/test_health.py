@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 import json
 
 from fastapi.testclient import TestClient
+import pytest
 
 
 EXTERNAL_DEPENDENCY_VARIABLES = (
@@ -15,10 +16,25 @@ EXTERNAL_DEPENDENCY_VARIABLES = (
 )
 
 
-def _create_client() -> TestClient:
+def _create_client(
+    *,
+    postgresql_available: bool = False,
+    object_storage_available: bool = False,
+) -> TestClient:
+    from materialsagent.application.readiness import ReadinessService
+    from materialsagent.infrastructure.config import load_settings
     from materialsagent.main import create_app
 
-    return TestClient(create_app())
+    readiness_service = ReadinessService(
+        postgresql_probe=lambda: postgresql_available,
+        object_storage_probe=lambda: object_storage_available,
+    )
+    return TestClient(
+        create_app(
+            settings=load_settings({}),
+            readiness_service=readiness_service,
+        )
+    )
 
 
 def _assert_utc_timestamp(value: str) -> None:
@@ -38,16 +54,44 @@ def test_live_returns_exact_safe_response() -> None:
     _assert_utc_timestamp(response.json()["checked_at"])
 
 
-def test_ready_is_not_ready_without_breaking_live() -> None:
-    with _create_client() as client:
-        ready_response = client.get("/api/v1/health/ready")
-        live_response = client.get("/api/v1/health/live")
+@pytest.mark.parametrize(
+    (
+        "postgresql_available",
+        "object_storage_available",
+        "expected_status",
+        "expected_http_status",
+        "expected_component_statuses",
+    ),
+    [
+        (True, True, "READY", 200, ["AVAILABLE", "AVAILABLE"]),
+        (True, False, "DEGRADED", 200, ["AVAILABLE", "UNAVAILABLE"]),
+        (False, True, "NOT_READY", 503, ["UNAVAILABLE", "AVAILABLE"]),
+        (False, False, "NOT_READY", 503, ["UNAVAILABLE", "UNAVAILABLE"]),
+    ],
+)
+def test_ready_returns_exact_dependency_aggregation(
+    postgresql_available: bool,
+    object_storage_available: bool,
+    expected_status: str,
+    expected_http_status: int,
+    expected_component_statuses: list[str],
+) -> None:
+    with _create_client(
+        postgresql_available=postgresql_available,
+        object_storage_available=object_storage_available,
+    ) as client:
+        response = client.get("/api/v1/health/ready")
 
-    assert ready_response.status_code == 503
-    assert set(ready_response.json()) == {"status", "checked_at", "request_id"}
-    assert ready_response.json()["status"] == "NOT_READY"
-    assert live_response.status_code == 200
-    assert live_response.json()["status"] == "LIVE"
+    body = response.json()
+    assert response.status_code == expected_http_status
+    assert set(body) == {"status", "components", "checked_at", "request_id"}
+    assert body["status"] == expected_status
+    assert body["request_id"].startswith("req_")
+    assert body["components"] == [
+        {"name": "postgresql", "status": expected_component_statuses[0]},
+        {"name": "object_storage", "status": expected_component_statuses[1]},
+    ]
+    _assert_utc_timestamp(body["checked_at"])
 
 
 def test_repeated_health_reads_have_independent_request_ids() -> None:
@@ -70,7 +114,10 @@ def test_missing_future_dependency_configuration_does_not_block_live(
     for variable_name in EXTERNAL_DEPENDENCY_VARIABLES:
         monkeypatch.delenv(variable_name, raising=False)
 
-    with _create_client() as client:
+    from materialsagent.infrastructure.config import load_settings
+    from materialsagent.main import create_app
+
+    with TestClient(create_app(settings=load_settings({}))) as client:
         response = client.get("/api/v1/health/live")
 
     assert response.status_code == 200
@@ -93,6 +140,45 @@ def test_unknown_path_returns_controlled_404_without_sensitive_data() -> None:
     assert "traceback" not in body.lower()
     assert "D:\\ProgramData" not in body
     assert "C:\\Users" not in body
+
+
+def test_ready_response_never_exposes_probe_or_configuration_details() -> None:
+    from materialsagent.application.readiness import ReadinessService
+    from materialsagent.infrastructure.config import load_settings
+    from materialsagent.main import create_app
+
+    sensitive_values = [
+        "127.0.0.1",
+        "5432",
+        "9000",
+        "9001",
+        "actual-database-name",
+        "actual-bucket-name",
+        "m2/private/object.bin",
+        "actual-access-key",
+        "actual-secret-key",
+        ".env",
+        "C:\\Users\\private",
+        "Traceback",
+    ]
+
+    def failed_probe() -> bool:
+        raise RuntimeError(" ".join(sensitive_values))
+
+    app = create_app(
+        settings=load_settings({}),
+        readiness_service=ReadinessService(
+            postgresql_probe=failed_probe,
+            object_storage_probe=failed_probe,
+        ),
+    )
+    with TestClient(app) as client:
+        response = client.get("/api/v1/health/ready")
+
+    body = response.text
+    assert response.status_code == 503
+    for sensitive_value in sensitive_values:
+        assert sensitive_value not in body
 
 
 def test_request_log_is_json_and_correlates_request_id(capsys) -> None:
