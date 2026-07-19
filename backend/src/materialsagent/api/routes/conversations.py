@@ -8,8 +8,12 @@ from pydantic import BaseModel, ConfigDict
 
 from materialsagent.api.dependencies import (
     get_actor_context,
+    get_chat_orchestration_service,
     get_conversation_service,
     get_message_submission_service,
+)
+from materialsagent.application.chat_orchestration import (
+    ChatOrchestrationService,
 )
 from materialsagent.application.context import ActorContext
 from materialsagent.application.conversations import ConversationService
@@ -76,22 +80,42 @@ class UserMessageView(StrictModel):
     created_at: str
 
 
-class PendingTaskView(StrictModel):
+class MessageTaskView(StrictModel):
     task_id: str
-    task_type: None
-    status: Literal["PENDING"]
-    selected_tool_run_id: None
-    selected_result_id: None
+    task_type: Literal["KNOWLEDGE_QA", "TOOL_EXECUTION"] | None
+    status: Literal[
+        "PENDING",
+        "RUNNING",
+        "NEEDS_INPUT",
+        "SUCCEEDED",
+        "PARTIALLY_SUCCEEDED",
+        "FAILED",
+    ]
+    selected_tool_run_id: str | None
+    selected_result_id: str | None
     created_at: str
     updated_at: str
+
+
+class AssistantMessageView(StrictModel):
+    message_id: str
+    role: Literal["ASSISTANT"]
+    content_text: str
+    created_at: str
+
+
+class NeedsInputView(StrictModel):
+    missing_fields: list[str]
+    ambiguous_fields: list[dict[str, object]]
+    normalized_input: dict[str, object]
 
 
 class MessageSubmissionData(StrictModel):
     conversation_id: str
     user_message: UserMessageView
-    task: PendingTaskView
-    assistant_message: None = None
-    needs_input: None = None
+    task: MessageTaskView
+    assistant_message: AssistantMessageView | None = None
+    needs_input: NeedsInputView | None = None
     result_summary: None = None
     explanation: None = None
     idempotency_replayed: Literal[False] = False
@@ -175,6 +199,10 @@ def submit_message(
         MessageSubmissionService,
         Depends(get_message_submission_service),
     ],
+    orchestration_service: Annotated[
+        ChatOrchestrationService,
+        Depends(get_chat_orchestration_service),
+    ],
 ) -> MessageSubmissionResponse:
     submission = service.prepare_submission(
         actor_context,
@@ -184,8 +212,14 @@ def submit_message(
         submission_mode=body.submission_mode,
         target_task_id=body.target_task_id,
     )
-    message = submission.user_message
-    task = submission.task
+    projection = orchestration_service.orchestrate_submission(
+        actor_context,
+        submission,
+    )
+    message = projection.user_message
+    task = projection.task
+    assistant = projection.assistant_message
+    revision = projection.revision
     return MessageSubmissionResponse(
         request_id=request.state.request_id,
         data=MessageSubmissionData(
@@ -196,14 +230,33 @@ def submit_message(
                 content_text=message.content_text,
                 created_at=_utc_text(message.created_at),
             ),
-            task=PendingTaskView(
+            task=MessageTaskView(
                 task_id=task.task_id,
-                task_type=None,
-                status="PENDING",
-                selected_tool_run_id=None,
-                selected_result_id=None,
+                task_type=task.task_type,
+                status=task.current_status,
+                selected_tool_run_id=task.selected_tool_run_id,
+                selected_result_id=task.selected_result_id,
                 created_at=_utc_text(task.created_at),
                 updated_at=_utc_text(task.updated_at),
+            ),
+            assistant_message=(
+                None
+                if assistant is None
+                else AssistantMessageView(
+                    message_id=assistant.message_id,
+                    role="ASSISTANT",
+                    content_text=assistant.content_text,
+                    created_at=_utc_text(assistant.created_at),
+                )
+            ),
+            needs_input=(
+                None
+                if task.current_status != "NEEDS_INPUT" or revision is None
+                else NeedsInputView(
+                    missing_fields=list(revision.missing_fields),
+                    ambiguous_fields=list(revision.ambiguous_fields),
+                    normalized_input=dict(revision.normalized_input or {}),
+                )
             ),
         ),
     )

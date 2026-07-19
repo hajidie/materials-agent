@@ -15,6 +15,9 @@ from materialsagent.api.routes.conversations import (
 from materialsagent.api.routes.health import router as health_router
 from materialsagent.api.routes.tasks import router as tasks_router
 from materialsagent.application.context import ActorContext
+from materialsagent.application.chat_orchestration import (
+    ChatOrchestrationService,
+)
 from materialsagent.application.conversations import (
     ConversationService,
     IdFactory,
@@ -37,6 +40,7 @@ from materialsagent.application.readiness import (
     build_readiness_service,
 )
 from materialsagent.application.tasks import TaskQueryService
+from materialsagent.domain.ports.chat_orchestration import ChatOrchestrationPort
 from materialsagent.domain.ports.unit_of_work import UnitOfWorkFactory
 from materialsagent.infrastructure.config import (
     AppSettings,
@@ -49,15 +53,30 @@ from materialsagent.infrastructure.db.session import (
 )
 from materialsagent.infrastructure.db.unit_of_work import SQLAlchemyUnitOfWork
 from materialsagent.infrastructure.logging import configure_logging
+from materialsagent.infrastructure.llm.mock import (
+    MockChatOrchestrationAdapter,
+    default_mock_responder,
+)
 
 
 Clock = Callable[[], datetime]
 
 
-def _resource_projection(request: Request) -> dict[str, str | None]:
+def _resource_projection(
+    request: Request,
+    error: ApplicationError | None = None,
+) -> dict[str, str | None]:
     return {
-        "conversation_id": request.path_params.get("conversation_id"),
-        "task_id": request.path_params.get("task_id"),
+        "conversation_id": (
+            error.conversation_id
+            if error is not None and error.conversation_id is not None
+            else request.path_params.get("conversation_id")
+        ),
+        "task_id": (
+            error.task_id
+            if error is not None and error.task_id is not None
+            else request.path_params.get("task_id")
+        ),
         "tool_run_id": None,
         "result_id": None,
     }
@@ -74,6 +93,7 @@ def _error_response(
     code: str,
     message: str,
     details: list[dict[str, str]] | None = None,
+    application_error: ApplicationError | None = None,
 ) -> JSONResponse:
     return JSONResponse(
         status_code=status_code,
@@ -84,7 +104,7 @@ def _error_response(
                 "message": message,
                 "details": details or [],
             },
-            "resource": _resource_projection(request),
+            "resource": _resource_projection(request, application_error),
         },
     )
 
@@ -93,39 +113,16 @@ async def _application_error_handler(
     request: Request,
     error: ApplicationError,
 ) -> JSONResponse:
-    if isinstance(error, (InvalidCursorError, ApplicationValidationError)):
-        return _error_response(
-            request,
-            status_code=422,
-            code="VALIDATION_FAILED",
-            message=str(error),
-        )
-    if isinstance(error, ResourceNotFoundError):
-        return _error_response(
-            request,
-            status_code=404,
-            code="RESOURCE_NOT_FOUND",
-            message=str(error),
-        )
-    if isinstance(error, ApplicationConflictError):
-        return _error_response(
-            request,
-            status_code=409,
-            code="RESOURCE_CONFLICT",
-            message=str(error),
-        )
-    if isinstance(error, DependencyUnavailableError):
-        return _error_response(
-            request,
-            status_code=503,
-            code="DEPENDENCY_UNAVAILABLE",
-            message=str(error),
-        )
+    message = str(error)
+    if isinstance(error, ApplicationInternalError):
+        message = ApplicationInternalError.default_message
     return _error_response(
         request,
-        status_code=500,
-        code="INTERNAL_ERROR",
-        message=ApplicationInternalError.default_message,
+        status_code=error.status_code,
+        code=error.code,
+        message=message,
+        details=error.details,
+        application_error=error,
     )
 
 
@@ -193,6 +190,8 @@ def create_app(
     title_generator: TitleGenerator | None = None,
     conversation_service: ConversationService | None = None,
     message_submission_service: MessageSubmissionService | None = None,
+    chat_orchestration_port: ChatOrchestrationPort | None = None,
+    chat_orchestration_service: ChatOrchestrationService | None = None,
     task_query_service: TaskQueryService | None = None,
 ) -> FastAPI:
     resolved_settings = settings or load_settings()
@@ -223,6 +222,7 @@ def create_app(
 
     resolved_conversation_service = conversation_service
     resolved_message_submission_service = message_submission_service
+    resolved_chat_orchestration_service = chat_orchestration_service
     resolved_task_query_service = task_query_service
     if resolved_unit_of_work_factory is not None:
         if resolved_conversation_service is None:
@@ -237,6 +237,17 @@ def create_app(
                 clock=clock,
                 id_factory=id_factory,
                 title_generator=title_generator,
+            )
+        if resolved_chat_orchestration_service is None:
+            resolved_chat_orchestration_port = (
+                chat_orchestration_port
+                or MockChatOrchestrationAdapter(default_mock_responder)
+            )
+            resolved_chat_orchestration_service = ChatOrchestrationService(
+                resolved_unit_of_work_factory,
+                resolved_chat_orchestration_port,
+                clock=clock,
+                id_factory=id_factory,
             )
         if resolved_task_query_service is None:
             resolved_task_query_service = TaskQueryService(
@@ -263,6 +274,7 @@ def create_app(
     app.state.actor_context = resolved_actor_context
     app.state.conversation_service = resolved_conversation_service
     app.state.message_submission_service = resolved_message_submission_service
+    app.state.chat_orchestration_service = resolved_chat_orchestration_service
     app.state.task_query_service = resolved_task_query_service
 
     @app.middleware("http")

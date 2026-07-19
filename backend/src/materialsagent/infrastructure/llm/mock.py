@@ -5,8 +5,11 @@ from typing import Final
 
 from materialsagent.domain.ports.chat_orchestration import (
     AmbiguousValue,
+    ChatOrchestrationProtocolError,
+    ChatOrchestrationProviderError,
     ChatOrchestrationInput,
     ChatOrchestrationResult,
+    ChatOrchestrationTimeoutError,
     KnowledgeAnswer,
     NeedsInputCandidate,
     ParameterCandidate,
@@ -25,19 +28,90 @@ PARAMETER_FIELDS: Final = (
 )
 
 
-class ChatOrchestrationTimeoutError(RuntimeError):
-    """Safe timeout raised by a chat orchestration adapter."""
-
-
-class ChatOrchestrationProviderError(RuntimeError):
-    """Safe provider failure raised by a chat orchestration adapter."""
-
-
-class ChatOrchestrationProtocolError(RuntimeError):
-    """Safe structured-output protocol failure."""
-
-
 Responder = Callable[[ChatOrchestrationInput], Mapping[str, object]]
+
+
+def _default_parameters() -> dict[str, object]:
+    return {
+        "solution_temperature": {"value": 1000, "unit": "°C"},
+        "solution_time": {"value": 3, "unit": "h"},
+        "aging_temperature": {"value": 730, "unit": "°C"},
+        "aging_time": {"value": 3, "unit": "h"},
+    }
+
+
+def _default_tool_payload() -> dict[str, object]:
+    return {
+        "route": "TOOL_EXECUTION",
+        "tool_id": "zta35g_sem_virtual_lab",
+        "material": "ZTA35G",
+        "candidate_parameters": _default_parameters(),
+        "requested_outputs": ["sem_image", "mechanical_properties"],
+    }
+
+
+def default_mock_responder(
+    orchestration_input: ChatOrchestrationInput,
+) -> Mapping[str, object]:
+    """Deterministic local responder for the approved M4 acceptance phrases."""
+    content = orchestration_input.content_text.strip()
+    lowered = content.casefold()
+    if "mock timeout" in lowered:
+        raise ChatOrchestrationTimeoutError(
+            "Chat orchestration mock timed out."
+        )
+    if "mock provider failure" in lowered:
+        raise ChatOrchestrationProviderError(
+            "Chat orchestration mock provider failed."
+        )
+    if "mock protocol failure" in lowered:
+        return {"route": "UNKNOWN"}
+    if "缺 aging_temperature" in content:
+        parameters = _default_parameters()
+        parameters["aging_temperature"] = None
+        return {
+            "route": "NEEDS_INPUT",
+            "tool_id": "zta35g_sem_virtual_lab",
+            "material": "ZTA35G",
+            "candidate_parameters": parameters,
+            "missing_fields": ["aging_temperature"],
+            "ambiguous_fields": [],
+            "follow_up_suggestion": "请补充时效温度。",
+            "requested_outputs": ["sem_image", "mechanical_properties"],
+        }
+    if "歧义" in content:
+        parameters = _default_parameters()
+        parameters["solution_time"] = {
+            "value": {"candidates": [2, 3]},
+            "unit": "h",
+        }
+        return {
+            "route": "NEEDS_INPUT",
+            "tool_id": "zta35g_sem_virtual_lab",
+            "material": "ZTA35G",
+            "candidate_parameters": parameters,
+            "missing_fields": [],
+            "ambiguous_fields": ["solution_time"],
+            "follow_up_suggestion": "请确认固溶时间。",
+            "requested_outputs": ["sem_image"],
+        }
+    payload = _default_tool_payload()
+    if "solution_time = 180 min" in lowered:
+        parameters = _default_parameters()
+        parameters["solution_time"] = {"value": 180, "unit": "min"}
+        payload["candidate_parameters"] = parameters
+        return payload
+    if "越界温度" in content:
+        parameters = _default_parameters()
+        parameters["solution_temperature"] = {"value": 1200, "unit": "°C"}
+        payload["candidate_parameters"] = parameters
+        return payload
+    if "完整合法" in content:
+        return payload
+    return {
+        "route": "KNOWLEDGE_ANSWER",
+        "answer_text": "ZTA35G 是氧化锆增韧氧化铝复合材料。",
+    }
 
 
 def _exact_keys(
@@ -158,7 +232,6 @@ def _decode(payload: Mapping[str, object]) -> ChatOrchestrationResult:
 class MockChatOrchestrationAdapter:
     provider = MOCK_PROVIDER
     model_name = MOCK_MODEL_NAME
-    provider_request_id = None
 
     def __init__(self, responder: Responder) -> None:
         if not callable(responder):

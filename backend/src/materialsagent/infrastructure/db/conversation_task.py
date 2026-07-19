@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Final
 
 from sqlalchemy import (
     ARRAY,
@@ -533,6 +534,16 @@ class SQLAlchemyMessageRepository:
             _raise_safe_persistence_error(error)
         return None if row is None else _message_from_row(row)
 
+    def get_by_llm_call_id(self, llm_call_id: str) -> Message | None:
+        statement = select(MessageRow).where(
+            MessageRow.llm_call_id == llm_call_id
+        )
+        try:
+            row = self._session.scalar(statement)
+        except SQLAlchemyError as error:
+            _raise_safe_persistence_error(error)
+        return None if row is None else _message_from_row(row)
+
     def get_latest_for_conversation(
         self,
         conversation_id: str,
@@ -556,6 +567,21 @@ class SQLAlchemyMessageRepository:
             _raise_safe_persistence_error(error)
         return None if row is None else _message_from_row(row)
 
+    def list_for_task(self, task_id: str) -> list[Message]:
+        statement = (
+            select(MessageRow)
+            .where(MessageRow.task_id == task_id)
+            .order_by(
+                MessageRow.created_at.asc(),
+                MessageRow.message_id.asc(),
+            )
+        )
+        try:
+            rows = self._session.scalars(statement).all()
+        except SQLAlchemyError as error:
+            _raise_safe_persistence_error(error)
+        return [_message_from_row(row) for row in rows]
+
     def add(self, message: Message) -> None:
         try:
             self._session.flush()
@@ -576,6 +602,16 @@ class SQLAlchemyMessageRepository:
             )
         except SQLAlchemyError as error:
             _raise_safe_persistence_error(error)
+
+
+TASK_ALLOWED_TRANSITIONS: Final = {
+    "PENDING": frozenset({"RUNNING", "FAILED"}),
+    "RUNNING": frozenset({"NEEDS_INPUT", "SUCCEEDED", "FAILED"}),
+    "NEEDS_INPUT": frozenset(),
+    "SUCCEEDED": frozenset(),
+    "PARTIALLY_SUCCEEDED": frozenset(),
+    "FAILED": frozenset(),
+}
 
 
 class SQLAlchemyTaskRepository:
@@ -620,6 +656,45 @@ class SQLAlchemyTaskRepository:
                     safe_error_message=task.safe_error_message,
                 )
             )
+        except SQLAlchemyError as error:
+            _raise_safe_persistence_error(error)
+
+    def update(
+        self,
+        task: Task,
+        *,
+        expected_status: str,
+    ) -> Task | None:
+        try:
+            row = self._session.get(
+                TaskRow,
+                task.task_id,
+                populate_existing=True,
+                with_for_update=True,
+            )
+            if row is None or row.current_status != expected_status:
+                return None
+            if (
+                row.conversation_id != task.conversation_id
+                or row.actor_id != task.actor_id
+                or row.created_at != task.created_at
+                or task.current_status
+                not in TASK_ALLOWED_TRANSITIONS.get(
+                    row.current_status,
+                    frozenset(),
+                )
+            ):
+                return None
+            row.task_type = task.task_type
+            row.current_status = task.current_status
+            row.selected_tool_run_id = task.selected_tool_run_id
+            row.selected_result_id = task.selected_result_id
+            row.started_at = task.started_at
+            row.updated_at = task.updated_at
+            row.completed_at = task.completed_at
+            row.error_code = task.error_code
+            row.safe_error_message = task.safe_error_message
+            return _task_from_row(row)
         except SQLAlchemyError as error:
             _raise_safe_persistence_error(error)
 
@@ -668,6 +743,25 @@ class SQLAlchemyTaskInputRevisionRepository:
             select(TaskInputRevisionRow)
             .where(TaskInputRevisionRow.task_id == task_id)
             .order_by(
+                TaskInputRevisionRow.revision.asc(),
+                TaskInputRevisionRow.task_input_revision_id.asc(),
+            )
+        )
+        try:
+            rows = self._session.scalars(statement).all()
+        except SQLAlchemyError as error:
+            _raise_safe_persistence_error(error)
+        return [_revision_from_row(row) for row in rows]
+
+    def list_for_llm_call_id(
+        self,
+        llm_call_id: str,
+    ) -> list[TaskInputRevision]:
+        statement = (
+            select(TaskInputRevisionRow)
+            .where(TaskInputRevisionRow.source_llm_call_id == llm_call_id)
+            .order_by(
+                TaskInputRevisionRow.task_id.asc(),
                 TaskInputRevisionRow.revision.asc(),
                 TaskInputRevisionRow.task_input_revision_id.asc(),
             )

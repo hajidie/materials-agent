@@ -241,7 +241,7 @@ def test_list_conversations_rejects_invalid_pagination(
     assert response.json()["error"]["code"] == "VALIDATION_FAILED"
 
 
-def test_new_task_submission_persists_exact_pending_facts_and_first_title(
+def test_new_task_submission_persists_orchestrated_facts_and_first_title(
     api_harness,
 ) -> None:
     actor_id = "actor_local"
@@ -276,11 +276,12 @@ def test_new_task_submission_persists_exact_pending_facts_and_first_title(
     assert body["data"]["conversation_id"] == conversation.conversation_id
     assert body["data"]["user_message"]["role"] == "USER"
     assert body["data"]["user_message"]["content_text"] == "请帮我分析这一材料问题。"
-    assert body["data"]["task"]["task_type"] is None
-    assert body["data"]["task"]["status"] == "PENDING"
+    assert body["data"]["task"]["task_type"] == "KNOWLEDGE_QA"
+    assert body["data"]["task"]["status"] == "SUCCEEDED"
     assert body["data"]["task"]["selected_tool_run_id"] is None
     assert body["data"]["task"]["selected_result_id"] is None
-    assert body["data"]["assistant_message"] is None
+    assert body["data"]["assistant_message"]["role"] == "ASSISTANT"
+    assert body["data"]["assistant_message"]["content_text"]
     assert body["data"]["needs_input"] is None
     assert body["data"]["result_summary"] is None
     assert body["data"]["explanation"] is None
@@ -289,11 +290,13 @@ def test_new_task_submission_persists_exact_pending_facts_and_first_title(
     counts = api_harness.counts()
     assert counts == {
         "conversation": 1,
-        "message": 1,
+        "message": 2,
         "task": 1,
         "task_input_revision": 0,
     }
-    message = api_harness.message_rows()[0]
+    message = next(
+        row for row in api_harness.message_rows() if row.role == "USER"
+    )
     task = api_harness.task_rows()[0]
     updated = api_harness.conversation_row(conversation.conversation_id)
     assert updated is not None
@@ -325,7 +328,7 @@ def test_new_task_submission_keeps_conversation_updated_at_monotonic(
     assert response.status_code == 200
     assert api_harness.counts() == {
         "conversation": 1,
-        "message": 1,
+        "message": 2,
         "task": 1,
         "task_input_revision": 0,
     }
@@ -459,7 +462,7 @@ def test_title_generator_failure_does_not_rollback_message_or_task(
         )
 
     assert response.status_code == 200
-    assert api_harness.counts()["message"] == 1
+    assert api_harness.counts()["message"] == 2
     assert api_harness.counts()["task"] == 1
     assert api_harness.conversation_row(conversation.conversation_id).title is None
     assert "private title detail" not in response.text
@@ -519,10 +522,10 @@ def test_title_persistence_failure_does_not_rollback_message_or_task(
         )
 
     assert response.status_code == 200
-    assert api_harness.counts()["message"] == 1
+    assert api_harness.counts()["message"] == 2
     assert api_harness.counts()["task"] == 1
     assert api_harness.conversation_row(conversation.conversation_id).title is None
-    assert failure_factory.call_count == 2
+    assert failure_factory.call_count == 6
     assert all(unit_of_work.session is None for unit_of_work in failure_factory.instances)
 
 

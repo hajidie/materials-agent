@@ -56,7 +56,7 @@ function ConvertTo-RepoPath {
 }
 
 $normalizedMilestone = $Milestone.Trim().ToUpperInvariant()
-$recognizedMilestones = @('G0', 'M0', 'M4A', 'M4PLAN') + @(1..16 | ForEach-Object { "M$_" })
+$recognizedMilestones = @('G0', 'M0', 'M4A', 'M4B', 'M4PLAN') + @(1..16 | ForEach-Object { "M$_" })
 if ($recognizedMilestones -notcontains $normalizedMilestone) {
     Complete-ScopeCheck -Code 'UNKNOWN_MILESTONE' -Summary $normalizedMilestone
 }
@@ -154,6 +154,25 @@ $milestoneAllowlists = @{
         'docs/acceptance/phase-1-checklist.md'
         'docs/progress/phase-1-current-status.md'
         'docs/superpowers/plans/2026-07-17-sem-mvp-phase-1-implementation-plan.md'
+    )
+    M4B = @(
+        'scripts/dev/check-scope.ps1'
+        'docs/progress/phase-1-current-status.md'
+        'backend/src/materialsagent/application/chat_orchestration.py'
+        'backend/src/materialsagent/application/errors.py'
+        'backend/src/materialsagent/domain/ports/chat_orchestration.py'
+        'backend/src/materialsagent/domain/ports/unit_of_work.py'
+        'backend/src/materialsagent/infrastructure/llm/mock.py'
+        'backend/src/materialsagent/infrastructure/db/conversation_task.py'
+        'backend/src/materialsagent/api/dependencies.py'
+        'backend/src/materialsagent/api/routes/conversations.py'
+        'backend/src/materialsagent/main.py'
+        'backend/tests/unit/test_chat_orchestration_service.py'
+        'backend/tests/contract/test_chat_orchestration.py'
+        'backend/tests/integration/db/test_chat_orchestration_persistence.py'
+        'backend/tests/api/test_conversations.py'
+        'backend/tests/api/test_message_orchestration.py'
+        'backend/tests/api/test_tasks.py'
     )
 }
 

@@ -12,6 +12,18 @@ ZTA35G_TOOL_ID: Final = "zta35g_sem_virtual_lab"
 MAX_SAFE_JSON_INTEGER: Final = 9_007_199_254_740_991
 
 
+class ChatOrchestrationTimeoutError(RuntimeError):
+    """Safe timeout raised by a chat orchestration adapter."""
+
+
+class ChatOrchestrationProviderError(RuntimeError):
+    """Safe provider failure raised by a chat orchestration adapter."""
+
+
+class ChatOrchestrationProtocolError(RuntimeError):
+    """Safe structured-output protocol failure."""
+
+
 def _require_non_blank(value: str, field_name: str) -> None:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field_name} must be non-blank text.")
@@ -213,6 +225,9 @@ ChatOrchestrationResult = (
 
 
 class ChatOrchestrationPort(Protocol):
+    provider: str
+    model_name: str
+
     def orchestrate(
         self,
         orchestration_input: ChatOrchestrationInput,

@@ -47,11 +47,15 @@ class ConversationRepository(Protocol):
 class MessageRepository(Protocol):
     def get(self, message_id: str) -> Message | None: ...
 
+    def get_by_llm_call_id(self, llm_call_id: str) -> Message | None: ...
+
     def get_latest_for_conversation(
         self,
         conversation_id: str,
         actor_id: str,
     ) -> Message | None: ...
+
+    def list_for_task(self, task_id: str) -> list[Message]: ...
 
     def add(self, message: Message) -> None: ...
 
@@ -63,6 +67,13 @@ class TaskRepository(Protocol):
 
     def add(self, task: Task) -> None: ...
 
+    def update(
+        self,
+        task: Task,
+        *,
+        expected_status: str,
+    ) -> Task | None: ...
+
 
 class TaskInputRevisionRepository(Protocol):
     def get(
@@ -73,6 +84,11 @@ class TaskInputRevisionRepository(Protocol):
     def add(self, revision: TaskInputRevision) -> None: ...
 
     def list_for_task(self, task_id: str) -> list[TaskInputRevision]: ...
+
+    def list_for_llm_call_id(
+        self,
+        llm_call_id: str,
+    ) -> list[TaskInputRevision]: ...
 
 
 class LLMCallRepository(Protocol):

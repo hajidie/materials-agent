@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from fastapi import Request
 
+from materialsagent.application.chat_orchestration import (
+    ChatOrchestrationService,
+)
 from materialsagent.application.context import ActorContext
 from materialsagent.application.conversations import ConversationService
 from materialsagent.application.errors import DependencyUnavailableError
@@ -28,6 +31,12 @@ def get_message_submission_service(
     request: Request,
 ) -> MessageSubmissionService:
     return _required_app_state(request, "message_submission_service")
+
+
+def get_chat_orchestration_service(
+    request: Request,
+) -> ChatOrchestrationService:
+    return _required_app_state(request, "chat_orchestration_service")
 
 
 def get_task_query_service(request: Request) -> TaskQueryService:

@@ -128,3 +128,37 @@ def test_foreign_and_missing_task_have_identical_safe_404_even_with_actor_header
         assert "C:\\Users" not in response.text
     assert foreign.json()["error"] == missing.json()["error"]
     assert api_harness.counts() == before_counts
+
+
+def test_get_task_returns_persisted_tool_unavailable_terminal_fact(
+    api_harness,
+) -> None:
+    actor_id = "actor_local"
+    api_harness.persist_actor(actor_id)
+
+    with api_harness.create_client(actor_id) as client:
+        conversation = client.post("/api/v1/conversations", json={})
+        conversation_id = conversation.json()["data"]["conversation_id"]
+        submitted = client.post(
+            f"/api/v1/conversations/{conversation_id}/messages",
+            json={
+                "submission_mode": "NEW_TASK",
+                "content_text": "完整合法 Tool 请求",
+            },
+        )
+        assert submitted.status_code == 503
+        task_id = submitted.json()["resource"]["task_id"]
+        response = client.get(f"/api/v1/tasks/{task_id}")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["task_id"] == task_id
+    assert data["conversation_id"] == conversation_id
+    assert data["task_type"] == "TOOL_EXECUTION"
+    assert data["status"] == "FAILED"
+    assert data["error_code"] == "TOOL_UNAVAILABLE"
+    assert data["safe_error_message"] == "当前阶段尚未开放材料工具执行。"
+    assert data["selected_tool_run_id"] is None
+    assert data["selected_result_id"] is None
+    assert data["started_at"] is not None
+    assert data["completed_at"] is not None

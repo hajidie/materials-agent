@@ -2,28 +2,60 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
 from decimal import Decimal
+from importlib import import_module
 import socket
 from typing import Any
 
 import pytest
 
 
+def test_port_module_owns_the_safe_failure_contract() -> None:
+    port_module = import_module(
+        "materialsagent.domain.ports.chat_orchestration"
+    )
+
+    for error_name in (
+        "ChatOrchestrationTimeoutError",
+        "ChatOrchestrationProviderError",
+        "ChatOrchestrationProtocolError",
+    ):
+        error_type = getattr(port_module, error_name, None)
+        assert error_type is not None
+        assert error_type.__module__ == port_module.__name__
+
+
+def test_mock_adapter_has_no_static_provider_request_id() -> None:
+    port_module = import_module(
+        "materialsagent.domain.ports.chat_orchestration"
+    )
+    mock_module = import_module("materialsagent.infrastructure.llm.mock")
+    adapter = mock_module.MockChatOrchestrationAdapter(
+        responder=lambda _: {
+            "route": "KNOWLEDGE_ANSWER",
+            "answer_text": "安全答案。",
+        }
+    )
+
+    annotations = port_module.ChatOrchestrationPort.__annotations__
+    assert {"provider", "model_name"} <= set(annotations)
+    assert "provider_request_id" not in annotations
+    assert not hasattr(adapter, "provider_request_id")
+
+
 def _types() -> dict[str, Any]:
     from materialsagent.domain.ports.chat_orchestration import (
         AmbiguousValue,
+        ChatOrchestrationProtocolError,
+        ChatOrchestrationProviderError,
         ChatOrchestrationInput,
+        ChatOrchestrationTimeoutError,
         KnowledgeAnswer,
         NeedsInputCandidate,
         ParameterCandidate,
         ToolCandidate,
         ZTA35GParameterCandidates,
     )
-    from materialsagent.infrastructure.llm.mock import (
-        ChatOrchestrationProtocolError,
-        ChatOrchestrationProviderError,
-        ChatOrchestrationTimeoutError,
-        MockChatOrchestrationAdapter,
-    )
+    from materialsagent.infrastructure.llm.mock import MockChatOrchestrationAdapter
 
     return locals()
 
@@ -102,7 +134,6 @@ def test_mock_decodes_each_discriminated_result(
     assert result.route == expected_route
     assert adapter.provider == "mock"
     assert adapter.model_name == "mock-chat-orchestration-v1"
-    assert adapter.provider_request_id is None
 
 
 def test_candidate_models_are_strongly_typed() -> None:
@@ -324,3 +355,64 @@ def test_mock_is_deterministic_and_has_no_external_side_effects(
     assert first == second
     assert calls == [request, request]
     assert vars(adapter) == {"_responder": responder}
+
+
+@pytest.mark.parametrize(
+    ("content_text", "expected_route"),
+    [
+        ("什么是 ZTA35G？", "KNOWLEDGE_ANSWER"),
+        ("缺 aging_temperature", "NEEDS_INPUT"),
+        ("明确歧义参数", "NEEDS_INPUT"),
+        ("solution_time = 180 min", "TOOL_EXECUTION"),
+        ("越界温度", "TOOL_EXECUTION"),
+        ("完整合法 Tool 请求", "TOOL_EXECUTION"),
+    ],
+)
+def test_default_mock_responder_has_controlled_acceptance_scenarios(
+    content_text: str,
+    expected_route: str,
+) -> None:
+    try:
+        from materialsagent.infrastructure.llm.mock import default_mock_responder
+    except ImportError:
+        pytest.fail("default_mock_responder is not implemented yet.")
+    types = _types()
+    request = types["ChatOrchestrationInput"](
+        task_id="task_contract",
+        conversation_id="conversation_contract",
+        request_id="request_contract",
+        content_text=content_text,
+    )
+    adapter = types["MockChatOrchestrationAdapter"](default_mock_responder)
+
+    first = adapter.orchestrate(request)
+    second = adapter.orchestrate(request)
+
+    assert first == second
+    assert first.route == expected_route
+
+
+def test_default_mock_responder_exposes_only_controlled_safe_failures() -> None:
+    try:
+        from materialsagent.infrastructure.llm.mock import default_mock_responder
+    except ImportError:
+        pytest.fail("default_mock_responder is not implemented yet.")
+    types = _types()
+    adapter = types["MockChatOrchestrationAdapter"](default_mock_responder)
+
+    cases = (
+        ("Mock timeout", types["ChatOrchestrationTimeoutError"]),
+        ("Mock provider failure", types["ChatOrchestrationProviderError"]),
+        ("Mock protocol failure", types["ChatOrchestrationProtocolError"]),
+    )
+    for content_text, error_type in cases:
+        request = types["ChatOrchestrationInput"](
+            task_id="task_contract",
+            conversation_id="conversation_contract",
+            request_id="request_contract",
+            content_text=content_text,
+        )
+        with pytest.raises(error_type) as captured:
+            adapter.orchestrate(request)
+        assert "SECRET" not in str(captured.value)
+        assert "C:\\" not in str(captured.value)
