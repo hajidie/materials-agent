@@ -65,7 +65,7 @@ $globalAllowedPaths = @(
     'docs/progress/phase-1-current-status.md'
 )
 
-# M0-M2 have reviewed exact allowlists. G0 and M3-M16 are recognized so
+# M0-M3 have reviewed exact allowlists. G0 and M4-M16 are recognized so
 # callers receive a stable configuration error until their exact plan allowlist
 # is reviewed and added; this deliberately avoids inventing future scope.
 $milestoneAllowlists = @{
@@ -110,6 +110,22 @@ $milestoneAllowlists = @{
         'backend/tests/integration/storage/conftest.py'
         'backend/tests/integration/storage/test_minio_storage.py'
         'backend/tests/api/test_health.py'
+    )
+    M3 = @(
+        'scripts/dev/check-scope.ps1'
+        'backend/alembic/env.py'
+        'backend/alembic/versions/0002_create_conversation_message_task_revision.py'
+        'backend/alembic/versions/0003_add_task_time_order_constraints.py'
+        'backend/src/materialsagent/domain/models/conversation.py'
+        'backend/src/materialsagent/domain/models/message.py'
+        'backend/src/materialsagent/domain/models/task.py'
+        'backend/src/materialsagent/domain/models/task_input_revision.py'
+        'backend/src/materialsagent/domain/ports/unit_of_work.py'
+        'backend/src/materialsagent/infrastructure/db/conversation_task.py'
+        'backend/src/materialsagent/infrastructure/db/unit_of_work.py'
+        'backend/tests/integration/db/conftest.py'
+        'backend/tests/integration/db/test_migrations.py'
+        'backend/tests/integration/db/test_conversation_task.py'
     )
 }
 

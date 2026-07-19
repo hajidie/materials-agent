@@ -8,6 +8,12 @@ from sqlalchemy import pool
 from materialsagent.infrastructure.config import AppSettings, load_settings
 from materialsagent.infrastructure.db.actor import ActorRow
 from materialsagent.infrastructure.db.base import Base
+from materialsagent.infrastructure.db.conversation_task import (
+    ConversationRow,
+    MessageRow,
+    TaskInputRevisionRow,
+    TaskRow,
+)
 from materialsagent.infrastructure.db.session import (
     build_postgres_url,
     create_engine_from_settings,
@@ -18,7 +24,7 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-_ = ActorRow
+_ = (ActorRow, ConversationRow, MessageRow, TaskInputRevisionRow, TaskRow)
 target_metadata = Base.metadata
 
 
