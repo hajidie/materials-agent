@@ -56,7 +56,7 @@ function ConvertTo-RepoPath {
 }
 
 $normalizedMilestone = $Milestone.Trim().ToUpperInvariant()
-$recognizedMilestones = @('G0', 'M0') + @(1..16 | ForEach-Object { "M$_" })
+$recognizedMilestones = @('G0', 'M0', 'M4A') + @(1..16 | ForEach-Object { "M$_" })
 if ($recognizedMilestones -notcontains $normalizedMilestone) {
     Complete-ScopeCheck -Code 'UNKNOWN_MILESTONE' -Summary $normalizedMilestone
 }
@@ -128,6 +128,25 @@ $milestoneAllowlists = @{
         'backend/tests/api/conftest.py'
         'backend/tests/api/test_conversations.py'
         'backend/tests/api/test_tasks.py'
+    )
+    M4A = @(
+        'scripts/dev/check-scope.ps1'
+        'docs/progress/phase-1-current-status.md'
+        'backend/src/materialsagent/domain/ports/chat_orchestration.py'
+        'backend/src/materialsagent/application/zta35g_input.py'
+        'backend/src/materialsagent/infrastructure/llm/mock.py'
+        'backend/src/materialsagent/domain/models/llm_call.py'
+        'backend/src/materialsagent/domain/ports/unit_of_work.py'
+        'backend/src/materialsagent/infrastructure/db/llm_call.py'
+        'backend/src/materialsagent/infrastructure/db/conversation_task.py'
+        'backend/src/materialsagent/infrastructure/db/unit_of_work.py'
+        'backend/alembic/env.py'
+        'backend/alembic/versions/0004_create_llm_call.py'
+        'backend/tests/contract/test_chat_orchestration.py'
+        'backend/tests/unit/test_zta35g_input.py'
+        'backend/tests/unit/test_llm_call_domain.py'
+        'backend/tests/integration/db/test_llm_call.py'
+        'backend/tests/integration/db/test_migrations.py'
     )
 }
 

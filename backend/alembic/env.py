@@ -14,6 +14,7 @@ from materialsagent.infrastructure.db.conversation_task import (
     TaskInputRevisionRow,
     TaskRow,
 )
+from materialsagent.infrastructure.db.llm_call import LLMCallRow
 from materialsagent.infrastructure.db.session import (
     build_postgres_url,
     create_engine_from_settings,
@@ -24,7 +25,14 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-_ = (ActorRow, ConversationRow, MessageRow, TaskInputRevisionRow, TaskRow)
+_ = (
+    ActorRow,
+    ConversationRow,
+    LLMCallRow,
+    MessageRow,
+    TaskInputRevisionRow,
+    TaskRow,
+)
 target_metadata = Base.metadata
 
 

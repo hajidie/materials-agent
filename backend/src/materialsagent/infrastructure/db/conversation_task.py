@@ -266,7 +266,14 @@ class MessageRow(Base):
         JSONB(none_as_null=True),
         nullable=True,
     )
-    llm_call_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    llm_call_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "llm_call.llm_call_id",
+            name="fk_message_llm_call",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -335,7 +342,14 @@ class TaskInputRevisionRow(Base):
         nullable=False,
     )
     request_id: Mapped[str] = mapped_column(Text, nullable=False)
-    source_llm_call_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_llm_call_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "llm_call.llm_call_id",
+            name="fk_task_input_revision_llm_call",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
     source_message_ids: Mapped[list[str]] = mapped_column(
         ARRAY(Text),
         nullable=False,

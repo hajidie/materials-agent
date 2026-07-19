@@ -5,6 +5,7 @@ from typing import Protocol, Self
 from materialsagent.domain.models.actor import Actor
 from materialsagent.domain.models.conversation import Conversation
 from materialsagent.domain.models.message import Message
+from materialsagent.domain.models.llm_call import LLMCall
 from materialsagent.domain.models.task import Task
 from materialsagent.domain.models.task_input_revision import TaskInputRevision
 
@@ -74,12 +75,33 @@ class TaskInputRevisionRepository(Protocol):
     def list_for_task(self, task_id: str) -> list[TaskInputRevision]: ...
 
 
+class LLMCallRepository(Protocol):
+    def get(self, llm_call_id: str) -> LLMCall | None: ...
+
+    def add(self, call: LLMCall) -> None: ...
+
+    def list_for_task(
+        self,
+        task_id: str,
+        *,
+        request_id: str | None = None,
+    ) -> list[LLMCall]: ...
+
+    def update(
+        self,
+        call: LLMCall,
+        *,
+        expected_status: str,
+    ) -> LLMCall | None: ...
+
+
 class UnitOfWork(Protocol):
     actors: ActorRepository
     conversations: ConversationRepository
     messages: MessageRepository
     tasks: TaskRepository
     task_input_revisions: TaskInputRevisionRepository
+    llm_calls: LLMCallRepository
 
     def __enter__(self) -> Self: ...
 

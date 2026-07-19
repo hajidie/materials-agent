@@ -23,7 +23,8 @@ from materialsagent.infrastructure.db.session import (
 
 BASE_REVISION = "0001_create_actor"
 PREVIOUS_REVISION = "0002_create_conversation_message_task_revision"
-EXPECTED_REVISION = "0003_task_time_order"
+IMMEDIATE_PREVIOUS_REVISION = "0003_task_time_order"
+EXPECTED_REVISION = "0004_llm_call"
 ALEMBIC_INI = Path(__file__).resolve().parents[3] / "alembic.ini"
 NEW_TASK_TIME_CHECKS = {
     "ck_task_started_at_not_before_created_at",
@@ -37,6 +38,7 @@ M3_TABLES = {
     "task_input_revision",
     "alembic_version",
 }
+M4A_TABLES = M3_TABLES | {"llm_call"}
 
 
 def _make_alembic_config(settings: AppSettings) -> Config:
@@ -115,7 +117,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
     engine = create_engine_from_settings(temporary_database)
     try:
         inspector = inspect(engine)
-        assert set(inspector.get_table_names(schema="public")) == M3_TABLES
+        assert set(inspector.get_table_names(schema="public")) == M4A_TABLES
         version_columns = _column_map(inspector, "alembic_version")
         assert version_columns["version_num"]["type"].length >= len(
             EXPECTED_REVISION
@@ -203,6 +205,30 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "validation_errors",
                 "created_at",
             },
+            "llm_call": {
+                "llm_call_id",
+                "task_id",
+                "conversation_id",
+                "request_id",
+                "purpose",
+                "input_result_id",
+                "provider",
+                "model_name",
+                "prompt_template_id",
+                "prompt_template_version",
+                "prompt_digest",
+                "generation_parameters",
+                "structured_output_summary",
+                "usage",
+                "provider_request_id",
+                "status",
+                "created_at",
+                "started_at",
+                "completed_at",
+                "duration_ms",
+                "error_code",
+                "safe_error_message",
+            },
         }
         for table_name, column_names in expected_columns.items():
             assert set(_column_map(inspector, table_name)) == column_names
@@ -251,6 +277,17 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             assert isinstance(revision_columns[jsonb_name]["type"], JSONB)
         assert revision_columns["created_at"]["type"].timezone is True
 
+        llm_call_columns = _column_map(inspector, "llm_call")
+        for jsonb_name in {
+            "generation_parameters",
+            "structured_output_summary",
+            "usage",
+        }:
+            assert isinstance(llm_call_columns[jsonb_name]["type"], JSONB)
+        for timestamp_name in {"created_at", "started_at", "completed_at"}:
+            assert llm_call_columns[timestamp_name]["type"].timezone is True
+        assert llm_call_columns["input_result_id"]["nullable"] is True
+
         expected_foreign_keys = {
             "conversation": {"fk_conversation_actor": "actor"},
             "task": {
@@ -260,10 +297,16 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             "message": {
                 "fk_message_actor": "actor",
                 "fk_message_conversation": "conversation",
+                "fk_message_llm_call": "llm_call",
                 "fk_message_task": "task",
             },
             "task_input_revision": {
+                "fk_task_input_revision_llm_call": "llm_call",
                 "fk_task_input_revision_task": "task",
+            },
+            "llm_call": {
+                "fk_llm_call_conversation": "conversation",
+                "fk_llm_call_task": "task",
             },
         }
         for table_name, expected in expected_foreign_keys.items():
@@ -328,6 +371,33 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "ck_task_input_revision_task_id_not_blank",
                 "ck_task_input_revision_validation_errors_array",
             },
+            "llm_call": {
+                "ck_llm_call_completed_not_before_started",
+                "ck_llm_call_conversation_id_not_blank",
+                "ck_llm_call_duration_nonnegative",
+                "ck_llm_call_error_code_not_blank",
+                "ck_llm_call_failed_requires_error",
+                "ck_llm_call_generation_parameters_object",
+                "ck_llm_call_input_result_id_not_blank",
+                "ck_llm_call_input_result_purpose",
+                "ck_llm_call_llm_call_id_not_blank",
+                "ck_llm_call_model_name_not_blank",
+                "ck_llm_call_prompt_digest_sha256",
+                "ck_llm_call_prompt_template_id_not_blank",
+                "ck_llm_call_prompt_template_version_not_blank",
+                "ck_llm_call_provider_not_blank",
+                "ck_llm_call_provider_request_id_not_blank",
+                "ck_llm_call_purpose_allowed",
+                "ck_llm_call_request_id_not_blank",
+                "ck_llm_call_safe_error_message_not_blank",
+                "ck_llm_call_started_not_before_created",
+                "ck_llm_call_status_allowed",
+                "ck_llm_call_status_time_shape",
+                "ck_llm_call_structured_output_summary_object",
+                "ck_llm_call_succeeded_without_error",
+                "ck_llm_call_task_id_not_blank",
+                "ck_llm_call_usage_object",
+            },
         }
         for table_name, expected_names in expected_check_names.items():
             constraints = inspector.get_check_constraints(table_name)
@@ -368,8 +438,43 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
         } == {
             "uq_task_input_revision_task_revision": ["task_id", "revision"]
         }
+        assert {
+            index["name"]: index["column_names"]
+            for index in inspector.get_indexes("llm_call")
+        } == {
+            "ix_llm_call_task_request_created": [
+                "task_id",
+                "request_id",
+                "created_at",
+            ]
+        }
     finally:
         engine.dispose()
+
+    command.downgrade(config, IMMEDIATE_PREVIOUS_REVISION)
+    immediate_previous_engine = create_engine_from_settings(temporary_database)
+    try:
+        immediate_inspector = inspect(immediate_previous_engine)
+        assert set(immediate_inspector.get_table_names(schema="public")) == M3_TABLES
+        assert NEW_TASK_TIME_CHECKS <= _task_check_names(
+            immediate_previous_engine
+        )
+        assert "fk_message_llm_call" not in {
+            constraint["name"]
+            for constraint in immediate_inspector.get_foreign_keys("message")
+        }
+        assert "fk_task_input_revision_llm_call" not in {
+            constraint["name"]
+            for constraint in immediate_inspector.get_foreign_keys(
+                "task_input_revision"
+            )
+        }
+    finally:
+        immediate_previous_engine.dispose()
+    assert _current_revision(temporary_database) == IMMEDIATE_PREVIOUS_REVISION
+
+    command.upgrade(config, "head")
+    assert _current_revision(temporary_database) == EXPECTED_REVISION
 
     command.downgrade(config, PREVIOUS_REVISION)
     previous_engine = create_engine_from_settings(temporary_database)
@@ -391,6 +496,57 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
     finally:
         restored_engine.dispose()
     assert _current_revision(temporary_database) == EXPECTED_REVISION
+
+
+def test_llm_call_migration_preserves_existing_tables_and_rows(
+    temporary_database: AppSettings,
+) -> None:
+    config = _make_alembic_config(temporary_database)
+    command.upgrade(config, IMMEDIATE_PREVIOUS_REVISION)
+    engine = create_engine_from_settings(temporary_database)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO actor (actor_id, actor_origin, created_at) "
+                    "VALUES ('actor_preserved', 'LOCAL_ANONYMOUS', :created_at)"
+                ),
+                {"created_at": datetime(2026, 7, 19, tzinfo=timezone.utc)},
+            )
+            before_oids = dict(
+                connection.execute(
+                    text(
+                        "SELECT relname, oid FROM pg_class "
+                        "WHERE relname = ANY(:table_names)"
+                    ),
+                    {"table_names": sorted(M3_TABLES - {"alembic_version"})},
+                ).all()
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    upgraded_engine = create_engine_from_settings(temporary_database)
+    try:
+        with upgraded_engine.connect() as connection:
+            after_oids = dict(
+                connection.execute(
+                    text(
+                        "SELECT relname, oid FROM pg_class "
+                        "WHERE relname = ANY(:table_names)"
+                    ),
+                    {"table_names": sorted(M3_TABLES - {"alembic_version"})},
+                ).all()
+            )
+            assert after_oids == before_oids
+            assert connection.scalar(
+                text("SELECT count(*) FROM actor WHERE actor_id='actor_preserved'")
+            ) == 1
+            assert "tool_result" not in inspect(connection).get_table_names()
+    finally:
+        upgraded_engine.dispose()
+
+    command.check(config)
 
     command.downgrade(config, BASE_REVISION)
     downgraded_engine = create_engine_from_settings(temporary_database)

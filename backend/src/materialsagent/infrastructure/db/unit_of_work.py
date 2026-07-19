@@ -9,6 +9,7 @@ from materialsagent.domain.ports.unit_of_work import (
     ActorRepository,
     ConversationRepository,
     DatabaseUnavailableError,
+    LLMCallRepository,
     MessageRepository,
     PersistenceConflictError,
     PersistenceError,
@@ -16,6 +17,7 @@ from materialsagent.domain.ports.unit_of_work import (
     TaskRepository,
 )
 from materialsagent.infrastructure.db.actor import SQLAlchemyActorRepository
+from materialsagent.infrastructure.db.llm_call import SQLAlchemyLLMCallRepository
 from materialsagent.infrastructure.db.conversation_task import (
     SQLAlchemyConversationRepository,
     SQLAlchemyMessageRepository,
@@ -33,6 +35,7 @@ class SQLAlchemyUnitOfWork:
         self._messages: MessageRepository | None = None
         self._tasks: TaskRepository | None = None
         self._task_input_revisions: TaskInputRevisionRepository | None = None
+        self._llm_calls: LLMCallRepository | None = None
 
     @property
     def actors(self) -> ActorRepository:
@@ -64,6 +67,12 @@ class SQLAlchemyUnitOfWork:
             raise RuntimeError("UnitOfWork has not been entered.")
         return self._task_input_revisions
 
+    @property
+    def llm_calls(self) -> LLMCallRepository:
+        if self._llm_calls is None:
+            raise RuntimeError("UnitOfWork has not been entered.")
+        return self._llm_calls
+
     def __enter__(self) -> SQLAlchemyUnitOfWork:
         if self.session is not None:
             raise RuntimeError("UnitOfWork is already active.")
@@ -75,6 +84,7 @@ class SQLAlchemyUnitOfWork:
         self._task_input_revisions = SQLAlchemyTaskInputRevisionRepository(
             self.session
         )
+        self._llm_calls = SQLAlchemyLLMCallRepository(self.session)
         return self
 
     def __exit__(
@@ -97,6 +107,7 @@ class SQLAlchemyUnitOfWork:
                 self._messages = None
                 self._tasks = None
                 self._task_input_revisions = None
+                self._llm_calls = None
 
     def _active_session(self) -> Session:
         if self.session is None:
