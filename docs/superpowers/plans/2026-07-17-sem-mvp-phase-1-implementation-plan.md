@@ -6,7 +6,7 @@
 >
 > 依据：第一节、第二节、第三节、第四节 A、第四节 B 五份“已确认设计基线”
 >
-> 本文件规划阶段 1；本轮只执行 G0 的计划修订与仓库基线准备，不开始 M0，不创建业务代码、数据库、环境或容器，不安装依赖、不运行模型，也不执行 git commit。
+> 本文件规划阶段 1 的完整实施顺序和里程碑边界。当前实际执行位置、branch、HEAD、工作单元和暂停状态，只以 `docs/progress/phase-1-current-status.md` 为准。
 
 > **供后续执行 Codex 使用：** 一个独立、可验收的工作单元约等于一个新的 Codex 对话；一个完整里程碑可以拆成多个连续对话。每个对话按本计划的固定恢复顺序读取规则、Git 状态、动态进度、当前里程碑、相关基线及代码测试，结束时执行局部测试、人工验收和 Git diff 检查。未经项目负责人通过暂停检查点，不进入下一工作单元或下一里程碑。
 
@@ -31,7 +31,7 @@
 11. `SEM/` 在权重验证前和验证期间保持只读；不得为了兼容先重构原研究代码或覆盖权重。
 12. 每个里程碑坚持测试先行或测试同步，外部调用放在数据库事务外，日志与响应不得包含密钥、完整图片 bytes、Prompt、堆栈或权重路径。
 13. 每个里程碑只修改其允许范围；发现需要跨范围修改时停止并请求负责人调整计划。
-14. 本计划中的提交命令只供未来实施时使用；本轮不执行。每个提交都必须在项目负责人通过对应验收后进行。
+14. 本计划中的提交命令只有在项目负责人通过对应验收后才能执行。未经批准不得暂存、提交或进入下一工作单元。
 15. G0 必须先由项目负责人验收；只有 G0 获批、按批准范围提交并恢复干净工作区后，才能开始 M0。
 16. Mock LLM 必须长期保留为自动化测试替身；真实 LLM 只通过 LangChain Adapter 和 Explanation Adapter 接入，不得直接执行 Tool。
 17. API Key 只来自环境变量；不得保存完整 Prompt、Secret 或 Provider 原始响应，只保存基线允许的模板身份、digest、usage、安全结构化摘要和安全错误。
@@ -96,7 +96,7 @@ PostgreSQL 和 MinIO 镜像必须使用明确版本标签，禁止使用 `latest
 
 ### 4. 每个里程碑后用户能看到什么
 
-G0 能看到可解释的交接与完整性基线；M1 能看到健康检查；M3 能创建对话和 Task；M4 能看到知识回答或缺参追问；M5 能看到 Mock ToolRun；M6 能读取正式 PNG；M7 能看到结构化结果和解释；M8 能验证重试与幂等；M9 能读取统一时间线；M10 能在浏览器完成最小交互；M11 能演示完整 Mock 闭环；M12 能验证真实 LLM 的知识回答、Tool 路由、追问和 Explanation；M13–M14 给出模型兼容和最小推理证据；M15–M16 用真实 Runtime 和真实 LLM 完成同一界面闭环。
+G0 能看到可解释的交接与完整性基线；M1 能看到健康检查；M3 能创建对话和 Task；M4 能看到知识回答、缺参追问、硬校验错误，以及完整合法 ToolCandidate 的安全 `TOOL_UNAVAILABLE` 响应；M5 能验收 Mock Runtime、ToolRun 和内部 Tool 执行，但消息 POST 尚不返回完整 Tool 结果；M6 能通过独立 Asset 路径读取正式 PNG，但消息 POST 仍不宣称 Tool 结果完成；M7 才能通过消息 POST 看到结构化结果、图片和解释；M8 能验证重试与幂等；M9 能读取统一时间线；M10 能在浏览器完成最小交互；M11 能演示完整 Mock 闭环；M12 能验证真实 LLM 的知识回答、Tool 路由、追问和 Explanation；M13–M14 给出模型兼容和最小推理证据；M15–M16 用真实 Runtime 和真实 LLM 完成同一界面闭环。
 
 ### 5. 哪些步骤不依赖真实模型
 
@@ -118,12 +118,14 @@ M0–M11 全部不依赖真实模型。数据库、MinIO、Actor、Tool Registry
 
 1. G0：计划修订、根规则、动态进度、忽略策略、`.codex/` 处理和 SEM 完整性基线可接受；获批后才允许提交 G0，提交并恢复干净工作区后才开始 M0。
 2. M2：Backend、PostgreSQL、MinIO 和基础持久化可启动。
-3. M8：Mock Tool 的 Backend 全链路（含结果、失败、幂等和重试）通过。
-4. M11：统一时间线与最小 Vue 前端符合产品预期，阶段 1A 完成。
-5. M12：真实 LangChain/LLM Provider 的三类编排、四维参数/单位/requested_outputs 提取、Explanation 和安全失败路径可接受。
-6. M13：Python 3.8 环境与全部权重能够加载，实际精确依赖记录和兼容性证据可接受。
-7. M14：真实最小 SEM 与性能结果在项目负责人看来合理，固定运行参数和真实性能记录可接受。
-8. M16：真实 LLM 与真实 ZTA35G Runtime 同时启用的完整端到端通过。
+3. M4：五类 CHAT_ORCHESTRATION 路径可接受；完整合法 ToolCandidate 固定形成 Revision、LLMCall SUCCEEDED、Task TOOL_EXECUTION/FAILED、`TOOL_UNAVAILABLE` 和 HTTP 503，不创建 ToolRun；获批后才开始 M5。
+4. M7：ToolRun→Asset→ToolResult/ResultAssetLink→Explanation→selected references→Task 稳定状态的完整链路和消息 POST 激活点可接受；获批后才开始 M8。
+5. M8：Mock Tool 的 Backend 全链路（含结果、失败、幂等和重试）通过。
+6. M11：统一时间线与最小 Vue 前端符合产品预期，阶段 1A 完成。
+7. M12：真实 LangChain/LLM Provider 的三类编排、四维参数/单位/requested_outputs 提取、Explanation 和安全失败路径可接受。
+8. M13：Python 3.8 环境与全部权重能够加载，实际精确依赖记录和兼容性证据可接受。
+9. M14：真实最小 SEM 与性能结果在项目负责人看来合理，固定运行参数和真实性能记录可接受。
+10. M16：真实 LLM 与真实 ZTA35G Runtime 同时启用的完整端到端通过。
 
 ### 10. 如何避免 Codex 一次修改过多
 
@@ -140,10 +142,10 @@ M0–M11 全部不依赖真实模型。数据库、MinIO、Actor、Tool Registry
 | 1A | M1 Backend 最小启动 | `/api/v1/health/live`、安全 ready 骨架 | 否 |
 | 1A | M2 PostgreSQL/MinIO 基础 | Compose 两服务、DB/MinIO 探针、Actor 基础持久化 | 否 |
 | 1A | M3 Conversation/Message/Task | 创建对话、提交消息、读取 Task | 否 |
-| 1A | M4 Mock CHAT_ORCHESTRATION | 知识回答、Tool 候选、NEEDS_INPUT | 否，Mock LLM |
-| 1A | M5 Mock Runtime 与 ToolRun | `/internal/v1` Mock、Adapter、一次 ToolRun | 否，Mock Runtime |
-| 1A | M6 Asset 闭环 | Base64 `.npy` 校验、PNG、PENDING→AVAILABLE、受控读取 | 否 |
-| 1A | M7 ToolResult 与 Explanation | 结构化结果、解释成功/失败 | 否，Mock LLM |
+| 1A | M4 Mock CHAT_ORCHESTRATION | 知识回答、NEEDS_INPUT、硬校验失败；完整合法候选安全返回 `TOOL_UNAVAILABLE`，无 ToolRun | 否，Mock LLM |
+| 1A | M5 Mock Runtime 与 ToolRun | Registry/Catalog、`/internal/v1` Mock、Adapter、MaterialTool、内部 ToolRun 执行；不宣称公共结果完成 | 否，Mock Runtime |
+| 1A | M6 Asset 闭环 | Base64 `.npy` 校验、PNG、PENDING→AVAILABLE、受控读取；不激活消息 POST 完整 Tool 结果 | 否 |
+| 1A | M7 ToolResult 与 Explanation | 完整结果链、selected 引用、稳定 Task 状态，并激活消息 POST 正式 Tool 响应 | 否，Mock LLM |
 | 1A | M8 幂等、重试和失败 | 不重复写、Tool/Explanation 重试、安全错误映射 | 否 |
 | 1A | M9 统一时间线 | 稳定锚点、游标、Task 卡聚合 | 否 |
 | 1A | M10 最小 Vue 前端 | 浏览器聊天、结果卡、图片、重试 | 否 |
@@ -156,7 +158,7 @@ M0–M11 全部不依赖真实模型。数据库、MinIO、Actor、Tool Registry
 
 ## 未来文件结构锁定
 
-以下结构用于约束后续实现，不要求本轮创建：
+以下结构用于约束对应里程碑实现；是否在当前工作单元创建，以动态进度和当前里程碑允许范围为准：
 
 ```text
 backend/
@@ -276,7 +278,7 @@ docker-compose.yml
 1. 写入目录与命名规范、UTF-8/LF 规则和 Windows PowerShell 命令约定。
 2. `.env.example` 只列变量名与安全说明：数据库、MinIO、LLM、Mock/真实 Runtime URL、共享 Token；不写真实 secret。
 3. `check-scope.ps1` 读取 `git status --short`，在当前工作单元允许范围之外出现文件时以非零退出；它必须调用或配合 `scripts/dev/check-sem-integrity.ps1`，使已被 `.gitignore` 忽略的 `SEM/` 仍受完整性检查。
-4. `phase-1-checklist.md` 列出 G0、M2、M8、M11、M12、M13、M14、M16 八个暂停点和每个阶段禁止项。
+4. `phase-1-checklist.md` 列出 G0、M2、M4、M7、M8、M11、M12、M13、M14、M16 十个暂停点和每个阶段禁止项。
 
 **自动化测试与四类场景：**
 
@@ -359,7 +361,7 @@ docker-compose.yml
 
 **失败时回退：** `docker compose down` 停服务；Alembic 只在本地空库按 downgrade 验证，禁止对已含验收数据的库破坏性回退；M1 仍可独立运行。
 
-**完成证据：** Compose 服务清单、Alembic heads、集成测试、故障注入响应、`git diff --check`。到此必须暂停，等待负责人确认检查点 2。未来建议提交：`feat: add postgres and minio foundations`。
+**完成证据：** Compose 服务清单、Alembic heads、集成测试、故障注入响应、`git diff --check`。到此必须暂停，等待项目负责人通过 M2 检查点。未来建议提交：`feat: add postgres and minio foundations`。
 
 ## M3：Conversation、Message、Task 最小闭环
 
@@ -367,7 +369,7 @@ docker-compose.yml
 
 **用户价值：** 用户请求第一次成为可靠、可查询、不会留下半条消息的业务事实。
 
-**前置条件：** 检查点 2 通过。
+**前置条件：** M2 项目负责人检查点通过。
 
 **允许修改的文件范围：** Conversation/Message/Task/TaskInputRevision domain、repositories、migration、application services、`/conversations` 与 `/tasks` 路由及 M3 tests。
 
@@ -396,48 +398,64 @@ docker-compose.yml
 
 ## M4：Mock CHAT_ORCHESTRATION
 
-**目标：** 实现可替换 Chat Orchestration Port、Mock LLM 与确定性单位/参数校验，覆盖知识回答、Tool 候选和 NEEDS_INPUT。
+**目标：** 实现可替换 Chat Orchestration Port、Mock LLM、确定性单位/参数校验、正式持久化和公共 HTTP 映射，覆盖知识回答、NEEDS_INPUT、硬校验失败、编排依赖失败，以及完整合法 ToolCandidate 在完整 Tool 结果链尚未开放时的安全不可用终态。
 
-**用户价值：** 用户能收到知识回答或准确追问，完整非法输入不会误执行 Tool。
+**用户价值：** 用户能收到知识回答或准确追问，完整非法输入不会误执行 Tool；完整合法输入在当前能力尚未开放时得到明确、安全、可追溯的 `TOOL_UNAVAILABLE`，不会被伪装成 Tool 已成功执行。
 
-**前置条件：** M3 通过。
+**前置条件：** M3 通过；M4-A 的候选契约、Mock Adapter、确定性标准化/硬校验和 LLMCall 基础已验收提交。
 
 **允许修改的文件范围：** `domain/ports/chat_orchestration.py`、`application/{chat_orchestration,normalization,validation}.py`、`infrastructure/llm/mock.py`、LLMCall migration/repository、messages API 和 M4 tests。
 
-**明确不做：** 不接真实 LLM，不创建 ToolRun，不运行 Mock Runtime，不让 LLM 负责最终单位转换或范围判断。
+**明确不做：** 不接真实 LLM，不创建 Tool Registry、MaterialTool、ToolRun、Runtime、Asset、ToolResult 或 Explanation，不运行 Mock Runtime，不让 LLM 负责最终单位转换或范围判断。
 
-**接口：** `ChatOrchestrationPort.orchestrate(input) -> KnowledgeAnswer | ToolCandidate | NeedsInputCandidate`；Application 将候选转为正式 Message/Revision/Task 状态。
+**接口：** `ChatOrchestrationPort.orchestrate(input) -> KnowledgeAnswer | ToolCandidate | NeedsInputCandidate`；Application 将候选重新标准化和硬校验后转为正式 Message/Revision/Task/LLMCall 事实。完整合法 ToolCandidate 在 M7 激活完整结果链前固定映射为：
+
+```text
+LLMCall.status = SUCCEEDED
+创建 TaskInputRevision revision 1
+Task.task_type = TOOL_EXECUTION
+Task.current_status = FAILED
+Task.error_code = TOOL_UNAVAILABLE
+Task.safe_error_message = 固定安全文本
+HTTP = 503
+不创建 ToolRun / ToolResult / Asset / 成功 AssistantMessage
+selected_tool_run_id = null
+selected_result_id = null
+```
+
+该路径表示 CHAT_ORCHESTRATION、Application 标准化和硬校验均成功，但平台尚未开放完整 Tool 执行与结果持久化能力；它不是输入校验失败，也不是 Runtime 执行后失败。
 
 **实现步骤：**
 
-1. 为三类判别联合、温度/时间单位、精度、范围、unsupported material、LLM 超时写失败测试。
-2. 实现 Mock LLM 可按受控测试输入返回三类结果；完整 Prompt 不入库。
-3. 实现 `60 min = 1 h`、四维参数和 requested_outputs 的确定性规则。
-4. 在消息 POST 中同步完成编排并返回 `SUCCEEDED/NEEDS_INPUT/FAILED`；超时规范化为 `UPSTREAM_TIMEOUT`。
+1. M4-A 先为三类判别联合、温度/时间单位、精度、范围、unsupported material 和 Mock 安全错误写失败测试，并实现受控候选、Mock Adapter、确定性规则和 LLMCall 基础。
+2. M4-B 为知识回答、NEEDS_INPUT、歧义、硬校验非法、timeout/provider/protocol、数据库终结失败和重复终结写失败测试。
+3. M4-B 使用短事务创建/启动/终结 LLMCall，Mock 调用只发生在 UnitOfWork/Session 之外；Application 必须重新计算正式 missing/ambiguous/validation 字段。
+4. 在消息 POST 中同步完成 KNOWLEDGE_ANSWER=200、NEEDS_INPUT=200、完整但硬校验非法=422，以及安全的 CHAT_ORCHESTRATION 失败映射。
+5. 对完整合法 ToolCandidate 创建正式 revision 1，将 LLMCall 终结为 SUCCEEDED、Task 终结为 TOOL_EXECUTION/FAILED，并返回 503 `TOOL_UNAVAILABLE`；不得创建 ToolRun、占位结果或模板 AssistantMessage。
 
-**自动化测试与四类场景：** 成功知识回答和合法 ToolCandidate；输入错误缺参→NEEDS_INPUT、越界→422 FAILED；依赖失败 Mock LLM 超时→Task FAILED；相同内部调用结果重复终结不创建第二 AssistantMessage/Revision。
+**自动化测试与五类业务场景：** 知识回答→AssistantMessage + Task SUCCEEDED；缺失/歧义→正式 Revision + NEEDS_INPUT；完整但硬校验非法→Revision + 422 FAILED；timeout/provider/protocol→LLMCall/Task 安全 FAILED 且无伪造事实；完整合法 ToolCandidate→Revision + LLMCall SUCCEEDED + Task TOOL_EXECUTION/FAILED + 503 `TOOL_UNAVAILABLE`，无 ToolRun。相同内部调用结果重复终结不得创建第二 AssistantMessage 或第二个 revision 1。
 
-运行：`conda run -n materialsagent-backend python -m pytest backend/tests/unit/test_normalization.py backend/tests/contract/test_chat_orchestration.py backend/tests/api/test_message_orchestration.py -q`
+运行：`conda run -n materialsagent-backend python -m pytest backend/tests/unit/test_zta35g_input.py backend/tests/unit/test_chat_orchestration_service.py backend/tests/contract/test_chat_orchestration.py backend/tests/integration/db/test_chat_orchestration_persistence.py backend/tests/api/test_message_orchestration.py backend/tests/api/test_tasks.py -q`
 
-预期：三类 route 均有测试；0 failed；日志可见 request_id/task_id/LLMCall，但无 Prompt。
+预期：三类 route 和五类业务映射均有测试；0 failed；完整合法 ToolCandidate 为 503/`TOOL_UNAVAILABLE` 且数据库无 ToolRun；日志可见 request_id/task_id/LLMCall，但无 Prompt、provider 原始响应、路径或 Secret。
 
-**人工验收步骤：** 分别提交知识问题、缺 aging_temperature、solution_time=180 min、越界温度；核对 Task、Revision 和追问。
+**人工验收步骤：** 分别提交知识问题、缺 aging_temperature、solution_time=180 min、越界温度、完整合法 Tool 请求和 Mock timeout；核对 HTTP、Task、Revision、AssistantMessage、LLMCall 和数据库行。完整合法 Tool 请求必须返回 503/`TOOL_UNAVAILABLE`、LLMCall SUCCEEDED、Task FAILED，且 ToolRun/Asset/ToolResult 行数均为 0。
 
 **失败时回退：** 配置切回无 Orchestration 的 M3 路径，仅用于开发诊断；不得在产品验收中伪造成功。
 
-**完成证据：** 三类响应、单位转换快照、超时响应、LLMCall 安全投影、diff 检查。未来建议提交：`feat: add mock chat orchestration`。
+**完成证据：** 五类业务响应、单位转换快照、超时/provider/protocol 响应、LLMCall 安全投影、完整合法候选的 503 与零 ToolRun 证据、diff 检查。M4 完成后必须暂停，等待项目负责人验收；不得直接开始 M5。未来建议提交：`feat: add mock chat orchestration`。
 
 ## M5：Mock Runtime、Tool Registry 与 ToolRun
 
-**目标：** 建立静态 Tool Registry/Catalog、独立 Mock Runtime、HTTP Client Adapter 和一次 MaterialTool.execute/ToolRun 闭环。
+**目标：** 建立静态 Tool Registry/Catalog、独立 Mock Runtime、HTTP Client Adapter、MaterialTool、ToolRun 和 ToolExecutionService 的内部执行闭环；不把尚无 Asset/ToolResult 的 Mock 成功投影为公共 Task 完整成功。
 
-**用户价值：** 在无真实模型情况下验证后端确实会调用一个符合第四节 B 的 Tool，并能区分未就绪、繁忙、超时和协议错误。
+**用户价值：** 在无真实模型情况下验证后端内部确实会调用一个符合第四节 B 的 Tool，并能追踪 ToolRun、区分未就绪、繁忙、超时和协议错误；消息 POST 仍不会向用户伪造完整 Tool 结果。
 
-**前置条件：** M4 通过。
+**前置条件：** M4 通过项目负责人验收并提交；完整合法消息请求的 M4 终态仍为 503/`TOOL_UNAVAILABLE`。
 
 **允许修改的文件范围：** `mock-runtime/**`、Backend Tool Registry/Catalog、MaterialTool/ToolExecutionOutput ports、ToolRun model/repository/migration、tool_clients、tools routes、M5 tests。
 
-**明确不做：** 不保存 Asset/ToolResult/Explanation，不加载 `SEM/`，不自动重试 execute，不建立 Runtime 队列或让 Backend 启动 Runtime。
+**明确不做：** 不保存 Asset/ToolResult/Explanation，不加载 `SEM/`，不自动重试 execute，不建立 Runtime 队列或让 Backend 启动 Runtime；不解除消息 POST 的 M4 `TOOL_UNAVAILABLE` 映射，不因 Mock Runtime 返回成功而把公共 Task 标为 SUCCEEDED/PARTIALLY_SUCCEEDED。
 
 **接口：** Mock 提供 token 保护的 live/ready/execute；Adapter 只发送三个 ID、固定 Tool/版本、四维参数、requested_outputs、seed 与 `1/2.0/1000`。
 
@@ -446,31 +464,31 @@ docker-compose.yml
 1. 先写 Token、固定参数、版本、busy=1、超时、无自动重试和响应 ID 回显契约测试。
 2. Mock Runtime 返回确定性 Base64 `.npy` 和可注入的安全失败，不访问数据库/MinIO。
 3. 实现 Registry 唯一事实源和 Catalog 投影；MaterialTool 只通过 Adapter 调用 Runtime。
-4. ToolRun 创建/终结使用短事务；HTTP 调用在事务外。
+4. ToolRun 创建、启动和调用失败终结使用短事务；HTTP 调用在事务外。成功 Mock 调用只形成受控的待提交 ToolExecutionOutput/诊断事实，ToolRun/Task 的完整成功聚合等待 M7 的 Asset/ToolResult 链。
 
-**自动化测试与四类场景：** 成功创建一个 ToolRun；输入错误 guide_scale=3.0 或未知 Tool 被 Runtime 拒绝；依赖失败 Runtime 未启动/超时/忙正确映射；同一 ToolRun 不自动重发，显式第二次执行必须新 ID/seed（公共端点留 M8）。
+**自动化测试与四类场景：** 成功创建一个 ToolRun 并得到一次受控 ToolExecutionOutput；输入错误 guide_scale=3.0 或未知 Tool 被 Runtime 拒绝；依赖失败 Runtime 未启动/超时/忙正确映射；同一 ToolRun 不自动重发，显式第二次执行必须新 ID/seed（公共端点留 M8）。另加回归断言：消息 POST 的完整合法 ToolCandidate 仍返回 503/`TOOL_UNAVAILABLE`，无 Asset/ToolResult/selected 引用，不把 Mock Runtime 成功冒充为用户结果。
 
-运行：`conda run -n materialsagent-backend python -m pytest mock-runtime/tests backend/tests/contract/test_runtime_contract.py backend/tests/integration/db/test_tool_run.py backend/tests/api/test_tools.py -q`
+运行：`conda run -n materialsagent-backend python -m pytest mock-runtime/tests backend/tests/contract/test_runtime_contract.py backend/tests/integration/db/test_tool_run.py backend/tests/api/test_tools.py backend/tests/api/test_message_orchestration.py -q`
 
-预期：0 failed；Mock ready 不推理；第二并发 execute 为 503 `RUNTIME_BUSY`、`retryable=true`；Adapter 调用计数在超时后仍为 1。
+预期：0 failed；Mock ready 不推理；第二并发 execute 为 503 `RUNTIME_BUSY`、`retryable=true`；Adapter 调用计数在超时后仍为 1；公共消息 POST 未被激活为完整 Tool 成功。
 
-**人工验收步骤：** 手动启动 Mock Runtime，先带 Token检查 ready，再启动 Backend；提交完整 Tool 请求并查询 ToolRun；用错误 Token 验证三条内部路径均拒绝。
+**人工验收步骤：** 手动启动 Mock Runtime，先带 Token 检查 ready，再通过受控开发验收路径用已校验 Revision 调用 ToolExecutionService 并查询 ToolRun；用错误 Token 验证三条内部路径均拒绝。另提交完整合法消息请求，确认仍为 503/`TOOL_UNAVAILABLE`，没有结果、图片或 selected 引用。
 
 **失败时回退：** Backend 配置回到 Tool unavailable；M4 知识回答/NEEDS_INPUT 仍可运行。删除 Mock 不影响平台数据库。
 
-**完成证据：** Mock 请求/响应样例、固定参数断言、busy 并发测试、ToolRun 记录、日志三 ID、diff 检查。未来建议提交：`feat: add mock zta35g runtime slice`。
+**完成证据：** Mock 请求/响应样例、固定参数断言、busy 并发测试、ToolRun 与待提交输出记录、消息 POST 未误报成功的证据、日志三 ID、diff 检查。未来建议提交：`feat: add mock zta35g runtime slice`。
 
 ## M6：Asset PENDING → AVAILABLE
 
-**目标：** 解码并校验 Mock `.npy`，由 Backend 正式编码 PNG，完成 Asset PENDING→MinIO→AVAILABLE 与受控内容读取。
+**目标：** 解码并校验 Mock `.npy`，由 Backend 正式编码 PNG，完成 Asset PENDING→MinIO→AVAILABLE/FAILED/ORPHANED 与受控内容读取；不在 ToolResult 尚未建立时激活消息 POST 的完整 Tool 结果。
 
-**用户价值：** 用户第一次可以可靠查看生成图片，且图片缺失或损坏时不会被误报为成功。
+**用户价值：** 用户可以通过独立 Asset 验收路径可靠查看生成图片，且图片缺失或损坏时不会被误报为成功；该能力本身不代表原消息 Task 已形成完整 Tool 结果。
 
 **前置条件：** M5 通过。
 
 **允许修改的文件范围：** Asset model/repository/migration、`application/asset_service.py`、图片校验/PNG 编码、StorageService Adapter、assets API、M6 tests。
 
-**明确不做：** Runtime 不编码 PNG、不上传 MinIO；不实现真实上传、签名 URL、后台 orphan 清理器。
+**明确不做：** Runtime 不编码 PNG、不上传 MinIO；不实现真实上传、签名 URL、后台 orphan 清理器；不创建 ToolResult/Explanation，不解除消息 POST 的 `TOOL_UNAVAILABLE` 映射。
 
 **接口：** ImagePayload 严格 `<f4`、`[512,512]`、二维 C-order、有限值、`[-1,1]`、`base64+npy`、`allow_pickle=False`；AssetService 执行 PENDING→put→AVAILABLE。
 
@@ -480,51 +498,53 @@ docker-compose.yml
 2. 实现内存 `.npy` 安全解码与第二节固定 PNG 映射。
 3. 实现两个短事务和 MinIO put/head；失败落 FAILED/ORPHANED 锚点。
 4. 实现 Asset 元数据/content API、Actor 所有权、inline/attachment。
+5. 保持消息 POST 完整合法 ToolCandidate 为 503/`TOOL_UNAVAILABLE`；AVAILABLE Asset 不得单独使 Task 成为 SUCCEEDED/PARTIALLY_SUCCEEDED，也不设置 selected 引用。
 
-**自动化测试与四类场景：** 成功得到 AVAILABLE mode-L PNG；输入错误非法 `.npy`→INVALID_MODEL_OUTPUT；依赖失败 MinIO put/AVAILABLE Tx2 故障→FAILED/PENDING 可恢复；同一 asset 终结重试不重复创建对象且状态条件更新安全。
+**自动化测试与四类场景：** 成功得到 AVAILABLE mode-L PNG；输入错误非法 `.npy`→INVALID_MODEL_OUTPUT；依赖失败 MinIO put/AVAILABLE Tx2 故障→FAILED/PENDING 可恢复；同一 asset 终结重试不重复创建对象且状态条件更新安全。回归验证消息 POST 仍不返回完整 Tool 成功，AVAILABLE Asset 不被冒充为 ToolResult。
 
-运行：`conda run -n materialsagent-backend python -m pytest backend/tests/unit/test_image_payload.py backend/tests/unit/test_png_encoder.py backend/tests/integration/storage/test_asset_lifecycle.py backend/tests/api/test_assets.py -q`
+运行：`conda run -n materialsagent-backend python -m pytest backend/tests/unit/test_image_payload.py backend/tests/unit/test_png_encoder.py backend/tests/integration/storage/test_asset_lifecycle.py backend/tests/api/test_assets.py backend/tests/api/test_message_orchestration.py -q`
 
 预期：0 failed；PNG 512×512、8-bit、无 alpha；非 AVAILABLE content=409；响应无 object_key。
 
-**人工验收步骤：** 请求 Mock SEM，下载 inline PNG并用图片查看器打开；显式 attachment 检查响应头；停止 MinIO 后确认不返回成功图片。
+**人工验收步骤：** 使用 M5 受控内部执行输出建立 Asset，下载 inline PNG 并用图片查看器打开；显式 attachment 检查响应头；停止 MinIO 后确认不返回成功图片。另提交完整合法消息请求，确认仍为 503/`TOOL_UNAVAILABLE`，不返回 result_summary/explanation/selected 引用。
 
 **失败时回退：** 保留 ToolRun 诊断，把相关 Asset 标为 FAILED/ORPHANED；禁用 Asset 内容端点，不修改 M5 ToolRun 历史。
 
-**完成证据：** PNG 元数据/SHA-256、MinIO HEAD、失败恢复记录、API 头、diff 检查。未来建议提交：`feat: add generated asset lifecycle`。
+**完成证据：** PNG 元数据/SHA-256、MinIO HEAD、失败恢复记录、API 头、消息 POST 未误报结果完成的证据、diff 检查。未来建议提交：`feat: add generated asset lifecycle`。
 
 ## M7：ToolResult 与 Explanation
 
-**目标：** 在 Asset AVAILABLE 后提交 ToolResult/ResultAssetLink，并用 Mock Explanation Port 生成独立解释。
+**目标：** 在 Asset AVAILABLE 后提交 ToolResult/ResultAssetLink，用 Mock Explanation Port 生成独立解释，更新 selected references 与 Task 稳定最终状态，并从本里程碑开始激活消息 POST 的正式 Tool 成功/部分成功/失败响应。
 
-**用户价值：** 用户能同时获得结构化性能、图片和解释；解释失败时已有结果不会丢失。
+**用户价值：** 用户第一次能从原消息 POST 获得完整、已持久化的结构化性能、图片和解释；解释失败时已有结果不会丢失。
 
 **前置条件：** M6 通过。
 
-**允许修改的文件范围：** ToolResult、ResultAssetLink、Explanation、LLMCall models/repositories/migrations，result/explanation services，tool-results routes，M7 tests。
+**允许修改的文件范围：** ToolResult、ResultAssetLink、Explanation、LLMCall models/repositories/migrations，result/explanation services、ToolExecutionService 结果提交接线、ChatOrchestrationService/消息 API 激活接线、tool-results routes 和 M7 tests。
 
 **明确不做：** 不接真实 LLM，不复制 ToolResult/Explanation 为 Message，不跨 ToolRun 混合 Asset，不实现重试端点（M8）。
 
-**接口：** ResultService 在一个短事务校验 ToolRun/Asset/Task 来源并提交 Result、links、selected 引用；Explanation 只读已提交 Result。
+**接口：** ResultService 在一个短事务校验 ToolRun/Asset/Task 来源并提交 Result、links、selected 引用；Explanation 只读已提交 Result。只有完整链路能够形成已持久化稳定状态时，消息 POST 才从 M4 的 503/`TOOL_UNAVAILABLE` 暂态映射切换为正式 Tool 执行。
 
 **实现步骤：**
 
 1. 写跨 Task/ToolRun Asset、非 AVAILABLE、部分成功、仅性能失败、解释失败/超时测试。
 2. 实现 ToolResult 输出集合与状态聚合，示例性能值只来自 Mock 响应。
 3. 实现 Explanation prepare→事务外 Mock LLM→finalize；不保存 Prompt。
-4. 消息 POST 同步等待稳定 Task 状态后返回，不使用 202。
+4. 把 M5 的内部 Tool 执行与 M6 的 Asset 生命周期接入 ResultService，完成 ToolRun→Asset→ToolResult/ResultAssetLink→Explanation→selected references→Task 稳定状态。
+5. 激活消息 POST：完整合法 ToolCandidate 进入上述正式链路，并只从已持久化事实组装成功、部分成功或失败响应；不使用 202。若结果链未启用或无法启动，继续使用安全 `TOOL_UNAVAILABLE`，不得返回占位成功。
 
-**自动化测试与四类场景：** 成功 Result+Asset+Explanation；输入错误跨来源 Link 被拒；依赖失败 Explanation 超时→HTTP 200/Task PARTIALLY_SUCCEEDED 且 Result保留；重复 Explanation finalize 不覆盖旧事实。
+**自动化测试与四类场景：** 消息 POST 完整成功形成 Result+Asset+Explanation 和 selected 引用；输入错误跨来源 Link 被拒；依赖失败 Explanation 超时→HTTP 200/Task PARTIALLY_SUCCEEDED 且 Result 保留；重复 Explanation finalize 不覆盖旧事实。另覆盖图片成功/性能失败、只请求性能失败、Asset/Result 持久化失败，以及结果链未开放时不得绕过 `TOOL_UNAVAILABLE`。
 
-运行：`conda run -n materialsagent-backend python -m pytest backend/tests/integration/db/test_result_commit.py backend/tests/contract/test_tool_execution_output.py backend/tests/api/test_tool_results.py backend/tests/api/test_explanation_outcomes.py -q`
+运行：`conda run -n materialsagent-backend python -m pytest backend/tests/integration/db/test_result_commit.py backend/tests/contract/test_tool_execution_output.py backend/tests/api/test_message_orchestration.py backend/tests/api/test_tool_results.py backend/tests/api/test_explanation_outcomes.py -q`
 
-预期：0 failed；ToolResult 成功后 Explanation 失败仍返回结构化结果；数据库无跨 ToolRun link。
+预期：0 failed；完整合法消息 POST 不再固定返回 `TOOL_UNAVAILABLE`，而是进入正式执行并返回已持久化稳定事实；ToolResult 成功后 Explanation 失败仍返回结构化结果；数据库无跨 ToolRun link。
 
-**人工验收步骤：** 演示全部成功、图片成功/性能失败、只请求性能失败、解释超时四种响应。
+**人工验收步骤：** 从消息 POST 演示全部成功、图片成功/性能失败、只请求性能失败、解释超时四种响应；逐项核对 ToolRun、Asset、ToolResult/ResultAssetLink、Explanation、selected 引用和 Task 状态均来自同一来源链。
 
-**失败时回退：** Explanation Adapter 可切换为明确失败替身；已提交 ToolResult/Asset 不回滚，不重跑 Tool。
+**失败时回退：** Explanation Adapter 可切换为明确失败替身；已提交 ToolResult/Asset 不回滚，不重跑 Tool。若 M7 完整链无法安全激活，消息 POST 回到 M4 的 503/`TOOL_UNAVAILABLE`，保留 M5/M6 内部事实但不向用户冒充完整结果。
 
-**完成证据：** 四类响应、来源约束测试、selected 引用、Explanation LLMCall、diff 检查。未来建议提交：`feat: add tool result and explanation slice`。
+**完成证据：** 消息 POST 正式 Tool 响应、四类结果、来源约束测试、selected 引用、Explanation LLMCall、M4 暂态映射只在完整结果链可用时解除的证据、diff 检查。M7 完成后必须暂停，等待项目负责人验收消息 POST 激活点；不得直接开始 M8。未来建议提交：`feat: add tool result and explanation slice`。
 
 ## M8：幂等、Tool/Explanation 重试与失败路径
 
@@ -557,7 +577,7 @@ docker-compose.yml
 
 **失败时回退：** 禁用重试端点但保留查询；不得删除旧 ToolRun/Result/Explanation。幂等 migration 不在有数据环境破坏性回退。
 
-**完成证据：** 并发计数、资源行数、重放响应、超时/busy 映射、安全扫描、diff 检查。到此必须暂停，等待负责人确认检查点 3。未来建议提交：`feat: add idempotency and explicit retries`。
+**完成证据：** 并发计数、资源行数、重放响应、超时/busy 映射、安全扫描、diff 检查。到此必须暂停，等待项目负责人通过 M8 检查点。未来建议提交：`feat: add idempotency and explicit retries`。
 
 ## M9：Conversation 统一时间线 API
 
@@ -565,7 +585,7 @@ docker-compose.yml
 
 **用户价值：** 用户能在一条历史中看见知识问答和 Tool 卡，重试不会把旧卡移动或重复展示结果。
 
-**前置条件：** 检查点 3 通过。
+**前置条件：** M8 项目负责人检查点通过。
 
 **允许修改的文件范围：** timeline query service/views、Conversation timeline route、查询 Repository、M9 tests。
 
@@ -654,7 +674,7 @@ docker-compose.yml
 
 **失败时回退：** 停止 Mock stack，修复失败所在里程碑；不进入 M12，不改变已验收数据模型来迁就测试。
 
-**完成证据：** 完整命令日志、E2E 报告、界面截图、资源计数、`git diff --check`。到此必须暂停，等待负责人确认检查点 4 和阶段 1A 完成。未来建议提交：`test: add phase 1a mock acceptance`。
+**完成证据：** 完整命令日志、E2E 报告、界面截图、资源计数、`git diff --check`。到此必须暂停，等待项目负责人通过 M11 检查点并确认阶段 1A 完成。未来建议提交：`test: add phase 1a mock acceptance`。
 
 ## M12：真实 LangChain 与 LLM Provider 接入
 
@@ -662,7 +682,7 @@ docker-compose.yml
 
 **用户价值：** 平台不再以 Mock LLM 作为最终 MVP 的聊天与解释能力；用户可通过真实模型获得知识回答、Tool 意图识别、缺参追问和结果解释，同时错误路径仍可安全恢复。
 
-**前置条件：** M11 和检查点 4 通过；项目负责人允许真实 Provider 的受控网络调用；Backend 依赖仍只由 `backend/pyproject.toml` 管理；API Key 已通过本地环境变量提供。
+**前置条件：** M11 项目负责人检查点通过；项目负责人允许真实 Provider 的受控网络调用；Backend 依赖仍只由 `backend/pyproject.toml` 管理；API Key 已通过本地环境变量提供。
 
 **允许修改的文件范围：** Backend Chat Orchestration/Explanation Port 的真实 LangChain Adapter、LLM 配置与安全错误映射、`.env.example` 变量名说明、真实 Adapter contract/integration tests、`docs/acceptance/real-llm-provider.md`；保留并测试既有 Mock Adapter。
 
@@ -689,7 +709,7 @@ docker-compose.yml
 
 **失败时回退：** 配置切回 Mock LLM，保留安全失败记录；不修改已持久化 ToolResult，不运行真实 Runtime，不为迁就 Provider 绕过 Application 硬校验。
 
-**完成证据：** Mock/真实 Adapter 契约结果、四类真实响应安全摘要、Provider 故障矩阵、Tool/Provider 调用计数、Secret/Prompt 扫描和 `git diff --check`。到此必须暂停，等待项目负责人确认检查点 5。未来建议提交：`feat: add real langchain llm adapters`。
+**完成证据：** Mock/真实 Adapter 契约结果、四类真实响应安全摘要、Provider 故障矩阵、Tool/Provider 调用计数、Secret/Prompt 扫描和 `git diff --check`。到此必须暂停，等待项目负责人通过 M12 检查点。未来建议提交：`feat: add real langchain llm adapters`。
 
 ## M13：Python 3.8 模型环境与权重加载验证
 
@@ -697,7 +717,7 @@ docker-compose.yml
 
 **用户价值：** 在写真实 Runtime 前先证明旧模型文件能被当前硬件和依赖组合识别，失败可独立定位而不影响阶段 1A。
 
-**前置条件：** M12 与检查点 5 通过；负责人允许进入阶段 1B；`SEM/` 只读；G0 manifest/完整性脚本仍为当前基线。
+**前置条件：** M12 项目负责人检查点通过；负责人允许进入阶段 1B；`SEM/` 只读；G0 manifest/完整性脚本仍为当前基线。
 
 **允许修改的文件范围：** `environments/materialsagent-zta35g.yml`、`zta35g-runtime/requirements-win-py38.lock.txt`、`zta35g-runtime/compat/**`、兼容性 tests、`docs/acceptance/zta35g-compatibility.md`。只读访问 `SEM/`。
 
@@ -720,7 +740,7 @@ docker-compose.yml
 
 **失败时回退：** 删除独立 Conda 环境和 probe 生成的临时缓存；保留失败报告；不得修改权重或阶段 1A Backend。
 
-**完成证据：** 实际精确依赖记录、环境导出、四个 SHA-256、加载日志安全摘要、显存记录、G0 SEM manifest 前后检查、diff 检查。到此必须暂停，等待负责人确认检查点 6。未来建议提交：`test: verify zta35g model loading compatibility`。
+**完成证据：** 实际精确依赖记录、环境导出、四个 SHA-256、加载日志安全摘要、显存记录、G0 SEM manifest 前后检查、diff 检查。到此必须暂停，等待项目负责人通过 M13 检查点。未来建议提交：`test: verify zta35g model loading compatibility`。
 
 ## M14：真实模型最小推理与测量
 
@@ -728,7 +748,7 @@ docker-compose.yml
 
 **用户价值：** 证明模型不仅能加载，还能在当前 RTX 4060 Laptop 8GB 上产生可检查结果，并为 Runtime 超时提供数据。
 
-**前置条件：** M13 与检查点 6 通过。
+**前置条件：** M13 项目负责人检查点通过。
 
 **允许修改的文件范围：** `zta35g-runtime/compat/**`、compatibility tests、`docs/acceptance/zta35g-inference.md`、受控输出目录的 `.gitignore`。`SEM/` 只读。
 
@@ -756,7 +776,7 @@ docker-compose.yml
 
 **失败时回退：** 保留失败证据并停止 M15；删除受控临时输出，不改 `SEM/`。若固定配置不兼容，走设计变更门而非代码绕过。
 
-**完成证据：** 最小推理记录、图片元数据、性能值、必需基础统计、warm 原始耗时、冷启动/首次/warm-up/分项开销、显存/主机内存、Base64 大小、G0 SEM manifest 前后检查、diff 检查。到此必须暂停，等待负责人确认检查点 7。未来建议提交：`test: validate zta35g minimal inference`。
+**完成证据：** 最小推理记录、图片元数据、性能值、必需基础统计、warm 原始耗时、冷启动/首次/warm-up/分项开销、显存/主机内存、Base64 大小、G0 SEM manifest 前后检查、diff 检查。到此必须暂停，等待项目负责人通过 M14 检查点。未来建议提交：`test: validate zta35g minimal inference`。
 
 ## M15：真实 Runtime 与 Local Tool Client Adapter
 
@@ -764,7 +784,7 @@ docker-compose.yml
 
 **用户价值：** 平台第一次通过正式内部契约调用真实模型，但公共 API、数据模型和前端不改变。
 
-**前置条件：** M14 与检查点 7 通过；M14 已给出真实超时与资源数据。
+**前置条件：** M14 项目负责人检查点通过；M14 已给出真实超时与资源数据。
 
 **允许修改的文件范围：** `zta35g-runtime/src/**`、Runtime contract tests、Backend `infrastructure/tool_clients/local_zta35g.py` 与配置、M15 integration tests、`docs/acceptance/zta35g-runtime-runbook.md`。
 
@@ -821,7 +841,7 @@ docker-compose.yml
 
 **失败时回退：** 分别切回 Mock LLM Adapter 和 Mock Runtime Adapter，保留安全的真实失败 LLMCall/ToolRun/日志/报告；不覆盖旧成功结果、不修改权重、不进入生产部署。
 
-**完成证据：** 真实 LLM + 真实 Runtime E2E 命令日志、API/界面截图、Provider/Runtime Adapter 配置安全摘要、Asset SHA-256、LLMCall/Runtime/Backend 关联日志、合规性能/资源表、错误/重试资源计数、五份基线一致性检查、G0 SEM 完整性检查和 `git diff --check`。到此必须暂停，等待负责人确认检查点 8。未来建议提交：`test: complete phase 1 real capability acceptance`。
+**完成证据：** 真实 LLM + 真实 Runtime E2E 命令日志、API/界面截图、Provider/Runtime Adapter 配置安全摘要、Asset SHA-256、LLMCall/Runtime/Backend 关联日志、合规性能/资源表、错误/重试资源计数、五份基线一致性检查、G0 SEM 完整性检查和 `git diff --check`。到此必须暂停，等待项目负责人通过 M16 最终检查点。未来建议提交：`test: complete phase 1 real capability acceptance`。
 
 ---
 
@@ -840,6 +860,6 @@ git diff --name-only
 
 汇报必须包含：目标是否达到、四类场景实际结果、命令与退出码、人工验收证据、允许范围之外是否有 diff、回退是否可用、是否到达暂停点。结束前更新 `docs/progress/phase-1-current-status.md`，未经项目负责人验收不得 commit 或进入下一工作单元。不得只写“测试通过”。
 
-## 计划结束边界
+## 计划执行位置
 
-G0 已通过项目负责人复核。G0 提交并确认工作区干净后，可以新开 Codex 对话开始 M0。
+本文件不在末尾固定当前执行到哪个里程碑。任何新 Codex 对话都必须先读取 `docs/progress/phase-1-current-status.md`，并以其中记录的当前 branch、HEAD、工作单元、状态和下一步为准。未经项目负责人验收，不得进入下一工作单元或里程碑。

@@ -56,7 +56,7 @@ function ConvertTo-RepoPath {
 }
 
 $normalizedMilestone = $Milestone.Trim().ToUpperInvariant()
-$recognizedMilestones = @('G0', 'M0', 'M4A') + @(1..16 | ForEach-Object { "M$_" })
+$recognizedMilestones = @('G0', 'M0', 'M4A', 'M4PLAN') + @(1..16 | ForEach-Object { "M$_" })
 if ($recognizedMilestones -notcontains $normalizedMilestone) {
     Complete-ScopeCheck -Code 'UNKNOWN_MILESTONE' -Summary $normalizedMilestone
 }
@@ -65,7 +65,8 @@ $globalAllowedPaths = @(
     'docs/progress/phase-1-current-status.md'
 )
 
-# M0-M3 have reviewed exact allowlists. G0 and M4-M16 are recognized so
+# M0-M3 and configured M4 work units have reviewed exact allowlists.
+# G0 and M4-M16 are recognized so
 # callers receive a stable configuration error until their exact plan allowlist
 # is reviewed and added; this deliberately avoids inventing future scope.
 $milestoneAllowlists = @{
@@ -147,6 +148,12 @@ $milestoneAllowlists = @{
         'backend/tests/unit/test_llm_call_domain.py'
         'backend/tests/integration/db/test_llm_call.py'
         'backend/tests/integration/db/test_migrations.py'
+    )
+    M4PLAN = @(
+        'scripts/dev/check-scope.ps1'
+        'docs/acceptance/phase-1-checklist.md'
+        'docs/progress/phase-1-current-status.md'
+        'docs/superpowers/plans/2026-07-17-sem-mvp-phase-1-implementation-plan.md'
     )
 }
 
