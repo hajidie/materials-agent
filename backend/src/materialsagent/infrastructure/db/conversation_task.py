@@ -485,6 +485,28 @@ class SQLAlchemyConversationRepository:
         except SQLAlchemyError as error:
             _raise_safe_persistence_error(error)
 
+    def update(self, conversation: Conversation) -> Conversation | None:
+        try:
+            row = self._session.get(
+                ConversationRow,
+                conversation.conversation_id,
+                populate_existing=True,
+                with_for_update=True,
+            )
+            if row is None:
+                return None
+            if (
+                row.actor_id != conversation.actor_id
+                or row.created_at != conversation.created_at
+            ):
+                return None
+            row.updated_at = max(row.updated_at, conversation.updated_at)
+            if row.title is None and conversation.title is not None:
+                row.title = conversation.title
+            return _conversation_from_row(row)
+        except SQLAlchemyError as error:
+            _raise_safe_persistence_error(error)
+
 
 class SQLAlchemyMessageRepository:
     def __init__(self, session: Session) -> None:
@@ -493,6 +515,29 @@ class SQLAlchemyMessageRepository:
     def get(self, message_id: str) -> Message | None:
         try:
             row = self._session.get(MessageRow, message_id)
+        except SQLAlchemyError as error:
+            _raise_safe_persistence_error(error)
+        return None if row is None else _message_from_row(row)
+
+    def get_latest_for_conversation(
+        self,
+        conversation_id: str,
+        actor_id: str,
+    ) -> Message | None:
+        statement = (
+            select(MessageRow)
+            .where(
+                MessageRow.conversation_id == conversation_id,
+                MessageRow.actor_id == actor_id,
+            )
+            .order_by(
+                MessageRow.created_at.desc(),
+                MessageRow.message_id.desc(),
+            )
+            .limit(1)
+        )
+        try:
+            row = self._session.scalar(statement)
         except SQLAlchemyError as error:
             _raise_safe_persistence_error(error)
         return None if row is None else _message_from_row(row)

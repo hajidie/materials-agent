@@ -113,19 +113,21 @@ $milestoneAllowlists = @{
     )
     M3 = @(
         'scripts/dev/check-scope.ps1'
-        'backend/alembic/env.py'
-        'backend/alembic/versions/0002_create_conversation_message_task_revision.py'
-        'backend/alembic/versions/0003_add_task_time_order_constraints.py'
-        'backend/src/materialsagent/domain/models/conversation.py'
-        'backend/src/materialsagent/domain/models/message.py'
-        'backend/src/materialsagent/domain/models/task.py'
-        'backend/src/materialsagent/domain/models/task_input_revision.py'
+        'backend/src/materialsagent/main.py'
+        'backend/src/materialsagent/application/context.py'
+        'backend/src/materialsagent/application/errors.py'
+        'backend/src/materialsagent/application/conversations.py'
+        'backend/src/materialsagent/application/messages.py'
+        'backend/src/materialsagent/application/tasks.py'
+        'backend/src/materialsagent/api/dependencies.py'
+        'backend/src/materialsagent/api/routes/conversations.py'
+        'backend/src/materialsagent/api/routes/tasks.py'
         'backend/src/materialsagent/domain/ports/unit_of_work.py'
         'backend/src/materialsagent/infrastructure/db/conversation_task.py'
-        'backend/src/materialsagent/infrastructure/db/unit_of_work.py'
-        'backend/tests/integration/db/conftest.py'
-        'backend/tests/integration/db/test_migrations.py'
-        'backend/tests/integration/db/test_conversation_task.py'
+        'backend/tests/unit/test_conversation_title.py'
+        'backend/tests/api/conftest.py'
+        'backend/tests/api/test_conversations.py'
+        'backend/tests/api/test_tasks.py'
     )
 }
 
