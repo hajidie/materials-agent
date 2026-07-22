@@ -24,8 +24,9 @@ from materialsagent.infrastructure.db.session import (
 BASE_REVISION = "0001_create_actor"
 PREVIOUS_REVISION = "0002_create_conversation_message_task_revision"
 M3_REVISION = "0003_task_time_order"
-IMMEDIATE_PREVIOUS_REVISION = "0004_llm_call"
-EXPECTED_REVISION = "0005_tool_run"
+M4_REVISION = "0004_llm_call"
+IMMEDIATE_PREVIOUS_REVISION = "0005_tool_run"
+EXPECTED_REVISION = "0006_asset"
 ALEMBIC_INI = Path(__file__).resolve().parents[3] / "alembic.ini"
 NEW_TASK_TIME_CHECKS = {
     "ck_task_started_at_not_before_created_at",
@@ -41,6 +42,7 @@ M3_TABLES = {
 }
 M4A_TABLES = M3_TABLES | {"llm_call"}
 M5_TABLES = M4A_TABLES | {"tool_run"}
+M6_TABLES = M5_TABLES | {"asset"}
 
 
 def _make_alembic_config(settings: AppSettings) -> Config:
@@ -119,7 +121,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
     engine = create_engine_from_settings(temporary_database)
     try:
         inspector = inspect(engine)
-        assert set(inspector.get_table_names(schema="public")) == M5_TABLES
+        assert set(inspector.get_table_names(schema="public")) == M6_TABLES
         version_columns = _column_map(inspector, "alembic_version")
         assert version_columns["version_num"]["type"].length >= len(
             EXPECTED_REVISION
@@ -256,6 +258,34 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "error_code",
                 "safe_error_message",
             },
+            "asset": {
+                "asset_id",
+                "task_id",
+                "producer_tool_run_id",
+                "actor_id",
+                "operation_id",
+                "current_status",
+                "asset_type",
+                "source_type",
+                "role",
+                "object_key",
+                "media_type",
+                "width",
+                "height",
+                "bit_depth",
+                "sha256",
+                "size_bytes",
+                "encoding_rule",
+                "pending_since",
+                "created_at",
+                "available_at",
+                "failed_at",
+                "orphaned_at",
+                "error_code",
+                "safe_error_message",
+                "orphan_reason",
+                "orphan_details",
+            },
         }
         for table_name, column_names in expected_columns.items():
             assert set(_column_map(inspector, table_name)) == column_names
@@ -332,6 +362,17 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
         for timestamp_name in {"created_at", "started_at", "completed_at"}:
             assert tool_run_columns[timestamp_name]["type"].timezone is True
 
+        asset_columns = _column_map(inspector, "asset")
+        assert isinstance(asset_columns["orphan_details"]["type"], JSONB)
+        for timestamp_name in {
+            "pending_since",
+            "created_at",
+            "available_at",
+            "failed_at",
+            "orphaned_at",
+        }:
+            assert asset_columns[timestamp_name]["type"].timezone is True
+
         expected_foreign_keys = {
             "conversation": {"fk_conversation_actor": "actor"},
             "task": {
@@ -356,6 +397,11 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             "tool_run": {
                 "fk_tool_run_revision": "task_input_revision",
                 "fk_tool_run_task": "task",
+            },
+            "asset": {
+                "fk_asset_actor": "actor",
+                "fk_asset_task": "task",
+                "fk_asset_tool_run": "tool_run",
             },
         }
         for table_name, expected in expected_foreign_keys.items():
@@ -474,6 +520,34 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "ck_tool_run_tool_id_not_blank",
                 "ck_tool_run_tool_version_not_blank",
             },
+            "asset": {
+                "ck_asset_actor_id_not_blank",
+                "ck_asset_available_not_before_created",
+                "ck_asset_bit_depth_positive",
+                "ck_asset_encoding_rule_not_blank",
+                "ck_asset_error_code_not_blank",
+                "ck_asset_failed_not_before_created",
+                "ck_asset_generated_source",
+                "ck_asset_height_positive",
+                "ck_asset_id_not_blank",
+                "ck_asset_media_type_not_blank",
+                "ck_asset_object_key_not_blank",
+                "ck_asset_operation_id_not_blank",
+                "ck_asset_orphan_details_object",
+                "ck_asset_orphan_reason_not_blank",
+                "ck_asset_orphaned_not_before_created",
+                "ck_asset_pending_not_before_created",
+                "ck_asset_role_allowed",
+                "ck_asset_safe_error_not_blank",
+                "ck_asset_sha256_format",
+                "ck_asset_size_nonnegative",
+                "ck_asset_status_allowed",
+                "ck_asset_status_shape",
+                "ck_asset_task_id_not_blank",
+                "ck_asset_tool_run_id_not_blank",
+                "ck_asset_type_sem_image",
+                "ck_asset_width_positive",
+            },
         }
         for table_name, expected_names in expected_check_names.items():
             constraints = inspector.get_check_constraints(table_name)
@@ -528,6 +602,26 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             constraint["name"]: constraint["column_names"]
             for constraint in inspector.get_unique_constraints("tool_run")
         } == {"uq_tool_run_task_attempt": ["task_id", "attempt_no"]}
+        assert {
+            constraint["name"]: constraint["column_names"]
+            for constraint in inspector.get_unique_constraints("asset")
+        } == {
+            "uq_asset_object_key": ["object_key"],
+            "uq_asset_operation_id": ["operation_id"],
+        }
+        asset_indexes = {
+            index["name"]: index["column_names"]
+            for index in inspector.get_indexes("asset")
+            if index.get("duplicates_constraint") is None
+        }
+        assert asset_indexes == {
+            "ix_asset_status_pending": ["current_status", "pending_since"],
+            "ix_asset_tool_run_created": [
+                "producer_tool_run_id",
+                "created_at",
+                "asset_id",
+            ],
+        }
     finally:
         engine.dispose()
 
@@ -535,7 +629,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
     immediate_previous_engine = create_engine_from_settings(temporary_database)
     try:
         immediate_inspector = inspect(immediate_previous_engine)
-        assert set(immediate_inspector.get_table_names(schema="public")) == M4A_TABLES
+        assert set(immediate_inspector.get_table_names(schema="public")) == M5_TABLES
         assert NEW_TASK_TIME_CHECKS <= _task_check_names(
             immediate_previous_engine
         )
@@ -549,10 +643,11 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "task_input_revision"
             )
         }
-        assert "fk_task_selected_tool_run" not in {
+        assert "fk_task_selected_tool_run" in {
             constraint["name"]
             for constraint in immediate_inspector.get_foreign_keys("task")
         }
+        assert "asset" not in immediate_inspector.get_table_names(schema="public")
     finally:
         immediate_previous_engine.dispose()
     assert _current_revision(temporary_database) == IMMEDIATE_PREVIOUS_REVISION
@@ -582,7 +677,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
     assert _current_revision(temporary_database) == EXPECTED_REVISION
 
 
-def test_tool_run_migration_preserves_existing_tables_and_rows(
+def test_asset_migration_preserves_existing_tables_and_rows(
     temporary_database: AppSettings,
 ) -> None:
     config = _make_alembic_config(temporary_database)
@@ -603,7 +698,7 @@ def test_tool_run_migration_preserves_existing_tables_and_rows(
                         "SELECT relname, oid FROM pg_class "
                         "WHERE relname = ANY(:table_names)"
                     ),
-                    {"table_names": sorted(M4A_TABLES - {"alembic_version"})},
+                    {"table_names": sorted(M5_TABLES - {"alembic_version"})},
                 ).all()
             )
     finally:
@@ -619,7 +714,7 @@ def test_tool_run_migration_preserves_existing_tables_and_rows(
                         "SELECT relname, oid FROM pg_class "
                         "WHERE relname = ANY(:table_names)"
                     ),
-                    {"table_names": sorted(M4A_TABLES - {"alembic_version"})},
+                    {"table_names": sorted(M5_TABLES - {"alembic_version"})},
                 ).all()
             )
             assert after_oids == before_oids
@@ -628,6 +723,7 @@ def test_tool_run_migration_preserves_existing_tables_and_rows(
             ) == 1
             assert "tool_result" not in inspect(connection).get_table_names()
             assert "tool_run" in inspect(connection).get_table_names()
+            assert "asset" in inspect(connection).get_table_names()
     finally:
         upgraded_engine.dispose()
 

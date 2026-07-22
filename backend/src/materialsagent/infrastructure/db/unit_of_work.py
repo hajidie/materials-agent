@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from materialsagent.domain.ports.unit_of_work import (
     ActorRepository,
+    AssetRepository,
     ConversationRepository,
     DatabaseUnavailableError,
     LLMCallRepository,
@@ -18,6 +19,7 @@ from materialsagent.domain.ports.unit_of_work import (
     ToolRunRepository,
 )
 from materialsagent.infrastructure.db.actor import SQLAlchemyActorRepository
+from materialsagent.infrastructure.db.asset import SQLAlchemyAssetRepository
 from materialsagent.infrastructure.db.llm_call import SQLAlchemyLLMCallRepository
 from materialsagent.infrastructure.db.tool_run import SQLAlchemyToolRunRepository
 from materialsagent.infrastructure.db.conversation_task import (
@@ -39,6 +41,7 @@ class SQLAlchemyUnitOfWork:
         self._task_input_revisions: TaskInputRevisionRepository | None = None
         self._llm_calls: LLMCallRepository | None = None
         self._tool_runs: ToolRunRepository | None = None
+        self._assets: AssetRepository | None = None
 
     @property
     def actors(self) -> ActorRepository:
@@ -82,6 +85,12 @@ class SQLAlchemyUnitOfWork:
             raise RuntimeError("UnitOfWork has not been entered.")
         return self._tool_runs
 
+    @property
+    def assets(self) -> AssetRepository:
+        if self._assets is None:
+            raise RuntimeError("UnitOfWork has not been entered.")
+        return self._assets
+
     def __enter__(self) -> SQLAlchemyUnitOfWork:
         if self.session is not None:
             raise RuntimeError("UnitOfWork is already active.")
@@ -95,6 +104,7 @@ class SQLAlchemyUnitOfWork:
         )
         self._llm_calls = SQLAlchemyLLMCallRepository(self.session)
         self._tool_runs = SQLAlchemyToolRunRepository(self.session)
+        self._assets = SQLAlchemyAssetRepository(self.session)
         return self
 
     def __exit__(
@@ -119,6 +129,7 @@ class SQLAlchemyUnitOfWork:
                 self._task_input_revisions = None
                 self._llm_calls = None
                 self._tool_runs = None
+                self._assets = None
 
     def _active_session(self) -> Session:
         if self.session is None:

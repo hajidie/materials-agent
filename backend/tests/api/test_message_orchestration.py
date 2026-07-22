@@ -179,7 +179,8 @@ def test_complete_valid_tool_message_returns_persisted_503_without_fake_result(
     assert tasks[0].error_code == "TOOL_UNAVAILABLE"
     with api_harness.engine.connect() as connection:
         assert connection.scalar(text("SELECT count(*) FROM tool_run")) == 0
-        assert connection.scalar(text("SELECT to_regclass('public.asset')")) is None
+        assert connection.scalar(text("SELECT to_regclass('public.asset')")) == "asset"
+        assert connection.scalar(text("SELECT count(*) FROM asset")) == 0
         assert connection.scalar(text("SELECT to_regclass('public.tool_result')")) is None
 
 

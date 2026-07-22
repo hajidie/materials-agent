@@ -5,6 +5,7 @@ from fastapi import Request
 from materialsagent.application.chat_orchestration import (
     ChatOrchestrationService,
 )
+from materialsagent.application.asset_service import AssetService
 from materialsagent.application.context import ActorContext
 from materialsagent.application.conversations import ConversationService
 from materialsagent.application.errors import (
@@ -61,6 +62,10 @@ def get_tool_execution_service(request: Request) -> ToolExecutionService:
 
 def get_tool_run_query_service(request: Request) -> ToolRunQueryService:
     return _required_app_state(request, "tool_run_query_service")
+
+
+def get_asset_service(request: Request) -> AssetService:
+    return _required_app_state(request, "asset_service")
 
 
 def require_m5_dev_routes(request: Request) -> None:

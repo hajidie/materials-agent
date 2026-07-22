@@ -137,6 +137,16 @@ class ToolExecutionOutput:
             "data_fields": sorted(self.data),
             "image_count": len(self.images),
             "image_roles": [image.image_role for image in self.images],
+            "images": [
+                {
+                    "image_role": image.image_role,
+                    "requested_output": image.requested_output,
+                    "sha256": image.sha256,
+                    "encoding": image.encoding,
+                    "shape": list(image.shape),
+                }
+                for image in self.images
+            ],
             "warning_count": len(self.warnings),
             "error": None if self.error is None else dict(self.error),
         }

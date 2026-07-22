@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from materialsagent.application.tool_execution import ToolExecutionService
 from materialsagent.application.tools import build_tool_registry
@@ -13,6 +13,7 @@ from materialsagent.domain.ports.tool_execution import (
 from materialsagent.infrastructure.db.conversation_task import (
     TaskInputRevisionRow,
 )
+from materialsagent.infrastructure.db.asset import AssetRow
 from materialsagent.infrastructure.db.session import create_session_factory
 from materialsagent.infrastructure.db.tool_run import ToolRunRow
 from materialsagent.infrastructure.db.unit_of_work import SQLAlchemyUnitOfWork
@@ -314,3 +315,51 @@ def test_tool_run_query_hides_other_actor_resource(api_harness) -> None:
         response = other.get(f"/api/v1/dev/tool-runs/{tool_run_id}")
 
     assert response.status_code == 404
+
+
+def test_missing_asset_service_blocks_runtime_and_persistence(api_harness) -> None:
+    actor_id = "actor_missing_asset_service"
+    api_harness.persist_actor(actor_id)
+    tool_client = _ToolClient()
+    registry = build_tool_registry(tool_client)
+    settings = _settings(api_harness, enabled=True).model_copy(
+        update={
+            "minio_endpoint": None,
+            "minio_access_key": None,
+            "minio_secret_key": None,
+            "minio_bucket": None,
+            "minio_secure": None,
+        }
+    )
+
+    with api_harness.create_client(
+        actor_id,
+        settings=settings,
+        tool_registry=registry,
+    ) as client:
+        task_id, revision_id = _create_valid_revision(client, api_harness)
+        with create_session_factory(api_harness.engine)() as session:
+            before_tool_runs = session.scalar(
+                select(func.count()).select_from(ToolRunRow)
+            )
+            before_assets = session.scalar(
+                select(func.count()).select_from(AssetRow)
+            )
+        response = client.post(
+            f"/api/v1/dev/tasks/{task_id}/tool-runs",
+            json={"task_input_revision_id": revision_id},
+        )
+
+    with create_session_factory(api_harness.engine)() as session:
+        after_tool_runs = session.scalar(
+            select(func.count()).select_from(ToolRunRow)
+        )
+        after_assets = session.scalar(
+            select(func.count()).select_from(AssetRow)
+        )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "DEPENDENCY_UNAVAILABLE"
+    assert tool_client.calls == 0
+    assert after_tool_runs == before_tool_runs == 0
+    assert after_assets == before_assets == 0

@@ -246,7 +246,8 @@ def test_needs_input_and_tool_outcomes_persist_formal_revision_and_no_tool_table
     ]
     with migrated_database_engine.connect() as connection:
         assert connection.scalar(text("SELECT count(*) FROM tool_run")) == 0
-        assert connection.scalar(text("SELECT to_regclass('public.asset')")) is None
+        assert connection.scalar(text("SELECT to_regclass('public.asset')")) == "asset"
+        assert connection.scalar(text("SELECT count(*) FROM asset")) == 0
         assert connection.scalar(text("SELECT to_regclass('public.tool_result')")) is None
 
 

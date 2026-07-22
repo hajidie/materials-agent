@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Protocol, Self
 
 from materialsagent.domain.models.actor import Actor
+from materialsagent.domain.models.asset import Asset
 from materialsagent.domain.models.conversation import Conversation
 from materialsagent.domain.models.message import Message
 from materialsagent.domain.models.llm_call import LLMCall
@@ -129,6 +130,23 @@ class ToolRunRepository(Protocol):
     ) -> ToolRun | None: ...
 
 
+class AssetRepository(Protocol):
+    def get(self, asset_id: str) -> Asset | None: ...
+
+    def get_owned(self, asset_id: str, actor_id: str) -> Asset | None: ...
+
+    def list_for_tool_run(self, tool_run_id: str) -> list[Asset]: ...
+
+    def add(self, asset: Asset) -> None: ...
+
+    def update(
+        self,
+        asset: Asset,
+        *,
+        expected_status: str,
+    ) -> Asset | None: ...
+
+
 class UnitOfWork(Protocol):
     actors: ActorRepository
     conversations: ConversationRepository
@@ -137,6 +155,7 @@ class UnitOfWork(Protocol):
     task_input_revisions: TaskInputRevisionRepository
     llm_calls: LLMCallRepository
     tool_runs: ToolRunRepository
+    assets: AssetRepository
 
     def __enter__(self) -> Self: ...
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import uuid4
 import secrets
@@ -47,6 +48,14 @@ class ToolExecutionOutcomeError(ApplicationError):
             task_id=task_id,
         )
         self.tool_run_id = tool_run_id
+
+
+@dataclass(frozen=True, slots=True)
+class ToolExecutionReceipt:
+    """Internal-only receipt retaining the one in-memory Runtime output."""
+
+    tool_run: ToolRun
+    output: ToolExecutionOutput
 
 
 def _default_seed() -> int:
@@ -104,7 +113,9 @@ def _safe_runtime_error(error: ToolClientError) -> tuple[str, str, int]:
     return "TOOL_EXECUTION_FAILED", "Tool execution failed.", 502
 
 
-def _safe_output_summary(output: ToolExecutionOutput) -> dict[str, object]:
+def normalize_tool_output_summary(
+    output: ToolExecutionOutput,
+) -> dict[str, object]:
     summary = output.safe_summary()
     if output.error is None:
         return summary
@@ -181,6 +192,21 @@ class ToolExecutionService:
         task_input_revision_id: str,
         request_id: str,
     ) -> ToolRun:
+        return self.execute_revision_with_output(
+            actor_context,
+            task_id=task_id,
+            task_input_revision_id=task_input_revision_id,
+            request_id=request_id,
+        ).tool_run
+
+    def execute_revision_with_output(
+        self,
+        actor_context: ActorContext,
+        *,
+        task_id: str,
+        task_input_revision_id: str,
+        request_id: str,
+    ) -> ToolExecutionReceipt:
         tool_run_id = self._id_factory()
         try:
             with self._unit_of_work_factory() as unit_of_work:
@@ -359,7 +385,7 @@ class ToolExecutionService:
                 recorded = current.record_runtime_output(
                     actual_runtime_parameters=dict(output.actual_runtime_parameters),
                     diagnostics=[dict(item) for item in output.diagnostics],
-                    output_summary=_safe_output_summary(output),
+                    output_summary=normalize_tool_output_summary(output),
                     model_bundle_id=output.model_bundle_id,
                 )
                 if unit_of_work.tool_runs.update(
@@ -368,7 +394,7 @@ class ToolExecutionService:
                 ) is None:
                     raise ResourceNotFoundError(task_id=task_id)
                 unit_of_work.commit()
-                return recorded
+                return ToolExecutionReceipt(tool_run=recorded, output=output)
         except ApplicationError:
             raise
         except Exception as error:
@@ -438,14 +464,30 @@ class ToolRunQueryService:
         self._unit_of_work_factory = unit_of_work_factory
 
     def get(self, actor_context: ActorContext, tool_run_id: str) -> ToolRun:
+        tool_run, _asset_ids = self.get_with_asset_ids(
+            actor_context,
+            tool_run_id,
+        )
+        return tool_run
+
+    def get_with_asset_ids(
+        self,
+        actor_context: ActorContext,
+        tool_run_id: str,
+    ) -> tuple[ToolRun, list[str]]:
         try:
             with self._unit_of_work_factory() as unit_of_work:
                 tool_run = unit_of_work.tool_runs.get_owned(
                     tool_run_id,
                     actor_context.actor_id,
                 )
+                assets = (
+                    unit_of_work.assets.list_for_tool_run(tool_run_id)
+                    if tool_run is not None
+                    else []
+                )
         except Exception as error:
             raise from_persistence_error(error) from None
         if tool_run is None:
             raise ResourceNotFoundError()
-        return tool_run
+        return tool_run, [asset.asset_id for asset in assets]

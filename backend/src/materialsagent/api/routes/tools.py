@@ -8,12 +8,14 @@ from pydantic import BaseModel, ConfigDict
 
 from materialsagent.api.dependencies import (
     get_actor_context,
+    get_asset_service,
     get_tool_catalog_service,
     get_tool_execution_service,
     get_tool_run_query_service,
     require_m5_dev_routes,
 )
 from materialsagent.application.context import ActorContext
+from materialsagent.application.asset_service import AssetService
 from materialsagent.application.errors import ResourceNotFoundError
 from materialsagent.application.tool_execution import (
     ToolExecutionService,
@@ -56,7 +58,11 @@ def _utc_text(value: datetime | None) -> str | None:
     return value.isoformat().replace("+00:00", "Z")
 
 
-def _project_tool_run(tool_run: ToolRun) -> dict[str, object]:
+def _project_tool_run(
+    tool_run: ToolRun,
+    *,
+    asset_ids: list[str] | None = None,
+) -> dict[str, object]:
     return {
         "tool_run_id": tool_run.tool_run_id,
         "task_id": tool_run.task_id,
@@ -88,6 +94,7 @@ def _project_tool_run(tool_run: ToolRun) -> dict[str, object]:
         "duration_ms": tool_run.duration_ms,
         "error_code": tool_run.error_code,
         "safe_error_message": tool_run.safe_error_message,
+        "asset_ids": list(asset_ids or []),
     }
 
 
@@ -127,16 +134,28 @@ def execute_tool_revision(
     request: Request,
     actor_context: Annotated[ActorContext, Depends(get_actor_context)],
     service: Annotated[ToolExecutionService, Depends(get_tool_execution_service)],
+    asset_service: Annotated[AssetService, Depends(get_asset_service)],
 ) -> ToolRunResponse:
-    tool_run = service.execute_revision(
+    receipt = service.execute_revision_with_output(
         actor_context,
         task_id=task_id,
         task_input_revision_id=payload.task_input_revision_id,
         request_id=request.state.request_id,
     )
+    assets = []
+    if receipt.output.images:
+        assets = asset_service.create_from_output(
+            actor_context,
+            task_id=task_id,
+            tool_run_id=receipt.tool_run.tool_run_id,
+            output=receipt.output,
+        )
     return ToolRunResponse(
         request_id=request.state.request_id,
-        data=_project_tool_run(tool_run),
+        data=_project_tool_run(
+            receipt.tool_run,
+            asset_ids=[asset.asset_id for asset in assets],
+        ),
     )
 
 
@@ -151,8 +170,14 @@ def get_tool_run(
     actor_context: Annotated[ActorContext, Depends(get_actor_context)],
     service: Annotated[ToolRunQueryService, Depends(get_tool_run_query_service)],
 ) -> ToolRunResponse:
-    tool_run = service.get(actor_context, tool_run_id)
+    tool_run, asset_ids = service.get_with_asset_ids(
+        actor_context,
+        tool_run_id,
+    )
     return ToolRunResponse(
         request_id=request.state.request_id,
-        data=_project_tool_run(tool_run),
+        data=_project_tool_run(
+            tool_run,
+            asset_ids=asset_ids,
+        ),
     )

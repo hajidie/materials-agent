@@ -1,7 +1,8 @@
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime
 from time import perf_counter
+from threading import Lock
 from uuid import uuid4
 
 from fastapi import FastAPI, Request, Response
@@ -12,10 +13,13 @@ from sqlalchemy.engine import Engine
 from materialsagent.api.routes.conversations import (
     router as conversations_router,
 )
+from materialsagent.api.routes.assets import router as assets_router
 from materialsagent.api.routes.health import router as health_router
 from materialsagent.api.routes.tasks import router as tasks_router
 from materialsagent.api.routes.tools import router as tools_router
 from materialsagent.application.context import ActorContext
+from materialsagent.application.asset_service import AssetService
+from materialsagent.application.bootstrap import ensure_object_storage_bucket
 from materialsagent.application.chat_orchestration import (
     ChatOrchestrationService,
 )
@@ -51,11 +55,16 @@ from materialsagent.application.tools import (
     build_tool_registry,
 )
 from materialsagent.domain.ports.chat_orchestration import ChatOrchestrationPort
+from materialsagent.domain.ports.storage import (
+    StoredObjectMetadata,
+    StorageService,
+)
 from materialsagent.domain.ports.unit_of_work import UnitOfWorkFactory
 from materialsagent.infrastructure.config import (
     AppSettings,
     ConfigurationError,
     load_settings,
+    parse_minio_config,
     parse_zta35g_runtime_config,
 )
 from materialsagent.infrastructure.db.session import (
@@ -74,6 +83,61 @@ from materialsagent.infrastructure.tool_clients.local_zta35g import (
 
 
 Clock = Callable[[], datetime]
+
+
+class _LazyConfiguredStorage:
+    """Create and bootstrap the configured MinIO adapter on first I/O only."""
+
+    def __init__(self, settings: AppSettings) -> None:
+        parse_minio_config(settings)
+        self._settings = settings
+        self._storage = None
+        self._lock = Lock()
+
+    def _resolved(self):
+        if self._storage is not None:
+            return self._storage
+        with self._lock:
+            if self._storage is None:
+                from materialsagent.infrastructure.storage.minio import (
+                    create_minio_storage,
+                )
+
+                storage = create_minio_storage(self._settings)
+                try:
+                    ensure_object_storage_bucket(storage)
+                except Exception:
+                    storage.close()
+                    raise
+                self._storage = storage
+        return self._storage
+
+    def put(
+        self,
+        object_key: str,
+        payload: bytes,
+        content_type: str,
+        metadata: Mapping[str, str] | None = None,
+    ) -> StoredObjectMetadata:
+        return self._resolved().put(
+            object_key,
+            payload,
+            content_type,
+            metadata,
+        )
+
+    def head(self, object_key: str) -> StoredObjectMetadata | None:
+        return self._resolved().head(object_key)
+
+    def get(self, object_key: str, *, max_bytes: int) -> bytes:
+        return self._resolved().get(object_key, max_bytes=max_bytes)
+
+    def delete(self, object_key: str) -> None:
+        self._resolved().delete(object_key)
+
+    def close(self) -> None:
+        if self._storage is not None:
+            self._storage.close()
 
 
 def _resource_projection(
@@ -215,11 +279,21 @@ def create_app(
     tool_catalog_service: ToolCatalogService | None = None,
     tool_execution_service: ToolExecutionService | None = None,
     tool_run_query_service: ToolRunQueryService | None = None,
+    storage_service: StorageService | None = None,
+    asset_service: AssetService | None = None,
 ) -> FastAPI:
     resolved_settings = settings or load_settings()
     resolved_readiness_service = readiness_service or build_readiness_service(
         resolved_settings
     )
+    owned_storage: _LazyConfiguredStorage | None = None
+    resolved_storage_service = storage_service
+    if resolved_storage_service is None:
+        try:
+            owned_storage = _LazyConfiguredStorage(resolved_settings)
+            resolved_storage_service = owned_storage
+        except ConfigurationError:
+            owned_storage = None
     owned_engine: Engine | None = None
     resolved_unit_of_work_factory = unit_of_work_factory
     if resolved_unit_of_work_factory is None:
@@ -262,6 +336,7 @@ def create_app(
     )
     resolved_tool_execution_service = tool_execution_service
     resolved_tool_run_query_service = tool_run_query_service
+    resolved_asset_service = asset_service
     if resolved_unit_of_work_factory is not None:
         if resolved_conversation_service is None:
             resolved_conversation_service = ConversationService(
@@ -301,6 +376,16 @@ def create_app(
             resolved_tool_run_query_service = ToolRunQueryService(
                 resolved_unit_of_work_factory
             )
+        if (
+            resolved_asset_service is None
+            and resolved_storage_service is not None
+        ):
+            resolved_asset_service = AssetService(
+                resolved_unit_of_work_factory,
+                resolved_storage_service,
+                environment=resolved_settings.app_env,
+                clock=clock,
+            )
 
     request_logger = configure_logging(resolved_settings.log_level)
     request_logger.disabled = False
@@ -312,6 +397,8 @@ def create_app(
         finally:
             if owned_engine is not None:
                 owned_engine.dispose()
+            if owned_storage is not None:
+                owned_storage.close()
 
     app = FastAPI(
         title="Materials Agent Backend",
@@ -327,6 +414,7 @@ def create_app(
     app.state.tool_catalog_service = resolved_tool_catalog_service
     app.state.tool_execution_service = resolved_tool_execution_service
     app.state.tool_run_query_service = resolved_tool_run_query_service
+    app.state.asset_service = resolved_asset_service
     app.state.m5_dev_routes_enabled = resolved_settings.m5_dev_routes_enabled
 
     @app.middleware("http")
@@ -358,6 +446,7 @@ def create_app(
             )
 
     app.include_router(health_router)
+    app.include_router(assets_router)
     app.include_router(conversations_router)
     app.include_router(tasks_router)
     app.include_router(tools_router)

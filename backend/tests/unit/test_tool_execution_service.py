@@ -318,6 +318,15 @@ def test_success_records_safe_pending_output_without_terminalizing_task() -> Non
         "data_fields": ["mechanical_properties"],
         "image_count": 1,
         "image_roles": ["sem_image"],
+        "images": [
+            {
+                "image_role": "sem_image",
+                "requested_output": True,
+                "sha256": "a" * 64,
+                "encoding": "base64_npy",
+                "shape": [512, 512],
+            }
+        ],
         "warning_count": 0,
         "error": None,
     }
@@ -326,6 +335,22 @@ def test_success_records_safe_pending_output_without_terminalizing_task() -> Non
     assert (task.current_status, task.error_code) == ("FAILED", "TOOL_UNAVAILABLE")
     assert task.selected_tool_run_id is None
     assert task.selected_result_id is None
+
+
+def test_internal_receipt_preserves_same_runtime_output_without_second_call() -> None:
+    output = _success_output()
+    service, _store, client = _service(output)
+
+    receipt = service.execute_revision_with_output(
+        ActorContext(actor_id="actor_1", user_id=None),
+        task_id="task_1",
+        task_input_revision_id="revision_1",
+        request_id="execute_request_1",
+    )
+
+    assert receipt.output is output
+    assert receipt.tool_run.output_summary["image_count"] == 1
+    assert len(client.calls) == 1
 
 
 @pytest.mark.parametrize(

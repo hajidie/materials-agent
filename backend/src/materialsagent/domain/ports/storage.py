@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Protocol
+from dataclasses import dataclass, field
+from typing import Mapping, Protocol
 import unicodedata
 
 
 MAX_OBJECT_KEY_LENGTH = 1024
+MAX_STORAGE_GET_BYTES = 1024 * 1024
 
 
 class StorageError(RuntimeError):
@@ -14,6 +15,10 @@ class StorageError(RuntimeError):
 
 class StorageUnavailableError(StorageError):
     """The configured object storage dependency is unavailable."""
+
+
+class StorageIntegrityError(StorageError):
+    """A stored object's bytes or metadata fail integrity validation."""
 
 
 class StorageConflictError(StorageError):
@@ -34,6 +39,7 @@ class StoredObjectMetadata:
     size_bytes: int
     sha256: str
     content_type: str
+    metadata: dict[str, str] = field(default_factory=dict)
 
 
 class StorageService(Protocol):
@@ -42,11 +48,12 @@ class StorageService(Protocol):
         object_key: str,
         payload: bytes,
         content_type: str,
+        metadata: Mapping[str, str] | None = None,
     ) -> StoredObjectMetadata: ...
 
     def head(self, object_key: str) -> StoredObjectMetadata | None: ...
 
-    def get(self, object_key: str) -> bytes: ...
+    def get(self, object_key: str, *, max_bytes: int) -> bytes: ...
 
     def delete(self, object_key: str) -> None: ...
 

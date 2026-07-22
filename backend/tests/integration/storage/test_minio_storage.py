@@ -36,6 +36,7 @@ def test_put_head_get_delete_and_repeated_delete(
         unique_object_key,
         payload,
         "application/octet-stream",
+        {"asset-id": "asset_integration", "tool-version": "1.0.0"},
     )
     headed = minio_storage.head(unique_object_key)
 
@@ -43,8 +44,12 @@ def test_put_head_get_delete_and_repeated_delete(
     assert stored.size_bytes == len(payload)
     assert stored.sha256 == expected_digest
     assert stored.content_type == "application/octet-stream"
+    assert stored.metadata == {
+        "asset-id": "asset_integration",
+        "tool-version": "1.0.0",
+    }
     assert headed == stored
-    assert minio_storage.get(unique_object_key) == payload
+    assert minio_storage.get(unique_object_key, max_bytes=len(payload)) == payload
 
     minio_storage.delete(unique_object_key)
     minio_storage.delete(unique_object_key)
@@ -69,7 +74,7 @@ def test_same_content_replay_returns_existing_metadata(
     )
 
     assert replay == first
-    assert minio_storage.get(unique_object_key) == payload
+    assert minio_storage.get(unique_object_key, max_bytes=len(payload)) == payload
 
 
 def test_different_content_conflicts_and_preserves_original(
@@ -93,7 +98,7 @@ def test_different_content_conflicts_and_preserves_original(
             "application/octet-stream",
         )
 
-    assert minio_storage.get(unique_object_key) == original
+    assert minio_storage.get(unique_object_key, max_bytes=len(original)) == original
 
 
 def test_missing_head_is_none(
