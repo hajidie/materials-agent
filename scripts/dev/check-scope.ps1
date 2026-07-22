@@ -174,6 +174,37 @@ $milestoneAllowlists = @{
         'backend/tests/api/test_message_orchestration.py'
         'backend/tests/api/test_tasks.py'
     )
+    M5 = @(
+        '.env.example'
+        'scripts/dev/check-scope.ps1'
+        'backend/alembic/env.py'
+        'backend/alembic/versions/0005_create_tool_run.py'
+        'backend/src/materialsagent/main.py'
+        'backend/src/materialsagent/api/dependencies.py'
+        'backend/src/materialsagent/api/routes/tools.py'
+        'backend/src/materialsagent/application/tool_execution.py'
+        'backend/src/materialsagent/application/tools.py'
+        'backend/src/materialsagent/domain/models/tool_run.py'
+        'backend/src/materialsagent/domain/ports/tool_execution.py'
+        'backend/src/materialsagent/domain/ports/unit_of_work.py'
+        'backend/src/materialsagent/infrastructure/config.py'
+        'backend/src/materialsagent/infrastructure/db/conversation_task.py'
+        'backend/src/materialsagent/infrastructure/db/tool_run.py'
+        'backend/src/materialsagent/infrastructure/db/unit_of_work.py'
+        'backend/src/materialsagent/infrastructure/tool_clients/local_zta35g.py'
+        'backend/tests/api/test_message_orchestration.py'
+        'backend/tests/api/test_tools.py'
+        'backend/tests/contract/test_runtime_contract.py'
+        'backend/tests/integration/db/test_chat_orchestration_persistence.py'
+        'backend/tests/integration/db/test_migrations.py'
+        'backend/tests/integration/db/test_tool_run.py'
+        'backend/tests/unit/test_config.py'
+        'backend/tests/unit/test_tool_execution_service.py'
+        'mock-runtime/pyproject.toml'
+        'mock-runtime/src/materialsagent_mock_runtime/main.py'
+        'mock-runtime/tests/conftest.py'
+        'mock-runtime/tests/test_runtime.py'
+    )
 }
 
 if (-not $milestoneAllowlists.ContainsKey($normalizedMilestone)) {

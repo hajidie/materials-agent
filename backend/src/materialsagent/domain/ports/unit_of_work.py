@@ -8,6 +8,7 @@ from materialsagent.domain.models.message import Message
 from materialsagent.domain.models.llm_call import LLMCall
 from materialsagent.domain.models.task import Task
 from materialsagent.domain.models.task_input_revision import TaskInputRevision
+from materialsagent.domain.models.tool_run import ToolRun
 
 
 class PersistenceError(RuntimeError):
@@ -111,6 +112,23 @@ class LLMCallRepository(Protocol):
     ) -> LLMCall | None: ...
 
 
+class ToolRunRepository(Protocol):
+    def get(self, tool_run_id: str) -> ToolRun | None: ...
+
+    def get_owned(self, tool_run_id: str, actor_id: str) -> ToolRun | None: ...
+
+    def list_for_task(self, task_id: str) -> list[ToolRun]: ...
+
+    def add(self, tool_run: ToolRun) -> None: ...
+
+    def update(
+        self,
+        tool_run: ToolRun,
+        *,
+        expected_status: str,
+    ) -> ToolRun | None: ...
+
+
 class UnitOfWork(Protocol):
     actors: ActorRepository
     conversations: ConversationRepository
@@ -118,6 +136,7 @@ class UnitOfWork(Protocol):
     tasks: TaskRepository
     task_input_revisions: TaskInputRevisionRepository
     llm_calls: LLMCallRepository
+    tool_runs: ToolRunRepository
 
     def __enter__(self) -> Self: ...
 

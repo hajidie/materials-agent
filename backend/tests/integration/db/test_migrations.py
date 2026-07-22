@@ -23,8 +23,9 @@ from materialsagent.infrastructure.db.session import (
 
 BASE_REVISION = "0001_create_actor"
 PREVIOUS_REVISION = "0002_create_conversation_message_task_revision"
-IMMEDIATE_PREVIOUS_REVISION = "0003_task_time_order"
-EXPECTED_REVISION = "0004_llm_call"
+M3_REVISION = "0003_task_time_order"
+IMMEDIATE_PREVIOUS_REVISION = "0004_llm_call"
+EXPECTED_REVISION = "0005_tool_run"
 ALEMBIC_INI = Path(__file__).resolve().parents[3] / "alembic.ini"
 NEW_TASK_TIME_CHECKS = {
     "ck_task_started_at_not_before_created_at",
@@ -39,6 +40,7 @@ M3_TABLES = {
     "alembic_version",
 }
 M4A_TABLES = M3_TABLES | {"llm_call"}
+M5_TABLES = M4A_TABLES | {"tool_run"}
 
 
 def _make_alembic_config(settings: AppSettings) -> Config:
@@ -117,7 +119,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
     engine = create_engine_from_settings(temporary_database)
     try:
         inspector = inspect(engine)
-        assert set(inspector.get_table_names(schema="public")) == M4A_TABLES
+        assert set(inspector.get_table_names(schema="public")) == M5_TABLES
         version_columns = _column_map(inspector, "alembic_version")
         assert version_columns["version_num"]["type"].length >= len(
             EXPECTED_REVISION
@@ -229,6 +231,31 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "error_code",
                 "safe_error_message",
             },
+            "tool_run": {
+                "tool_run_id",
+                "task_id",
+                "request_id",
+                "task_input_revision_id",
+                "attempt_no",
+                "tool_id",
+                "tool_version",
+                "schema_version",
+                "requested_outputs",
+                "completed_outputs",
+                "failed_outputs",
+                "execution_input",
+                "actual_runtime_parameters",
+                "diagnostics",
+                "output_summary",
+                "current_status",
+                "model_bundle_id",
+                "created_at",
+                "started_at",
+                "completed_at",
+                "duration_ms",
+                "error_code",
+                "safe_error_message",
+            },
         }
         for table_name, column_names in expected_columns.items():
             assert set(_column_map(inspector, table_name)) == column_names
@@ -288,11 +315,29 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             assert llm_call_columns[timestamp_name]["type"].timezone is True
         assert llm_call_columns["input_result_id"]["nullable"] is True
 
+        tool_run_columns = _column_map(inspector, "tool_run")
+        for array_name in {
+            "requested_outputs",
+            "completed_outputs",
+            "failed_outputs",
+        }:
+            assert isinstance(tool_run_columns[array_name]["type"], ARRAY)
+        for jsonb_name in {
+            "execution_input",
+            "actual_runtime_parameters",
+            "diagnostics",
+            "output_summary",
+        }:
+            assert isinstance(tool_run_columns[jsonb_name]["type"], JSONB)
+        for timestamp_name in {"created_at", "started_at", "completed_at"}:
+            assert tool_run_columns[timestamp_name]["type"].timezone is True
+
         expected_foreign_keys = {
             "conversation": {"fk_conversation_actor": "actor"},
             "task": {
                 "fk_task_actor": "actor",
                 "fk_task_conversation": "conversation",
+                "fk_task_selected_tool_run": "tool_run",
             },
             "message": {
                 "fk_message_actor": "actor",
@@ -307,6 +352,10 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             "llm_call": {
                 "fk_llm_call_conversation": "conversation",
                 "fk_llm_call_task": "task",
+            },
+            "tool_run": {
+                "fk_tool_run_revision": "task_input_revision",
+                "fk_tool_run_task": "task",
             },
         }
         for table_name, expected in expected_foreign_keys.items():
@@ -398,6 +447,33 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "ck_llm_call_task_id_not_blank",
                 "ck_llm_call_usage_object",
             },
+            "tool_run": {
+                "ck_tool_run_attempt_positive",
+                "ck_tool_run_completed_not_before_started",
+                "ck_tool_run_completed_subset",
+                "ck_tool_run_diagnostics_array",
+                "ck_tool_run_duration_nonnegative",
+                "ck_tool_run_error_code_not_blank",
+                "ck_tool_run_execution_input_object",
+                "ck_tool_run_failed_shape",
+                "ck_tool_run_failed_subset",
+                "ck_tool_run_id_not_blank",
+                "ck_tool_run_model_bundle_not_blank",
+                "ck_tool_run_output_sets_disjoint",
+                "ck_tool_run_output_summary_object",
+                "ck_tool_run_request_id_not_blank",
+                "ck_tool_run_requested_outputs_nonempty",
+                "ck_tool_run_revision_id_not_blank",
+                "ck_tool_run_runtime_parameters_object",
+                "ck_tool_run_safe_error_not_blank",
+                "ck_tool_run_schema_version_not_blank",
+                "ck_tool_run_started_not_before_created",
+                "ck_tool_run_status_allowed",
+                "ck_tool_run_status_time_shape",
+                "ck_tool_run_task_id_not_blank",
+                "ck_tool_run_tool_id_not_blank",
+                "ck_tool_run_tool_version_not_blank",
+            },
         }
         for table_name, expected_names in expected_check_names.items():
             constraints = inspector.get_check_constraints(table_name)
@@ -448,6 +524,10 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "created_at",
             ]
         }
+        assert {
+            constraint["name"]: constraint["column_names"]
+            for constraint in inspector.get_unique_constraints("tool_run")
+        } == {"uq_tool_run_task_attempt": ["task_id", "attempt_no"]}
     finally:
         engine.dispose()
 
@@ -455,19 +535,23 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
     immediate_previous_engine = create_engine_from_settings(temporary_database)
     try:
         immediate_inspector = inspect(immediate_previous_engine)
-        assert set(immediate_inspector.get_table_names(schema="public")) == M3_TABLES
+        assert set(immediate_inspector.get_table_names(schema="public")) == M4A_TABLES
         assert NEW_TASK_TIME_CHECKS <= _task_check_names(
             immediate_previous_engine
         )
-        assert "fk_message_llm_call" not in {
+        assert "fk_message_llm_call" in {
             constraint["name"]
             for constraint in immediate_inspector.get_foreign_keys("message")
         }
-        assert "fk_task_input_revision_llm_call" not in {
+        assert "fk_task_input_revision_llm_call" in {
             constraint["name"]
             for constraint in immediate_inspector.get_foreign_keys(
                 "task_input_revision"
             )
+        }
+        assert "fk_task_selected_tool_run" not in {
+            constraint["name"]
+            for constraint in immediate_inspector.get_foreign_keys("task")
         }
     finally:
         immediate_previous_engine.dispose()
@@ -498,7 +582,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
     assert _current_revision(temporary_database) == EXPECTED_REVISION
 
 
-def test_llm_call_migration_preserves_existing_tables_and_rows(
+def test_tool_run_migration_preserves_existing_tables_and_rows(
     temporary_database: AppSettings,
 ) -> None:
     config = _make_alembic_config(temporary_database)
@@ -519,7 +603,7 @@ def test_llm_call_migration_preserves_existing_tables_and_rows(
                         "SELECT relname, oid FROM pg_class "
                         "WHERE relname = ANY(:table_names)"
                     ),
-                    {"table_names": sorted(M3_TABLES - {"alembic_version"})},
+                    {"table_names": sorted(M4A_TABLES - {"alembic_version"})},
                 ).all()
             )
     finally:
@@ -535,7 +619,7 @@ def test_llm_call_migration_preserves_existing_tables_and_rows(
                         "SELECT relname, oid FROM pg_class "
                         "WHERE relname = ANY(:table_names)"
                     ),
-                    {"table_names": sorted(M3_TABLES - {"alembic_version"})},
+                    {"table_names": sorted(M4A_TABLES - {"alembic_version"})},
                 ).all()
             )
             assert after_oids == before_oids
@@ -543,6 +627,7 @@ def test_llm_call_migration_preserves_existing_tables_and_rows(
                 text("SELECT count(*) FROM actor WHERE actor_id='actor_preserved'")
             ) == 1
             assert "tool_result" not in inspect(connection).get_table_names()
+            assert "tool_run" in inspect(connection).get_table_names()
     finally:
         upgraded_engine.dispose()
 

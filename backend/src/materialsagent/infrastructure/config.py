@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import Field, ValidationError
+from pydantic import Field, SecretStr, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -22,6 +22,13 @@ class MinioConfig:
     secret_key: str
     bucket: str
     secure: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ZTA35GRuntimeConfig:
+    base_url: str
+    token: SecretStr
+    timeout_seconds: float
 
 
 class AppSettings(BaseSettings):
@@ -48,6 +55,11 @@ class AppSettings(BaseSettings):
     minio_bucket: str | None = None
     minio_secure: bool | None = None
 
+    zta35g_runtime_url: str | None = None
+    zta35g_runtime_token: SecretStr | None = None
+    zta35g_runtime_timeout_seconds: float = Field(default=10.0, gt=0, le=300)
+    m5_dev_routes_enabled: bool = False
+
 
 ENVIRONMENT_FIELDS = {
     "APP_ENV": "app_env",
@@ -63,6 +75,10 @@ ENVIRONMENT_FIELDS = {
     "MINIO_SECRET_KEY": "minio_secret_key",
     "MINIO_BUCKET": "minio_bucket",
     "MINIO_SECURE": "minio_secure",
+    "ZTA35G_RUNTIME_URL": "zta35g_runtime_url",
+    "ZTA35G_RUNTIME_TOKEN": "zta35g_runtime_token",
+    "ZTA35G_RUNTIME_TIMEOUT_SECONDS": "zta35g_runtime_timeout_seconds",
+    "M5_DEV_ROUTES_ENABLED": "m5_dev_routes_enabled",
 }
 
 
@@ -136,4 +152,39 @@ def parse_minio_config(settings: AppSettings) -> MinioConfig:
         secret_key=secret_key,
         bucket=bucket,
         secure=secure,
+    )
+
+
+def parse_zta35g_runtime_config(
+    settings: AppSettings,
+) -> ZTA35GRuntimeConfig | None:
+    base_url = settings.zta35g_runtime_url
+    token = settings.zta35g_runtime_token
+    if base_url is None and token is None:
+        return None
+    if base_url is None or token is None or not token.get_secret_value():
+        raise ConfigurationError("Invalid Tool Runtime configuration.")
+    try:
+        parsed = urlparse(base_url)
+        port = parsed.port
+    except ValueError:
+        raise ConfigurationError("Invalid Tool Runtime configuration.") from None
+    if (
+        base_url != base_url.strip()
+        or parsed.scheme != "http"
+        or parsed.hostname != "127.0.0.1"
+        or port is None
+        or not 1 <= port <= 65535
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ConfigurationError("Invalid Tool Runtime configuration.")
+    return ZTA35GRuntimeConfig(
+        base_url=base_url.rstrip("/"),
+        token=token,
+        timeout_seconds=settings.zta35g_runtime_timeout_seconds,
     )

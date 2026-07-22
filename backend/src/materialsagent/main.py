@@ -14,6 +14,7 @@ from materialsagent.api.routes.conversations import (
 )
 from materialsagent.api.routes.health import router as health_router
 from materialsagent.api.routes.tasks import router as tasks_router
+from materialsagent.api.routes.tools import router as tools_router
 from materialsagent.application.context import ActorContext
 from materialsagent.application.chat_orchestration import (
     ChatOrchestrationService,
@@ -40,12 +41,22 @@ from materialsagent.application.readiness import (
     build_readiness_service,
 )
 from materialsagent.application.tasks import TaskQueryService
+from materialsagent.application.tool_execution import (
+    ToolExecutionService,
+    ToolRunQueryService,
+)
+from materialsagent.application.tools import (
+    StaticToolRegistry,
+    ToolCatalogService,
+    build_tool_registry,
+)
 from materialsagent.domain.ports.chat_orchestration import ChatOrchestrationPort
 from materialsagent.domain.ports.unit_of_work import UnitOfWorkFactory
 from materialsagent.infrastructure.config import (
     AppSettings,
     ConfigurationError,
     load_settings,
+    parse_zta35g_runtime_config,
 )
 from materialsagent.infrastructure.db.session import (
     create_engine_from_settings,
@@ -56,6 +67,9 @@ from materialsagent.infrastructure.logging import configure_logging
 from materialsagent.infrastructure.llm.mock import (
     MockChatOrchestrationAdapter,
     default_mock_responder,
+)
+from materialsagent.infrastructure.tool_clients.local_zta35g import (
+    LocalZTA35GToolClientAdapter,
 )
 
 
@@ -77,7 +91,11 @@ def _resource_projection(
             if error is not None and error.task_id is not None
             else request.path_params.get("task_id")
         ),
-        "tool_run_id": None,
+        "tool_run_id": (
+            getattr(error, "tool_run_id", None)
+            if error is not None
+            else request.path_params.get("tool_run_id")
+        ),
         "result_id": None,
     }
 
@@ -193,6 +211,10 @@ def create_app(
     chat_orchestration_port: ChatOrchestrationPort | None = None,
     chat_orchestration_service: ChatOrchestrationService | None = None,
     task_query_service: TaskQueryService | None = None,
+    tool_registry: StaticToolRegistry | None = None,
+    tool_catalog_service: ToolCatalogService | None = None,
+    tool_execution_service: ToolExecutionService | None = None,
+    tool_run_query_service: ToolRunQueryService | None = None,
 ) -> FastAPI:
     resolved_settings = settings or load_settings()
     resolved_readiness_service = readiness_service or build_readiness_service(
@@ -224,6 +246,22 @@ def create_app(
     resolved_message_submission_service = message_submission_service
     resolved_chat_orchestration_service = chat_orchestration_service
     resolved_task_query_service = task_query_service
+    resolved_tool_registry = tool_registry
+    if resolved_tool_registry is None:
+        runtime_config = parse_zta35g_runtime_config(resolved_settings)
+        runtime_client = None
+        if runtime_config is not None:
+            runtime_client = LocalZTA35GToolClientAdapter(
+                base_url=runtime_config.base_url,
+                token=runtime_config.token.get_secret_value(),
+                timeout_seconds=runtime_config.timeout_seconds,
+            )
+        resolved_tool_registry = build_tool_registry(runtime_client)
+    resolved_tool_catalog_service = (
+        tool_catalog_service or ToolCatalogService(resolved_tool_registry)
+    )
+    resolved_tool_execution_service = tool_execution_service
+    resolved_tool_run_query_service = tool_run_query_service
     if resolved_unit_of_work_factory is not None:
         if resolved_conversation_service is None:
             resolved_conversation_service = ConversationService(
@@ -253,6 +291,16 @@ def create_app(
             resolved_task_query_service = TaskQueryService(
                 resolved_unit_of_work_factory
             )
+        if resolved_tool_execution_service is None:
+            resolved_tool_execution_service = ToolExecutionService(
+                resolved_unit_of_work_factory,
+                resolved_tool_registry,
+                clock=clock,
+            )
+        if resolved_tool_run_query_service is None:
+            resolved_tool_run_query_service = ToolRunQueryService(
+                resolved_unit_of_work_factory
+            )
 
     request_logger = configure_logging(resolved_settings.log_level)
     request_logger.disabled = False
@@ -276,6 +324,10 @@ def create_app(
     app.state.message_submission_service = resolved_message_submission_service
     app.state.chat_orchestration_service = resolved_chat_orchestration_service
     app.state.task_query_service = resolved_task_query_service
+    app.state.tool_catalog_service = resolved_tool_catalog_service
+    app.state.tool_execution_service = resolved_tool_execution_service
+    app.state.tool_run_query_service = resolved_tool_run_query_service
+    app.state.m5_dev_routes_enabled = resolved_settings.m5_dev_routes_enabled
 
     @app.middleware("http")
     async def add_request_context(
@@ -308,6 +360,7 @@ def create_app(
     app.include_router(health_router)
     app.include_router(conversations_router)
     app.include_router(tasks_router)
+    app.include_router(tools_router)
     app.add_exception_handler(ApplicationError, _application_error_handler)
     app.add_exception_handler(
         RequestValidationError,

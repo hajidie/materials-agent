@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=83,<84"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "materialsagent-mock-runtime"
+version = "0.1.0"
+description = "Contract-faithful local Mock ZTA35G Runtime"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+  "fastapi==0.139.2",
+  "pydantic==2.13.4",
+  "uvicorn==0.51.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx==0.28.1",
+  "pytest==9.1.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["materialsagent_mock_runtime*"]
+namespaces = true

@@ -7,9 +7,17 @@ from materialsagent.application.chat_orchestration import (
 )
 from materialsagent.application.context import ActorContext
 from materialsagent.application.conversations import ConversationService
-from materialsagent.application.errors import DependencyUnavailableError
+from materialsagent.application.errors import (
+    DependencyUnavailableError,
+    ResourceNotFoundError,
+)
 from materialsagent.application.messages import MessageSubmissionService
 from materialsagent.application.tasks import TaskQueryService
+from materialsagent.application.tool_execution import (
+    ToolExecutionService,
+    ToolRunQueryService,
+)
+from materialsagent.application.tools import ToolCatalogService
 
 
 def _required_app_state(request: Request, name: str):
@@ -41,3 +49,20 @@ def get_chat_orchestration_service(
 
 def get_task_query_service(request: Request) -> TaskQueryService:
     return _required_app_state(request, "task_query_service")
+
+
+def get_tool_catalog_service(request: Request) -> ToolCatalogService:
+    return _required_app_state(request, "tool_catalog_service")
+
+
+def get_tool_execution_service(request: Request) -> ToolExecutionService:
+    return _required_app_state(request, "tool_execution_service")
+
+
+def get_tool_run_query_service(request: Request) -> ToolRunQueryService:
+    return _required_app_state(request, "tool_run_query_service")
+
+
+def require_m5_dev_routes(request: Request) -> None:
+    if getattr(request.app.state, "m5_dev_routes_enabled", False) is not True:
+        raise ResourceNotFoundError()

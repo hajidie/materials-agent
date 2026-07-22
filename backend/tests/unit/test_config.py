@@ -225,3 +225,72 @@ def test_explicit_mapping_does_not_read_env_file(
 
     assert settings.minio_endpoint is None
     assert settings.minio_access_key is None
+
+
+def test_runtime_configuration_is_loopback_only_and_secret_safe() -> None:
+    from materialsagent.infrastructure.config import (
+        load_settings,
+        parse_zta35g_runtime_config,
+    )
+
+    secret = "runtime-secret-for-test"
+    settings = load_settings(
+        {
+            "ZTA35G_RUNTIME_URL": "http://127.0.0.1:8100",
+            "ZTA35G_RUNTIME_TOKEN": secret,
+            "ZTA35G_RUNTIME_TIMEOUT_SECONDS": "7.5",
+            "M5_DEV_ROUTES_ENABLED": "true",
+        }
+    )
+    config = parse_zta35g_runtime_config(settings)
+
+    assert config is not None
+    assert config.base_url == "http://127.0.0.1:8100"
+    assert config.token.get_secret_value() == secret
+    assert config.timeout_seconds == 7.5
+    assert settings.m5_dev_routes_enabled is True
+    assert secret not in repr(settings)
+    assert secret not in repr(config)
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"ZTA35G_RUNTIME_URL": "http://127.0.0.1:8100"},
+        {"ZTA35G_RUNTIME_TOKEN": "secret"},
+        {
+            "ZTA35G_RUNTIME_URL": "http://localhost:8100",
+            "ZTA35G_RUNTIME_TOKEN": "secret",
+        },
+        {
+            "ZTA35G_RUNTIME_URL": "http://127.0.0.1",
+            "ZTA35G_RUNTIME_TOKEN": "secret",
+        },
+    ],
+)
+def test_runtime_configuration_rejects_partial_or_non_loopback_values(
+    values: dict[str, str],
+) -> None:
+    from materialsagent.infrastructure.config import (
+        ConfigurationError,
+        load_settings,
+        parse_zta35g_runtime_config,
+    )
+
+    with pytest.raises(
+        ConfigurationError,
+        match=r"^Invalid Tool Runtime configuration\.$",
+    ):
+        parse_zta35g_runtime_config(load_settings(values))
+
+
+def test_absent_runtime_configuration_keeps_adapter_disabled() -> None:
+    from materialsagent.infrastructure.config import (
+        load_settings,
+        parse_zta35g_runtime_config,
+    )
+
+    settings = load_settings({})
+
+    assert parse_zta35g_runtime_config(settings) is None
+    assert settings.m5_dev_routes_enabled is False

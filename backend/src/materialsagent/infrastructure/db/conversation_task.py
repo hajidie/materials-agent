@@ -147,7 +147,12 @@ class TaskRow(Base):
     task_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
     current_status: Mapped[str] = mapped_column(String(64), nullable=False)
     selected_tool_run_id: Mapped[str | None] = mapped_column(
-        Text,
+        ForeignKey(
+            "tool_run.tool_run_id",
+            name="fk_task_selected_tool_run",
+            ondelete="RESTRICT",
+            use_alter=True,
+        ),
         nullable=True,
     )
     selected_result_id: Mapped[str | None] = mapped_column(

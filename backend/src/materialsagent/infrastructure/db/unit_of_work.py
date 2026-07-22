@@ -15,9 +15,11 @@ from materialsagent.domain.ports.unit_of_work import (
     PersistenceError,
     TaskInputRevisionRepository,
     TaskRepository,
+    ToolRunRepository,
 )
 from materialsagent.infrastructure.db.actor import SQLAlchemyActorRepository
 from materialsagent.infrastructure.db.llm_call import SQLAlchemyLLMCallRepository
+from materialsagent.infrastructure.db.tool_run import SQLAlchemyToolRunRepository
 from materialsagent.infrastructure.db.conversation_task import (
     SQLAlchemyConversationRepository,
     SQLAlchemyMessageRepository,
@@ -36,6 +38,7 @@ class SQLAlchemyUnitOfWork:
         self._tasks: TaskRepository | None = None
         self._task_input_revisions: TaskInputRevisionRepository | None = None
         self._llm_calls: LLMCallRepository | None = None
+        self._tool_runs: ToolRunRepository | None = None
 
     @property
     def actors(self) -> ActorRepository:
@@ -73,6 +76,12 @@ class SQLAlchemyUnitOfWork:
             raise RuntimeError("UnitOfWork has not been entered.")
         return self._llm_calls
 
+    @property
+    def tool_runs(self) -> ToolRunRepository:
+        if self._tool_runs is None:
+            raise RuntimeError("UnitOfWork has not been entered.")
+        return self._tool_runs
+
     def __enter__(self) -> SQLAlchemyUnitOfWork:
         if self.session is not None:
             raise RuntimeError("UnitOfWork is already active.")
@@ -85,6 +94,7 @@ class SQLAlchemyUnitOfWork:
             self.session
         )
         self._llm_calls = SQLAlchemyLLMCallRepository(self.session)
+        self._tool_runs = SQLAlchemyToolRunRepository(self.session)
         return self
 
     def __exit__(
@@ -108,6 +118,7 @@ class SQLAlchemyUnitOfWork:
                 self._tasks = None
                 self._task_input_revisions = None
                 self._llm_calls = None
+                self._tool_runs = None
 
     def _active_session(self) -> Session:
         if self.session is None:
