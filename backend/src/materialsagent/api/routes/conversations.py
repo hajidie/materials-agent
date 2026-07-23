@@ -11,13 +11,23 @@ from materialsagent.api.dependencies import (
     get_chat_orchestration_service,
     get_conversation_service,
     get_message_submission_service,
+    get_optional_tool_workflow_service,
 )
 from materialsagent.application.chat_orchestration import (
     ChatOrchestrationService,
 )
 from materialsagent.application.context import ActorContext
 from materialsagent.application.conversations import ConversationService
+from materialsagent.application.errors import ApplicationInternalError
 from materialsagent.application.messages import MessageSubmissionService
+from materialsagent.application.tool_workflow import (
+    ToolWorkflowProjection,
+    ToolWorkflowService,
+)
+from materialsagent.api.routes.tool_results import (
+    ResultArtifactView,
+    _public_json,
+)
 
 
 router = APIRouter(prefix="/api/v1/conversations", tags=["conversations"])
@@ -110,14 +120,40 @@ class NeedsInputView(StrictModel):
     normalized_input: dict[str, object]
 
 
+class ResultSummaryView(StrictModel):
+    result_id: str
+    tool_run_id: str
+    status: Literal["SUCCEEDED", "PARTIALLY_SUCCEEDED", "FAILED"]
+    requested_outputs: list[str]
+    completed_outputs: list[str]
+    failed_outputs: list[str]
+    data: dict[str, object]
+    artifacts: list[ResultArtifactView]
+    warnings: list[object]
+    provenance: dict[str, object]
+    error: dict[str, object] | None
+
+
+class ExplanationView(StrictModel):
+    explanation_id: str
+    result_id: str
+    status: Literal["SUCCEEDED", "FAILED"]
+    language: str
+    text: str | None
+    error_code: str | None
+    safe_error_message: str | None
+    llm_call_id: str
+    llm_call_status: Literal["SUCCEEDED", "FAILED"]
+
+
 class MessageSubmissionData(StrictModel):
     conversation_id: str
     user_message: UserMessageView
     task: MessageTaskView
     assistant_message: AssistantMessageView | None = None
     needs_input: NeedsInputView | None = None
-    result_summary: None = None
-    explanation: None = None
+    result_summary: ResultSummaryView | None = None
+    explanation: ExplanationView | None = None
     idempotency_replayed: Literal[False] = False
 
 
@@ -203,6 +239,10 @@ def submit_message(
         ChatOrchestrationService,
         Depends(get_chat_orchestration_service),
     ],
+    tool_workflow_service: Annotated[
+        ToolWorkflowService | None,
+        Depends(get_optional_tool_workflow_service),
+    ],
 ) -> MessageSubmissionResponse:
     submission = service.prepare_submission(
         actor_context,
@@ -216,8 +256,23 @@ def submit_message(
         actor_context,
         submission,
     )
+    workflow: ToolWorkflowProjection | None = None
+    if (
+        projection.task.task_type == "TOOL_EXECUTION"
+        and projection.task.current_status == "RUNNING"
+    ):
+        if tool_workflow_service is None or projection.revision is None:
+            raise ApplicationInternalError(task_id=projection.task.task_id)
+        workflow = tool_workflow_service.execute(
+            actor_context,
+            task_id=projection.task.task_id,
+            task_input_revision_id=(
+                projection.revision.task_input_revision_id
+            ),
+            request_id=projection.user_message.request_id,
+        )
     message = projection.user_message
-    task = projection.task
+    task = workflow.task if workflow is not None else projection.task
     assistant = projection.assistant_message
     revision = projection.revision
     return MessageSubmissionResponse(
@@ -256,6 +311,66 @@ def submit_message(
                     missing_fields=list(revision.missing_fields),
                     ambiguous_fields=list(revision.ambiguous_fields),
                     normalized_input=dict(revision.normalized_input or {}),
+                )
+            ),
+            result_summary=(
+                None
+                if workflow is None
+                else ResultSummaryView(
+                    result_id=workflow.result.result_id,
+                    tool_run_id=workflow.result.tool_run_id,
+                    status=workflow.result.status,
+                    requested_outputs=list(
+                        workflow.result.requested_outputs
+                    ),
+                    completed_outputs=list(
+                        workflow.result.completed_outputs
+                    ),
+                    failed_outputs=list(
+                        workflow.result.failed_outputs
+                    ),
+                    data=_public_json(workflow.result.data),
+                    artifacts=[
+                        ResultArtifactView(
+                            **{
+                                field: getattr(artifact, field)
+                                for field in artifact.__dataclass_fields__
+                            }
+                        )
+                        for artifact in workflow.artifacts
+                    ],
+                    warnings=_public_json(workflow.result.warnings),
+                    provenance=_public_json(
+                        workflow.result.provenance
+                    ),
+                    error=(
+                        None
+                        if workflow.result.error is None
+                        else _public_json(workflow.result.error)
+                    ),
+                )
+            ),
+            explanation=(
+                None
+                if workflow is None
+                else ExplanationView(
+                    explanation_id=(
+                        workflow.explanation.explanation_id
+                    ),
+                    result_id=workflow.explanation.result_id,
+                    status=workflow.explanation.status,
+                    language=workflow.explanation.language,
+                    text=workflow.explanation.text,
+                    error_code=workflow.explanation.error_code,
+                    safe_error_message=(
+                        workflow.explanation.safe_error_message
+                    ),
+                    llm_call_id=(
+                        workflow.explanation_call.llm_call_id
+                    ),
+                    llm_call_status=(
+                        workflow.explanation_call.status
+                    ),
                 )
             ),
         ),

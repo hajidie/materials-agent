@@ -353,6 +353,47 @@ def test_internal_receipt_preserves_same_runtime_output_without_second_call() ->
     assert len(client.calls) == 1
 
 
+@pytest.mark.parametrize("runtime_status", ["SUCCEEDED", "FAILED"])
+def test_m7_activated_running_task_returns_normalized_receipt(
+    runtime_status: str,
+) -> None:
+    activated_task = replace(
+        _task(),
+        current_status="RUNNING",
+        completed_at=None,
+        error_code=None,
+        safe_error_message=None,
+    )
+    output = _success_output()
+    if runtime_status == "FAILED":
+        output = replace(
+            output,
+            status="FAILED",
+            completed_outputs=(),
+            failed_outputs=output.requested_outputs,
+            data={},
+            error={
+                "code": "MECHANICAL_PROPERTY_PREDICTION_FAILED",
+                "safe_message": "Runtime private wording.",
+                "retryable": False,
+            },
+        )
+    service, store, client = _service(output, task=activated_task)
+
+    receipt = service.execute_revision_with_output(
+        ActorContext(actor_id="actor_1", user_id=None),
+        task_id="task_1",
+        task_input_revision_id="revision_1",
+        request_id="execute_request_1",
+    )
+
+    assert receipt.output.status == runtime_status
+    assert receipt.tool_run.current_status == "RUNNING"
+    assert receipt.tool_run.output_summary["runtime_status"] == runtime_status
+    assert store.tasks["task_1"].current_status == "RUNNING"
+    assert len(client.calls) == 1
+
+
 @pytest.mark.parametrize(
     ("outcome", "expected_code", "expected_http"),
     [

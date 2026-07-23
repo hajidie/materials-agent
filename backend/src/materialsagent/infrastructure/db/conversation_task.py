@@ -156,7 +156,12 @@ class TaskRow(Base):
         nullable=True,
     )
     selected_result_id: Mapped[str | None] = mapped_column(
-        Text,
+        ForeignKey(
+            "tool_result.result_id",
+            name="fk_task_selected_result",
+            ondelete="RESTRICT",
+            use_alter=True,
+        ),
         nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
@@ -611,7 +616,15 @@ class SQLAlchemyMessageRepository:
 
 TASK_ALLOWED_TRANSITIONS: Final = {
     "PENDING": frozenset({"RUNNING", "FAILED"}),
-    "RUNNING": frozenset({"NEEDS_INPUT", "SUCCEEDED", "FAILED"}),
+    "RUNNING": frozenset(
+        {
+            "RUNNING",
+            "NEEDS_INPUT",
+            "SUCCEEDED",
+            "PARTIALLY_SUCCEEDED",
+            "FAILED",
+        }
+    ),
     "NEEDS_INPUT": frozenset(),
     "SUCCEEDED": frozenset(),
     "PARTIALLY_SUCCEEDED": frozenset(),
@@ -634,6 +647,25 @@ class SQLAlchemyTaskRepository:
         statement = select(TaskRow).where(
             TaskRow.task_id == task_id,
             TaskRow.actor_id == actor_id,
+        )
+        try:
+            row = self._session.scalar(statement)
+        except SQLAlchemyError as error:
+            _raise_safe_persistence_error(error)
+        return None if row is None else _task_from_row(row)
+
+    def get_owned_for_update(
+        self,
+        task_id: str,
+        actor_id: str,
+    ) -> Task | None:
+        statement = (
+            select(TaskRow)
+            .where(
+                TaskRow.task_id == task_id,
+                TaskRow.actor_id == actor_id,
+            )
+            .with_for_update()
         )
         try:
             row = self._session.scalar(statement)

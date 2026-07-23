@@ -17,6 +17,9 @@ from materialsagent.api.routes.assets import router as assets_router
 from materialsagent.api.routes.health import router as health_router
 from materialsagent.api.routes.tasks import router as tasks_router
 from materialsagent.api.routes.tools import router as tools_router
+from materialsagent.api.routes.tool_results import (
+    router as tool_results_router,
+)
 from materialsagent.application.context import ActorContext
 from materialsagent.application.asset_service import AssetService
 from materialsagent.application.bootstrap import ensure_object_storage_bucket
@@ -45,6 +48,13 @@ from materialsagent.application.readiness import (
     build_readiness_service,
 )
 from materialsagent.application.tasks import TaskQueryService
+from materialsagent.application.result_service import (
+    ResultService,
+    ToolResultQueryService,
+)
+from materialsagent.application.explanation_service import ExplanationService
+from materialsagent.application.tool_workflow import ToolWorkflowService
+from materialsagent.domain.ports.explanation import ExplanationPort
 from materialsagent.application.tool_execution import (
     ToolExecutionService,
     ToolRunQueryService,
@@ -76,6 +86,9 @@ from materialsagent.infrastructure.logging import configure_logging
 from materialsagent.infrastructure.llm.mock import (
     MockChatOrchestrationAdapter,
     default_mock_responder,
+)
+from materialsagent.infrastructure.llm.mock_explanation import (
+    MockExplanationAdapter,
 )
 from materialsagent.infrastructure.tool_clients.local_zta35g import (
     LocalZTA35GToolClientAdapter,
@@ -160,7 +173,7 @@ def _resource_projection(
             if error is not None
             else request.path_params.get("tool_run_id")
         ),
-        "result_id": None,
+        "result_id": request.path_params.get("result_id"),
     }
 
 
@@ -281,6 +294,12 @@ def create_app(
     tool_run_query_service: ToolRunQueryService | None = None,
     storage_service: StorageService | None = None,
     asset_service: AssetService | None = None,
+    tool_result_query_service: ToolResultQueryService | None = None,
+    result_service: ResultService | None = None,
+    explanation_port: ExplanationPort | None = None,
+    explanation_service: ExplanationService | None = None,
+    tool_workflow_service: ToolWorkflowService | None = None,
+    m7_tool_chain_enabled: bool | None = None,
 ) -> FastAPI:
     resolved_settings = settings or load_settings()
     resolved_readiness_service = readiness_service or build_readiness_service(
@@ -321,8 +340,8 @@ def create_app(
     resolved_chat_orchestration_service = chat_orchestration_service
     resolved_task_query_service = task_query_service
     resolved_tool_registry = tool_registry
+    runtime_config = parse_zta35g_runtime_config(resolved_settings)
     if resolved_tool_registry is None:
-        runtime_config = parse_zta35g_runtime_config(resolved_settings)
         runtime_client = None
         if runtime_config is not None:
             runtime_client = LocalZTA35GToolClientAdapter(
@@ -337,6 +356,26 @@ def create_app(
     resolved_tool_execution_service = tool_execution_service
     resolved_tool_run_query_service = tool_run_query_service
     resolved_asset_service = asset_service
+    resolved_tool_result_query_service = tool_result_query_service
+    resolved_result_service = result_service
+    resolved_explanation_service = explanation_service
+    resolved_tool_workflow_service = tool_workflow_service
+    tool_chain_requested = (
+        m7_tool_chain_enabled is True
+        or (
+            m7_tool_chain_enabled is None
+            and runtime_config is not None
+        )
+    )
+    executable_tool_boundary_configured = (
+        runtime_config is not None
+        or tool_execution_service is not None
+        or tool_workflow_service is not None
+    )
+    auto_tool_chain_enabled = (
+        tool_chain_requested
+        and executable_tool_boundary_configured
+    )
     if resolved_unit_of_work_factory is not None:
         if resolved_conversation_service is None:
             resolved_conversation_service = ConversationService(
@@ -350,17 +389,6 @@ def create_app(
                 clock=clock,
                 id_factory=id_factory,
                 title_generator=title_generator,
-            )
-        if resolved_chat_orchestration_service is None:
-            resolved_chat_orchestration_port = (
-                chat_orchestration_port
-                or MockChatOrchestrationAdapter(default_mock_responder)
-            )
-            resolved_chat_orchestration_service = ChatOrchestrationService(
-                resolved_unit_of_work_factory,
-                resolved_chat_orchestration_port,
-                clock=clock,
-                id_factory=id_factory,
             )
         if resolved_task_query_service is None:
             resolved_task_query_service = TaskQueryService(
@@ -376,6 +404,21 @@ def create_app(
             resolved_tool_run_query_service = ToolRunQueryService(
                 resolved_unit_of_work_factory
             )
+        if resolved_tool_result_query_service is None:
+            resolved_tool_result_query_service = ToolResultQueryService(
+                resolved_unit_of_work_factory
+            )
+        if resolved_result_service is None:
+            resolved_result_service = ResultService(
+                resolved_unit_of_work_factory,
+                clock=clock,
+            )
+        if resolved_explanation_service is None:
+            resolved_explanation_service = ExplanationService(
+                resolved_unit_of_work_factory,
+                explanation_port or MockExplanationAdapter(),
+                clock=clock,
+            )
         if (
             resolved_asset_service is None
             and resolved_storage_service is not None
@@ -385,6 +428,43 @@ def create_app(
                 resolved_storage_service,
                 environment=resolved_settings.app_env,
                 clock=clock,
+            )
+        if (
+            resolved_tool_workflow_service is None
+            and resolved_asset_service is not None
+            and resolved_result_service is not None
+            and resolved_explanation_service is not None
+            and auto_tool_chain_enabled
+        ):
+            resolved_tool_workflow_service = ToolWorkflowService(
+                resolved_unit_of_work_factory,
+                resolved_tool_execution_service,
+                resolved_asset_service,
+                resolved_result_service,
+                resolved_explanation_service,
+                clock=clock,
+            )
+        tool_chain_activated = (
+            auto_tool_chain_enabled
+            and resolved_tool_workflow_service is not None
+        )
+        if resolved_chat_orchestration_service is None:
+            resolved_chat_orchestration_port = (
+                chat_orchestration_port
+                or MockChatOrchestrationAdapter(default_mock_responder)
+            )
+            resolved_chat_orchestration_service = ChatOrchestrationService(
+                resolved_unit_of_work_factory,
+                resolved_chat_orchestration_port,
+                clock=clock,
+                id_factory=id_factory,
+                tool_chain_enabled=tool_chain_activated,
+            )
+        else:
+            resolved_chat_orchestration_service = (
+                resolved_chat_orchestration_service.configured_for_tool_chain(
+                    enabled=tool_chain_activated,
+                )
             )
 
     request_logger = configure_logging(resolved_settings.log_level)
@@ -415,6 +495,8 @@ def create_app(
     app.state.tool_execution_service = resolved_tool_execution_service
     app.state.tool_run_query_service = resolved_tool_run_query_service
     app.state.asset_service = resolved_asset_service
+    app.state.tool_result_query_service = resolved_tool_result_query_service
+    app.state.tool_workflow_service = resolved_tool_workflow_service
     app.state.m5_dev_routes_enabled = resolved_settings.m5_dev_routes_enabled
 
     @app.middleware("http")
@@ -450,6 +532,7 @@ def create_app(
     app.include_router(conversations_router)
     app.include_router(tasks_router)
     app.include_router(tools_router)
+    app.include_router(tool_results_router)
     app.add_exception_handler(ApplicationError, _application_error_handler)
     app.add_exception_handler(
         RequestValidationError,

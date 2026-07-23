@@ -618,6 +618,30 @@ def test_complete_valid_tool_candidate_is_persisted_then_returns_unavailable() -
     assert len(store.messages) == 1
 
 
+def test_complete_valid_tool_candidate_stays_running_when_m7_chain_is_enabled() -> None:
+    actor, submission, store = _submission()
+    factory = _UnitOfWorkFactory(store)
+    service = _service_type()(
+        factory,
+        MockChatOrchestrationAdapter(lambda _: _valid_tool_payload()),
+        clock=_SequenceClock(),
+        id_factory=_id_factory,
+        tool_chain_enabled=True,
+    )
+
+    projection = service.orchestrate_submission(actor, submission)
+
+    assert projection.task.task_type == "TOOL_EXECUTION"
+    assert projection.task.current_status == "RUNNING"
+    assert projection.task.completed_at is None
+    assert projection.task.error_code is None
+    assert projection.task.safe_error_message is None
+    assert projection.task.selected_tool_run_id is None
+    assert projection.task.selected_result_id is None
+    assert projection.assistant_message is None
+    assert projection.revision is not None
+
+
 @pytest.mark.parametrize(
     ("failure", "expected_status", "expected_code"),
     [

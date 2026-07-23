@@ -4,7 +4,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import pytest
 from sqlalchemy import inspect, text
@@ -25,8 +25,9 @@ BASE_REVISION = "0001_create_actor"
 PREVIOUS_REVISION = "0002_create_conversation_message_task_revision"
 M3_REVISION = "0003_task_time_order"
 M4_REVISION = "0004_llm_call"
-IMMEDIATE_PREVIOUS_REVISION = "0005_tool_run"
-EXPECTED_REVISION = "0006_asset"
+M5_REVISION = "0005_tool_run"
+IMMEDIATE_PREVIOUS_REVISION = "0006_asset"
+EXPECTED_REVISION = "0007_tool_result_explanation"
 ALEMBIC_INI = Path(__file__).resolve().parents[3] / "alembic.ini"
 NEW_TASK_TIME_CHECKS = {
     "ck_task_started_at_not_before_created_at",
@@ -43,6 +44,11 @@ M3_TABLES = {
 M4A_TABLES = M3_TABLES | {"llm_call"}
 M5_TABLES = M4A_TABLES | {"tool_run"}
 M6_TABLES = M5_TABLES | {"asset"}
+M7_TABLES = M6_TABLES | {
+    "tool_result",
+    "result_asset_link",
+    "natural_language_explanation",
+}
 
 
 def _make_alembic_config(settings: AppSettings) -> Config:
@@ -121,7 +127,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
     engine = create_engine_from_settings(temporary_database)
     try:
         inspector = inspect(engine)
-        assert set(inspector.get_table_names(schema="public")) == M6_TABLES
+        assert set(inspector.get_table_names(schema="public")) == M7_TABLES
         version_columns = _column_map(inspector, "alembic_version")
         assert version_columns["version_num"]["type"].length >= len(
             EXPECTED_REVISION
@@ -286,6 +292,46 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "orphan_reason",
                 "orphan_details",
             },
+            "tool_result": {
+                "result_id",
+                "task_id",
+                "tool_run_id",
+                "actor_id",
+                "status",
+                "requested_outputs",
+                "completed_outputs",
+                "failed_outputs",
+                "data",
+                "warnings",
+                "provenance",
+                "error",
+                "tool_id",
+                "tool_version",
+                "schema_version",
+                "created_at",
+            },
+            "result_asset_link": {
+                "result_id",
+                "asset_id",
+                "artifact_order",
+                "created_at",
+            },
+            "natural_language_explanation": {
+                "explanation_id",
+                "task_id",
+                "result_id",
+                "llm_call_id",
+                "attempt_no",
+                "status",
+                "language",
+                "text",
+                "created_at",
+                "started_at",
+                "completed_at",
+                "duration_ms",
+                "error_code",
+                "safe_error_message",
+            },
         }
         for table_name, column_names in expected_columns.items():
             assert set(_column_map(inspector, table_name)) == column_names
@@ -378,6 +424,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             "task": {
                 "fk_task_actor": "actor",
                 "fk_task_conversation": "conversation",
+                "fk_task_selected_result": "tool_result",
                 "fk_task_selected_tool_run": "tool_run",
             },
             "message": {
@@ -392,6 +439,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             },
             "llm_call": {
                 "fk_llm_call_conversation": "conversation",
+                "fk_llm_call_input_result": "tool_result",
                 "fk_llm_call_task": "task",
             },
             "tool_run": {
@@ -402,6 +450,20 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "fk_asset_actor": "actor",
                 "fk_asset_task": "task",
                 "fk_asset_tool_run": "tool_run",
+            },
+            "tool_result": {
+                "fk_tool_result_actor": "actor",
+                "fk_tool_result_task": "task",
+                "fk_tool_result_tool_run": "tool_run",
+            },
+            "result_asset_link": {
+                "fk_result_asset_link_asset": "asset",
+                "fk_result_asset_link_result": "tool_result",
+            },
+            "natural_language_explanation": {
+                "fk_explanation_llm_call": "llm_call",
+                "fk_explanation_result": "tool_result",
+                "fk_explanation_task": "task",
             },
         }
         for table_name, expected in expected_foreign_keys.items():
@@ -629,7 +691,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
     immediate_previous_engine = create_engine_from_settings(temporary_database)
     try:
         immediate_inspector = inspect(immediate_previous_engine)
-        assert set(immediate_inspector.get_table_names(schema="public")) == M5_TABLES
+        assert set(immediate_inspector.get_table_names(schema="public")) == M6_TABLES
         assert NEW_TASK_TIME_CHECKS <= _task_check_names(
             immediate_previous_engine
         )
@@ -647,7 +709,10 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             constraint["name"]
             for constraint in immediate_inspector.get_foreign_keys("task")
         }
-        assert "asset" not in immediate_inspector.get_table_names(schema="public")
+        assert "asset" in immediate_inspector.get_table_names(schema="public")
+        assert "tool_result" not in immediate_inspector.get_table_names(
+            schema="public"
+        )
     finally:
         immediate_previous_engine.dispose()
     assert _current_revision(temporary_database) == IMMEDIATE_PREVIOUS_REVISION
@@ -681,7 +746,7 @@ def test_asset_migration_preserves_existing_tables_and_rows(
     temporary_database: AppSettings,
 ) -> None:
     config = _make_alembic_config(temporary_database)
-    command.upgrade(config, IMMEDIATE_PREVIOUS_REVISION)
+    command.upgrade(config, M5_REVISION)
     engine = create_engine_from_settings(temporary_database)
     try:
         with engine.begin() as connection:
@@ -704,7 +769,7 @@ def test_asset_migration_preserves_existing_tables_and_rows(
     finally:
         engine.dispose()
 
-    command.upgrade(config, "head")
+    command.upgrade(config, IMMEDIATE_PREVIOUS_REVISION)
     upgraded_engine = create_engine_from_settings(temporary_database)
     try:
         with upgraded_engine.connect() as connection:
@@ -727,6 +792,7 @@ def test_asset_migration_preserves_existing_tables_and_rows(
     finally:
         upgraded_engine.dispose()
 
+    command.upgrade(config, "head")
     command.check(config)
 
     command.downgrade(config, BASE_REVISION)
@@ -854,3 +920,264 @@ def test_incomplete_database_configuration_raises_safe_error() -> None:
 
     assert message == "PostgreSQL configuration is incomplete."
     assert "not-printed" not in message
+
+
+def test_m7_result_and_explanation_migration_round_trip(
+    temporary_database: AppSettings,
+) -> None:
+    config = _make_alembic_config(temporary_database)
+    script = ScriptDirectory.from_config(config)
+
+    assert script.get_heads() == ["0007_tool_result_explanation"]
+
+    command.upgrade(config, "0006_asset")
+    historical_engine = create_engine_from_settings(temporary_database)
+    try:
+        from backend.tests.integration.db.test_result_commit import _seed
+
+        receipt, assets = _seed(
+            historical_engine,
+            requested=("sem_image",),
+            completed=("sem_image",),
+            failed=(),
+        )
+    finally:
+        historical_engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_engine_from_settings(temporary_database)
+    try:
+        from backend.tests.integration.db.test_result_commit import (
+            ACTOR,
+            BASE,
+            _factory,
+        )
+        from materialsagent.application.explanation_service import (
+            ExplanationService,
+        )
+        from materialsagent.application.result_service import ResultService
+        from materialsagent.infrastructure.llm.mock_explanation import (
+            MockExplanationAdapter,
+        )
+
+        result = ResultService(
+            _factory(engine),
+            clock=lambda: BASE + timedelta(seconds=5),
+            id_factory=lambda: "result_migration_1",
+        ).commit_result(
+            ACTOR,
+            receipt=receipt,
+            assets=assets,
+        )
+        explanation = ExplanationService(
+            _factory(engine),
+            MockExplanationAdapter(mode="success"),
+            clock=lambda: BASE + timedelta(seconds=6),
+            explanation_id_factory=lambda: "explanation_migration_1",
+            llm_call_id_factory=lambda: "llm_explanation_migration_1",
+        ).explain(
+            ACTOR,
+            result_id=result.result_id,
+        )
+        assert explanation.status == "SUCCEEDED"
+
+        inspector = inspect(engine)
+        assert {
+            "tool_result",
+            "result_asset_link",
+            "natural_language_explanation",
+        } <= set(inspector.get_table_names(schema="public"))
+        task_fks = {
+            item["name"]: item["referred_table"]
+            for item in inspector.get_foreign_keys("task")
+        }
+        llm_fks = {
+            item["name"]: item["referred_table"]
+            for item in inspector.get_foreign_keys("llm_call")
+        }
+        assert task_fks["fk_task_selected_result"] == "tool_result"
+        assert llm_fks["fk_llm_call_input_result"] == "tool_result"
+        assert {
+            item["name"]: item["column_names"]
+            for item in inspector.get_unique_constraints("tool_result")
+        } == {"uq_tool_result_tool_run_id": ["tool_run_id"]}
+        assert {
+            item["name"]: item["column_names"]
+            for item in inspector.get_unique_constraints("result_asset_link")
+        } == {
+            "uq_result_asset_link_result_order": [
+                "result_id",
+                "artifact_order",
+            ]
+        }
+        assert {
+            item["name"]: item["column_names"]
+            for item in inspector.get_unique_constraints(
+                "natural_language_explanation"
+            )
+        } == {
+            "uq_explanation_llm_call_id": ["llm_call_id"],
+            "uq_explanation_result_attempt": ["result_id", "attempt_no"],
+        }
+        explanation_checks = {
+            item["name"]: item["sqltext"]
+            for item in inspector.get_check_constraints(
+                "natural_language_explanation"
+            )
+        }
+        failed_shape = explanation_checks["ck_explanation_status_shape"]
+        assert "safe_error_message IS NOT NULL" in failed_shape
+        assert "length(text) <= 4096" in failed_shape
+        llm_checks = {
+            item["name"]: item["sqltext"]
+            for item in inspector.get_check_constraints("llm_call")
+        }
+        provider_request_check = llm_checks[
+            "ck_llm_call_provider_request_id_not_blank"
+        ]
+        assert "length(provider_request_id) <= 256" in provider_request_check
+        assert "idempotency_record" not in inspector.get_table_names()
+        assert "event" not in inspector.get_table_names()
+        with engine.connect() as connection:
+            task_selected = connection.execute(
+                text(
+                    "SELECT selected_tool_run_id, selected_result_id "
+                    "FROM task WHERE task_id = 'task_1'"
+                )
+            ).mappings().one()
+            assert task_selected == {
+                "selected_tool_run_id": "tool_run_1",
+                "selected_result_id": "result_migration_1",
+            }
+            assert connection.scalar(
+                text(
+                    "SELECT count(*) FROM tool_result "
+                    "WHERE result_id = 'result_migration_1'"
+                )
+            ) == 1
+            assert connection.scalar(
+                text(
+                    "SELECT count(*) FROM result_asset_link "
+                    "WHERE result_id = 'result_migration_1' "
+                    "AND asset_id = 'asset_1'"
+                )
+            ) == 1
+            assert connection.scalar(
+                text(
+                    "SELECT count(*) FROM llm_call "
+                    "WHERE llm_call_id = 'llm_explanation_migration_1' "
+                    "AND purpose = 'TOOL_RESULT_EXPLANATION' "
+                    "AND input_result_id = 'result_migration_1'"
+                )
+            ) == 1
+            assert connection.scalar(
+                text(
+                    "SELECT count(*) FROM natural_language_explanation "
+                    "WHERE explanation_id = 'explanation_migration_1' "
+                    "AND result_id = 'result_migration_1'"
+                )
+            ) == 1
+            assert connection.scalar(
+                text(
+                    "SELECT count(*) FROM tool_run "
+                    "WHERE tool_run_id = 'tool_run_1'"
+                )
+            ) == 1
+            assert connection.scalar(
+                text(
+                    "SELECT count(*) FROM asset "
+                    "WHERE asset_id = 'asset_1' "
+                    "AND producer_tool_run_id = 'tool_run_1' "
+                    "AND current_status = 'AVAILABLE'"
+                )
+            ) == 1
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, "0006_asset")
+    downgraded = create_engine_from_settings(temporary_database)
+    try:
+        inspector = inspect(downgraded)
+        assert "tool_result" not in inspector.get_table_names()
+        assert "result_asset_link" not in inspector.get_table_names()
+        assert "natural_language_explanation" not in inspector.get_table_names()
+        assert "fk_task_selected_result" not in {
+            item["name"] for item in inspector.get_foreign_keys("task")
+        }
+        assert "fk_llm_call_input_result" not in {
+            item["name"] for item in inspector.get_foreign_keys("llm_call")
+        }
+        downgraded_llm_checks = {
+            item["name"]: item["sqltext"]
+            for item in inspector.get_check_constraints("llm_call")
+        }
+        assert "length(provider_request_id) <= 256" not in (
+            downgraded_llm_checks[
+                "ck_llm_call_provider_request_id_not_blank"
+            ]
+        )
+        with downgraded.connect() as connection:
+            task_selected = connection.execute(
+                text(
+                    "SELECT selected_tool_run_id, selected_result_id "
+                    "FROM task WHERE task_id = 'task_1'"
+                )
+            ).mappings().one()
+            assert task_selected == {
+                "selected_tool_run_id": "tool_run_1",
+                "selected_result_id": None,
+            }
+            assert connection.scalar(
+                text(
+                    "SELECT count(*) FROM llm_call "
+                    "WHERE purpose = 'TOOL_RESULT_EXPLANATION'"
+                )
+            ) == 0
+            assert connection.scalar(
+                text(
+                    "SELECT count(*) FROM llm_call "
+                    "WHERE input_result_id IS NOT NULL"
+                )
+            ) == 0
+            assert connection.scalar(
+                text(
+                    "SELECT count(*) FROM tool_run "
+                    "WHERE tool_run_id = 'tool_run_1'"
+                )
+            ) == 1
+            assert connection.scalar(
+                text(
+                    "SELECT count(*) FROM asset "
+                    "WHERE asset_id = 'asset_1'"
+                )
+            ) == 1
+    finally:
+        downgraded.dispose()
+
+    command.upgrade(config, "head")
+    assert _current_revision(temporary_database) == (
+        "0007_tool_result_explanation"
+    )
+    reupgraded = create_engine_from_settings(temporary_database)
+    try:
+        with reupgraded.connect() as connection:
+            assert connection.scalar(
+                text(
+                    "SELECT count(*) FROM tool_run "
+                    "WHERE tool_run_id = 'tool_run_1'"
+                )
+            ) == 1
+            assert connection.scalar(
+                text(
+                    "SELECT count(*) FROM asset "
+                    "WHERE asset_id = 'asset_1' "
+                    "AND producer_tool_run_id = 'tool_run_1' "
+                    "AND current_status = 'AVAILABLE'"
+                )
+            ) == 1
+            assert connection.scalar(text("SELECT count(*) FROM tool_result")) == 0
+            assert connection.scalar(
+                text("SELECT count(*) FROM natural_language_explanation")
+            ) == 0
+    finally:
+        reupgraded.dispose()

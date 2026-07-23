@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from sqlalchemy import func, select, text
 
+from materialsagent.application.chat_orchestration import (
+    ChatOrchestrationService,
+)
 from materialsagent.infrastructure.db.conversation_task import (
     MessageRow,
     TaskInputRevisionRow,
@@ -11,7 +14,9 @@ from materialsagent.infrastructure.db.llm_call import LLMCallRow
 from materialsagent.infrastructure.db.session import create_session_factory
 from materialsagent.infrastructure.llm.mock import (
     MockChatOrchestrationAdapter,
+    default_mock_responder,
 )
+from backend.tests.api.test_assets import _MemoryStorage
 
 
 def _create_conversation(client) -> str:
@@ -28,6 +33,30 @@ def _submit(client, conversation_id: str, content_text: str):
             "content_text": content_text,
         },
     )
+
+
+class _CountingStorage(_MemoryStorage):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+        self.put_calls = 0
+
+    def put(self, object_key, payload, content_type, metadata=None):
+        self.calls += 1
+        self.put_calls += 1
+        return super().put(object_key, payload, content_type, metadata)
+
+    def head(self, object_key):
+        self.calls += 1
+        return super().head(object_key)
+
+    def get(self, object_key, *, max_bytes):
+        self.calls += 1
+        return super().get(object_key, max_bytes=max_bytes)
+
+    def delete(self, object_key):
+        self.calls += 1
+        return super().delete(object_key)
 
 
 def _rows(api_harness) -> tuple[list[MessageRow], list[TaskRow], list[TaskInputRevisionRow], list[LLMCallRow]]:
@@ -181,7 +210,112 @@ def test_complete_valid_tool_message_returns_persisted_503_without_fake_result(
         assert connection.scalar(text("SELECT count(*) FROM tool_run")) == 0
         assert connection.scalar(text("SELECT to_regclass('public.asset')")) == "asset"
         assert connection.scalar(text("SELECT count(*) FROM asset")) == 0
-        assert connection.scalar(text("SELECT to_regclass('public.tool_result')")) is None
+        assert connection.scalar(
+            text("SELECT to_regclass('public.tool_result')")
+        ) == "tool_result"
+        assert connection.scalar(text("SELECT count(*) FROM tool_result")) == 0
+        assert connection.scalar(
+            text("SELECT count(*) FROM natural_language_explanation")
+        ) == 0
+
+
+def test_enabled_m7_without_runtime_boundary_has_zero_tool_side_effects(
+    api_harness,
+) -> None:
+    actor_id = "actor_local"
+    api_harness.persist_actor(actor_id)
+    storage = _CountingStorage()
+    runtime_missing_settings = api_harness.settings.model_copy(
+        update={
+            "zta35g_runtime_url": None,
+            "zta35g_runtime_token": None,
+        }
+    )
+
+    with api_harness.create_client(
+        actor_id,
+        settings=runtime_missing_settings,
+        storage_service=storage,
+        m7_tool_chain_enabled=True,
+    ) as client:
+        assert client.app.state.tool_workflow_service is None
+        assert storage.calls == 0
+        conversation_id = _create_conversation(client)
+        response = _submit(client, conversation_id, "完整合法 Tool 请求")
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["error"]["code"] == "TOOL_UNAVAILABLE"
+    assert body["resource"]["tool_run_id"] is None
+    assert body["resource"]["result_id"] is None
+    assert storage.calls == 0
+    assert storage.put_calls == 0
+    assert storage.objects == {}
+    messages, tasks, revisions, calls = _rows(api_harness)
+    assert len(messages) == 1
+    assert len(tasks) == 1
+    assert len(revisions) == 1
+    assert len(calls) == 1
+    assert tasks[0].current_status == "FAILED"
+    assert tasks[0].error_code == "TOOL_UNAVAILABLE"
+    assert tasks[0].selected_tool_run_id is None
+    assert tasks[0].selected_result_id is None
+    with api_harness.engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM tool_run")) == 0
+        assert connection.scalar(text("SELECT count(*) FROM asset")) == 0
+        assert connection.scalar(text("SELECT count(*) FROM tool_result")) == 0
+        assert connection.scalar(
+            text("SELECT count(*) FROM natural_language_explanation")
+        ) == 0
+        assert connection.scalar(
+            text(
+                "SELECT count(*) FROM llm_call "
+                "WHERE purpose='TOOL_RESULT_EXPLANATION'"
+            )
+        ) == 0
+
+
+def test_injected_enabled_chat_service_is_disabled_without_complete_workflow(
+    api_harness,
+) -> None:
+    actor_id = "actor_local"
+    api_harness.persist_actor(actor_id)
+    injected = ChatOrchestrationService(
+        api_harness.unit_of_work_factory,
+        MockChatOrchestrationAdapter(default_mock_responder),
+        tool_chain_enabled=True,
+    )
+    incomplete_settings = api_harness.settings.model_copy(
+        update={
+            "minio_endpoint": None,
+            "minio_access_key": None,
+            "minio_secret_key": None,
+            "minio_bucket": None,
+            "minio_secure": None,
+        }
+    )
+
+    with api_harness.create_client(
+        actor_id,
+        settings=incomplete_settings,
+        chat_orchestration_service=injected,
+        tool_workflow_service=None,
+        asset_service=None,
+        storage_service=None,
+        m7_tool_chain_enabled=True,
+    ) as client:
+        conversation_id = _create_conversation(client)
+        response = _submit(client, conversation_id, "完整合法 Tool 请求")
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "TOOL_UNAVAILABLE"
+    with api_harness.engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM tool_run")) == 0
+        assert connection.scalar(text("SELECT count(*) FROM asset")) == 0
+        assert connection.scalar(text("SELECT count(*) FROM tool_result")) == 0
+        assert connection.scalar(
+            text("SELECT count(*) FROM natural_language_explanation")
+        ) == 0
 
 
 def test_solution_time_minutes_are_visible_only_as_committed_revision_on_503(

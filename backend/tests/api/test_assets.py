@@ -318,11 +318,11 @@ def test_partial_success_persists_safe_summary_and_available_asset(
     with api_harness.engine.connect() as connection:
         assert connection.scalar(text("SELECT count(*) FROM asset")) == 1
         assert connection.scalar(
-            text("SELECT to_regclass('public.tool_result')")
-        ) is None
+            text("SELECT count(*) FROM tool_result")
+        ) == 0
         assert connection.scalar(
-            text("SELECT to_regclass('public.natural_language_explanation')")
-        ) is None
+            text("SELECT count(*) FROM natural_language_explanation")
+        ) == 0
 
 
 def test_pending_failed_and_orphaned_content_are_conflicts(api_harness) -> None:

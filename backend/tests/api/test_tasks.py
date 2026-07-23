@@ -67,6 +67,7 @@ def test_get_owned_pending_task_returns_exact_public_projection_without_writes(
         "completed_at",
         "error_code",
         "safe_error_message",
+        "selected_result_summary",
     }
     assert body["data"]["task_id"] == task.task_id
     assert body["data"]["conversation_id"] == conversation.conversation_id
@@ -78,6 +79,7 @@ def test_get_owned_pending_task_returns_exact_public_projection_without_writes(
     assert body["data"]["completed_at"] is None
     assert body["data"]["error_code"] is None
     assert body["data"]["safe_error_message"] is None
+    assert body["data"]["selected_result_summary"] is None
     _assert_utc(body["data"]["created_at"])
     _assert_utc(body["data"]["updated_at"])
     assert "actor_id" not in first.text
@@ -160,5 +162,6 @@ def test_get_task_returns_persisted_tool_unavailable_terminal_fact(
     assert data["safe_error_message"] == "当前阶段尚未开放材料工具执行。"
     assert data["selected_tool_run_id"] is None
     assert data["selected_result_id"] is None
+    assert data["selected_result_summary"] is None
     assert data["started_at"] is not None
     assert data["completed_at"] is not None

@@ -76,7 +76,9 @@ class LLMCallRow(Base):
         ),
         CheckConstraint(
             "provider_request_id IS NULL OR "
-            "length(btrim(provider_request_id)) > 0",
+            "(length(provider_request_id) <= 256 AND "
+            "provider_request_id ~ "
+            "'^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$')",
             name="ck_llm_call_provider_request_id_not_blank",
         ),
         CheckConstraint(
@@ -173,7 +175,15 @@ class LLMCallRow(Base):
     )
     request_id: Mapped[str] = mapped_column(Text, nullable=False)
     purpose: Mapped[str] = mapped_column(String(64), nullable=False)
-    input_result_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    input_result_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "tool_result.result_id",
+            name="fk_llm_call_input_result",
+            ondelete="RESTRICT",
+            use_alter=True,
+        ),
+        nullable=True,
+    )
     provider: Mapped[str] = mapped_column(String(128), nullable=False)
     model_name: Mapped[str] = mapped_column(String(256), nullable=False)
     prompt_template_id: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -337,6 +347,7 @@ class SQLAlchemyLLMCallRepository:
                     safe_error_message=call.safe_error_message,
                 )
             )
+            self._session.flush()
         except SQLAlchemyError as error:
             _raise_safe_persistence_error(error)
 

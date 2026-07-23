@@ -134,6 +134,26 @@ class SQLAlchemyToolRunRepository:
             _raise_safe_persistence_error(error)
         return None if row is None else _from_row(row)
 
+    def get_owned_for_update(
+        self,
+        tool_run_id: str,
+        actor_id: str,
+    ) -> ToolRun | None:
+        statement = (
+            select(ToolRunRow)
+            .join(TaskRow, TaskRow.task_id == ToolRunRow.task_id)
+            .where(
+                ToolRunRow.tool_run_id == tool_run_id,
+                TaskRow.actor_id == actor_id,
+            )
+            .with_for_update()
+        )
+        try:
+            row = self._session.scalar(statement)
+        except SQLAlchemyError as error:
+            _raise_safe_persistence_error(error)
+        return None if row is None else _from_row(row)
+
     def list_for_task(self, task_id: str) -> list[ToolRun]:
         statement = select(ToolRunRow).where(ToolRunRow.task_id == task_id).order_by(ToolRunRow.attempt_no, ToolRunRow.tool_run_id)
         try:
@@ -146,6 +166,7 @@ class SQLAlchemyToolRunRepository:
         try:
             self._session.flush()
             self._session.add(ToolRunRow(**{field: getattr(tool_run, field) for field in ToolRun.__dataclass_fields__}))
+            self._session.flush()
         except SQLAlchemyError as error:
             _raise_safe_persistence_error(error)
 

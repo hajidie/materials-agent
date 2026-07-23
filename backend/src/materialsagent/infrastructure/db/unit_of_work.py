@@ -10,17 +10,27 @@ from materialsagent.domain.ports.unit_of_work import (
     AssetRepository,
     ConversationRepository,
     DatabaseUnavailableError,
+    ExplanationRepository,
     LLMCallRepository,
     MessageRepository,
     PersistenceConflictError,
     PersistenceError,
+    ResultAssetLinkRepository,
     TaskInputRevisionRepository,
     TaskRepository,
     ToolRunRepository,
+    ToolResultRepository,
 )
 from materialsagent.infrastructure.db.actor import SQLAlchemyActorRepository
 from materialsagent.infrastructure.db.asset import SQLAlchemyAssetRepository
 from materialsagent.infrastructure.db.llm_call import SQLAlchemyLLMCallRepository
+from materialsagent.infrastructure.db.explanation import (
+    SQLAlchemyExplanationRepository,
+)
+from materialsagent.infrastructure.db.tool_result import (
+    SQLAlchemyResultAssetLinkRepository,
+    SQLAlchemyToolResultRepository,
+)
 from materialsagent.infrastructure.db.tool_run import SQLAlchemyToolRunRepository
 from materialsagent.infrastructure.db.conversation_task import (
     SQLAlchemyConversationRepository,
@@ -42,6 +52,9 @@ class SQLAlchemyUnitOfWork:
         self._llm_calls: LLMCallRepository | None = None
         self._tool_runs: ToolRunRepository | None = None
         self._assets: AssetRepository | None = None
+        self._tool_results: ToolResultRepository | None = None
+        self._result_asset_links: ResultAssetLinkRepository | None = None
+        self._explanations: ExplanationRepository | None = None
 
     @property
     def actors(self) -> ActorRepository:
@@ -91,6 +104,24 @@ class SQLAlchemyUnitOfWork:
             raise RuntimeError("UnitOfWork has not been entered.")
         return self._assets
 
+    @property
+    def tool_results(self) -> ToolResultRepository:
+        if self._tool_results is None:
+            raise RuntimeError("UnitOfWork has not been entered.")
+        return self._tool_results
+
+    @property
+    def result_asset_links(self) -> ResultAssetLinkRepository:
+        if self._result_asset_links is None:
+            raise RuntimeError("UnitOfWork has not been entered.")
+        return self._result_asset_links
+
+    @property
+    def explanations(self) -> ExplanationRepository:
+        if self._explanations is None:
+            raise RuntimeError("UnitOfWork has not been entered.")
+        return self._explanations
+
     def __enter__(self) -> SQLAlchemyUnitOfWork:
         if self.session is not None:
             raise RuntimeError("UnitOfWork is already active.")
@@ -105,6 +136,11 @@ class SQLAlchemyUnitOfWork:
         self._llm_calls = SQLAlchemyLLMCallRepository(self.session)
         self._tool_runs = SQLAlchemyToolRunRepository(self.session)
         self._assets = SQLAlchemyAssetRepository(self.session)
+        self._tool_results = SQLAlchemyToolResultRepository(self.session)
+        self._result_asset_links = SQLAlchemyResultAssetLinkRepository(
+            self.session
+        )
+        self._explanations = SQLAlchemyExplanationRepository(self.session)
         return self
 
     def __exit__(
@@ -130,6 +166,9 @@ class SQLAlchemyUnitOfWork:
                 self._llm_calls = None
                 self._tool_runs = None
                 self._assets = None
+                self._tool_results = None
+                self._result_asset_links = None
+                self._explanations = None
 
     def _active_session(self) -> Session:
         if self.session is None:

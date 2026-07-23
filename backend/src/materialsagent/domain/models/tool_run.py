@@ -265,3 +265,51 @@ class ToolRun:
             error_code=error_code,
             safe_error_message=safe_error_message,
         )
+
+    def complete_from_result(
+        self,
+        *,
+        completed_outputs: list[str],
+        failed_outputs: list[str],
+        completed_at: datetime,
+        error_code: str | None,
+        safe_error_message: str | None,
+    ) -> "ToolRun":
+        if self.current_status != RUNNING or self.started_at is None:
+            raise ValueError("Only RUNNING ToolRun can complete from a result.")
+        completed = list(completed_outputs)
+        failed = list(failed_outputs)
+        if (
+            set(completed) & set(failed)
+            or set(completed) | set(failed) != set(self.requested_outputs)
+        ):
+            raise ValueError("Terminal output sets must exactly cover requested outputs.")
+        status = (
+            SUCCEEDED
+            if len(completed) == len(self.requested_outputs)
+            else PARTIALLY_SUCCEEDED
+            if completed
+            else FAILED
+        )
+        if status == SUCCEEDED and (
+            error_code is not None or safe_error_message is not None
+        ):
+            raise ValueError("SUCCEEDED ToolRun cannot contain an error.")
+        if status != SUCCEEDED and (
+            error_code is None or safe_error_message is None
+        ):
+            raise ValueError("Non-success ToolRun requires a controlled error.")
+        duration_ms = max(
+            0,
+            int((completed_at - self.started_at).total_seconds() * 1000),
+        )
+        return replace(
+            self,
+            current_status=status,
+            completed_outputs=completed,
+            failed_outputs=failed,
+            completed_at=completed_at,
+            duration_ms=duration_ms,
+            error_code=error_code,
+            safe_error_message=safe_error_message,
+        )

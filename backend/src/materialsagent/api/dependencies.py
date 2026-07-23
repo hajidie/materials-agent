@@ -14,6 +14,8 @@ from materialsagent.application.errors import (
 )
 from materialsagent.application.messages import MessageSubmissionService
 from materialsagent.application.tasks import TaskQueryService
+from materialsagent.application.result_service import ToolResultQueryService
+from materialsagent.application.tool_workflow import ToolWorkflowService
 from materialsagent.application.tool_execution import (
     ToolExecutionService,
     ToolRunQueryService,
@@ -66,6 +68,18 @@ def get_tool_run_query_service(request: Request) -> ToolRunQueryService:
 
 def get_asset_service(request: Request) -> AssetService:
     return _required_app_state(request, "asset_service")
+
+
+def get_tool_result_query_service(
+    request: Request,
+) -> ToolResultQueryService:
+    return _required_app_state(request, "tool_result_query_service")
+
+
+def get_optional_tool_workflow_service(
+    request: Request,
+) -> ToolWorkflowService | None:
+    return getattr(request.app.state, "tool_workflow_service", None)
 
 
 def require_m5_dev_routes(request: Request) -> None:

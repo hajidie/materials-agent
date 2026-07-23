@@ -3,8 +3,10 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from hashlib import sha256
 from uuid import uuid4
 import secrets
+import json
 
 from materialsagent.application.context import ActorContext
 from materialsagent.application.errors import (
@@ -56,6 +58,46 @@ class ToolExecutionReceipt:
 
     tool_run: ToolRun
     output: ToolExecutionOutput
+    output_fingerprint: str = ""
+
+    def __post_init__(self) -> None:
+        fingerprint = _tool_output_fingerprint(self.output)
+        if self.output_fingerprint and self.output_fingerprint != fingerprint:
+            raise ValueError("ToolExecutionReceipt fingerprint mismatch.")
+        object.__setattr__(self, "output_fingerprint", fingerprint)
+
+
+def _tool_output_fingerprint(output: ToolExecutionOutput) -> str:
+    value = {
+        "status": output.status,
+        "requested_outputs": list(output.requested_outputs),
+        "completed_outputs": list(output.completed_outputs),
+        "failed_outputs": list(output.failed_outputs),
+        "data": output.data,
+        "images": [
+            {
+                field: getattr(image, field)
+                for field in image.__dataclass_fields__
+            }
+            for image in output.images
+        ],
+        "warnings": list(output.warnings),
+        "diagnostics": list(output.diagnostics),
+        "actual_runtime_parameters": output.actual_runtime_parameters,
+        "model_bundle_id": output.model_bundle_id,
+        "error": output.error,
+    }
+    try:
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError):
+        raise ValueError("Tool execution output is not fingerprintable.") from None
+    return sha256(encoded).hexdigest()
 
 
 def _default_seed() -> int:
@@ -225,13 +267,22 @@ class ToolExecutionService:
                     or revision.source_llm_call_id is None
                 ):
                     raise ResourceNotFoundError(task_id=task_id)
-                if (
-                    task.task_type != "TOOL_EXECUTION"
-                    or task.current_status != "FAILED"
-                    or task.error_code != "TOOL_UNAVAILABLE"
-                    or task.selected_tool_run_id is not None
-                    or task.selected_result_id is not None
-                ):
+                activated_chain = (
+                    task.task_type == "TOOL_EXECUTION"
+                    and task.current_status == "RUNNING"
+                    and task.error_code is None
+                    and task.safe_error_message is None
+                    and task.selected_tool_run_id is None
+                    and task.selected_result_id is None
+                )
+                legacy_activation = (
+                    task.task_type == "TOOL_EXECUTION"
+                    and task.current_status == "FAILED"
+                    and task.error_code == "TOOL_UNAVAILABLE"
+                    and task.selected_tool_run_id is None
+                    and task.selected_result_id is None
+                )
+                if not (activated_chain or legacy_activation):
                     raise ApplicationConflictError(task_id=task_id)
                 llm_call = unit_of_work.llm_calls.get(
                     revision.source_llm_call_id
@@ -347,7 +398,11 @@ class ToolExecutionService:
                 tool_run_id=tool_run_id,
             ) from None
 
-        if output.status not in {"SUCCEEDED", "PARTIALLY_SUCCEEDED"}:
+        if output.status not in {
+            "SUCCEEDED",
+            "PARTIALLY_SUCCEEDED",
+            "FAILED",
+        } or (output.status == "FAILED" and not activated_chain):
             error = output.error or {}
             if (
                 isinstance(error.get("code"), str)

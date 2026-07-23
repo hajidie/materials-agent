@@ -16,6 +16,13 @@ from materialsagent.infrastructure.db.conversation_task import (
     TaskRow,
 )
 from materialsagent.infrastructure.db.llm_call import LLMCallRow
+from materialsagent.infrastructure.db.explanation import (
+    NaturalLanguageExplanationRow,
+)
+from materialsagent.infrastructure.db.tool_result import (
+    ResultAssetLinkRow,
+    ToolResultRow,
+)
 from materialsagent.infrastructure.db.tool_run import ToolRunRow
 from materialsagent.infrastructure.db.session import (
     build_postgres_url,
@@ -32,10 +39,13 @@ _ = (
     AssetRow,
     ConversationRow,
     LLMCallRow,
+    NaturalLanguageExplanationRow,
     MessageRow,
     TaskInputRevisionRow,
     TaskRow,
     ToolRunRow,
+    ToolResultRow,
+    ResultAssetLinkRow,
 )
 target_metadata = Base.metadata
 

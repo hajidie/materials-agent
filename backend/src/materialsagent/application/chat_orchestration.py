@@ -95,6 +95,7 @@ class ChatOrchestrationService:
         *,
         clock: Clock | None = None,
         id_factory: IdFactory | None = None,
+        tool_chain_enabled: bool = False,
     ) -> None:
         self._unit_of_work_factory = unit_of_work_factory
         self._orchestration_port = orchestration_port
@@ -102,6 +103,22 @@ class ChatOrchestrationService:
         self._model_name = self._required_adapter_text("model_name")
         self._clock = clock or _default_clock
         self._id_factory = id_factory or _default_id_factory
+        self._tool_chain_enabled = tool_chain_enabled
+
+    def configured_for_tool_chain(
+        self,
+        *,
+        enabled: bool,
+    ) -> ChatOrchestrationService:
+        if self._tool_chain_enabled is enabled:
+            return self
+        return ChatOrchestrationService(
+            self._unit_of_work_factory,
+            self._orchestration_port,
+            clock=self._clock,
+            id_factory=self._id_factory,
+            tool_chain_enabled=enabled,
+        )
 
     def orchestrate_submission(
         self,
@@ -288,7 +305,10 @@ class ChatOrchestrationService:
                         TASK_NEEDS_INPUT,
                         TASK_SUCCEEDED,
                         TASK_FAILED,
-                    }:
+                    } or (
+                        self._tool_chain_enabled
+                        and task.current_status == TASK_RUNNING
+                    ):
                         already_finalized = True
                     else:
                         raise self._conflict(submission)
@@ -523,16 +543,34 @@ class ChatOrchestrationService:
                     error_code = "VALIDATION_FAILED"
                     safe_error_message = VALIDATION_ERROR_MESSAGE
                 else:
-                    error_code = "TOOL_UNAVAILABLE"
-                    safe_error_message = TOOL_UNAVAILABLE_MESSAGE
+                    error_code = (
+                        None
+                        if self._tool_chain_enabled
+                        else "TOOL_UNAVAILABLE"
+                    )
+                    safe_error_message = (
+                        None
+                        if self._tool_chain_enabled
+                        else TOOL_UNAVAILABLE_MESSAGE
+                    )
                 finalized_task = replace(
                     task,
                     task_type=TOOL_EXECUTION,
-                    current_status=TASK_FAILED,
+                    current_status=(
+                        TASK_RUNNING
+                        if self._tool_chain_enabled
+                        and not has_validation_errors
+                        else TASK_FAILED
+                    ),
                     selected_tool_run_id=None,
                     selected_result_id=None,
                     updated_at=completed_at,
-                    completed_at=completed_at,
+                    completed_at=(
+                        None
+                        if self._tool_chain_enabled
+                        and not has_validation_errors
+                        else completed_at
+                    ),
                     error_code=error_code,
                     safe_error_message=safe_error_message,
                 )
@@ -816,8 +854,8 @@ class ChatOrchestrationService:
             ):
                 raise ChatOrchestrationService._conflict(submission)
 
-    @staticmethod
     def _require_terminal_outcome_consistency(
+        self,
         submission: PreparedSubmission,
         task: Task,
         call: LLMCall,
@@ -877,13 +915,22 @@ class ChatOrchestrationService:
 
         if route != "TOOL_EXECUTION" or (
             task.task_type != TOOL_EXECUTION
-            or task.current_status != TASK_FAILED
             or assistant_message is not None
             or len(revisions) != 1
         ):
             reject()
 
         revision = revisions[0]
+        if (
+            self._tool_chain_enabled
+            and task.current_status == TASK_RUNNING
+            and task.error_code is None
+            and task.safe_error_message is None
+            and not revision.validation_errors
+        ):
+            return
+        if task.current_status != TASK_FAILED:
+            reject()
         if task.error_code == "VALIDATION_FAILED":
             if not revision.validation_errors:
                 reject()

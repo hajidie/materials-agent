@@ -135,6 +135,18 @@ class SQLAlchemyAssetRepository:
             _raise_safe_persistence_error(error)
         return None if row is None else _from_row(row)
 
+    def get_for_update(self, asset_id: str) -> Asset | None:
+        statement = (
+            select(AssetRow)
+            .where(AssetRow.asset_id == asset_id)
+            .with_for_update()
+        )
+        try:
+            row = self._session.scalar(statement)
+        except SQLAlchemyError as error:
+            _raise_safe_persistence_error(error)
+        return None if row is None else _from_row(row)
+
     def list_for_tool_run(self, tool_run_id: str) -> list[Asset]:
         statement = (
             select(AssetRow)

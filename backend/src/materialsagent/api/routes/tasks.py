@@ -33,6 +33,14 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class SelectedResultSummaryView(StrictModel):
+    result_id: str
+    status: Literal["SUCCEEDED", "PARTIALLY_SUCCEEDED", "FAILED"]
+    requested_outputs: list[str]
+    completed_outputs: list[str]
+    failed_outputs: list[str]
+
+
 class TaskView(StrictModel):
     task_id: str
     conversation_id: str
@@ -53,6 +61,7 @@ class TaskView(StrictModel):
     completed_at: str | None
     error_code: str | None
     safe_error_message: str | None
+    selected_result_summary: SelectedResultSummaryView | None
 
 
 class TaskResponse(StrictModel):
@@ -67,7 +76,9 @@ def get_task(
     actor_context: Annotated[ActorContext, Depends(get_actor_context)],
     service: Annotated[TaskQueryService, Depends(get_task_query_service)],
 ) -> TaskResponse:
-    task = service.get(actor_context, task_id)
+    projection = service.get_projection(actor_context, task_id)
+    task = projection.task
+    result = projection.selected_result
     return TaskResponse(
         request_id=request.state.request_id,
         data=TaskView(
@@ -83,5 +94,16 @@ def get_task(
             completed_at=_utc_text(task.completed_at),
             error_code=task.error_code,
             safe_error_message=task.safe_error_message,
+            selected_result_summary=(
+                None
+                if result is None
+                else SelectedResultSummaryView(
+                    result_id=result.result_id,
+                    status=result.status,
+                    requested_outputs=list(result.requested_outputs),
+                    completed_outputs=list(result.completed_outputs),
+                    failed_outputs=list(result.failed_outputs),
+                )
+            ),
         ),
     )

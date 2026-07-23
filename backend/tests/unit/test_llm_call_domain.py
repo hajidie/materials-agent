@@ -182,6 +182,22 @@ def test_safe_json_summary_is_copied_and_does_not_store_full_answer() -> None:
     assert "answer_text" not in call.structured_output_summary
 
 
+@pytest.mark.parametrize(
+    "provider_request_id",
+    [
+        "contains a space",
+        "raw\nresponse",
+        "x" * 257,
+        "secret=credential",
+    ],
+)
+def test_provider_request_id_rejects_uncontrolled_metadata(
+    provider_request_id: str,
+) -> None:
+    with pytest.raises(ValueError, match="provider_request_id"):
+        _call(provider_request_id=provider_request_id)
+
+
 def test_safe_json_metadata_is_deeply_immutable_after_validation() -> None:
     call = _call(
         structured_output_summary={

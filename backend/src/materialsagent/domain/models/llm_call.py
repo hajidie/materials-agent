@@ -22,6 +22,9 @@ PURPOSES: Final = frozenset(
     {CHAT_ORCHESTRATION, TOOL_RESULT_EXPLANATION}
 )
 SHA256_PATTERN: Final = re.compile(r"[0-9a-f]{64}\Z")
+PROVIDER_REQUEST_ID_PATTERN: Final = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}\Z"
+)
 MAX_JSON_BYTES: Final = 4096
 MAX_SAFE_ERROR_MESSAGE_CHARS: Final = 256
 ZTA35G_TOOL_ID: Final = "zta35g_sem_virtual_lab"
@@ -298,10 +301,19 @@ class LLMCall:
             "input_result_id",
             "prompt_template_id",
             "prompt_template_version",
-            "provider_request_id",
             "error_code",
         ):
             _require_optional_text(getattr(self, field_name), field_name)
+        if (
+            self.provider_request_id is not None
+            and PROVIDER_REQUEST_ID_PATTERN.fullmatch(
+                self.provider_request_id
+            )
+            is None
+        ):
+            raise ValueError(
+                "provider_request_id must be a bounded controlled identifier."
+            )
         _require_safe_error_message(self.safe_error_message)
         if self.purpose not in PURPOSES:
             raise ValueError("purpose is not allowed.")

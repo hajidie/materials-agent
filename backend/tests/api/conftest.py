@@ -134,6 +134,9 @@ class APITestHarness:
         from materialsagent.application.context import ActorContext
         from materialsagent.main import create_app
 
+        raise_server_exceptions = bool(
+            app_overrides.pop("raise_server_exceptions", False)
+        )
         options: dict[str, Any] = {
             "settings": self.settings,
             "readiness_service": ReadinessService(
@@ -143,9 +146,13 @@ class APITestHarness:
             "unit_of_work_factory": self.unit_of_work_factory,
             "actor_context": ActorContext(actor_id=actor_id, user_id=None),
             "clock": lambda: BASE_TIME.replace(hour=1),
+            "m7_tool_chain_enabled": False,
         }
         options.update(app_overrides)
-        return TestClient(create_app(**options), raise_server_exceptions=False)
+        return TestClient(
+            create_app(**options),
+            raise_server_exceptions=raise_server_exceptions,
+        )
 
     def counts(self) -> dict[str, int]:
         tables = {
