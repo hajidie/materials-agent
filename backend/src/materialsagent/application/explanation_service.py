@@ -45,7 +45,27 @@ class PreparedExplanation:
     llm_call_id: str
     task_id: str
     result_id: str
+    attempt_no: int
     projection: ExplanationInput
+
+
+@dataclass(frozen=True, slots=True)
+class _InitialExplanationSources:
+    result: ToolResult
+    task: Task
+    conversation_id: str
+    tool_run: ToolRun
+    projection: ExplanationInput
+
+
+@dataclass(frozen=True, slots=True)
+class _TerminalExplanationFacts:
+    status: str
+    call: LLMCall
+    explanation: NaturalLanguageExplanation
+
+
+_INITIAL_EXPLANATION_ATTEMPT = 1
 
 
 def _plain_json(value: object) -> object:
@@ -158,7 +178,7 @@ class ExplanationService:
         )
 
     @staticmethod
-    def _source_chain(
+    def _load_and_validate_attempt_sources(
         unit_of_work: UnitOfWork,
         actor: ActorContext,
         prepared: PreparedExplanation,
@@ -227,7 +247,7 @@ class ExplanationService:
             or explanation.task_id != task.task_id
             or explanation.result_id != result.result_id
             or explanation.llm_call_id != call.llm_call_id
-            or explanation.attempt_no != 1
+            or explanation.attempt_no != prepared.attempt_no
         ):
             raise ApplicationConflictError(task_id=prepared.task_id)
         return result, task, tool_run, call, explanation
@@ -253,7 +273,13 @@ class ExplanationService:
     ) -> NaturalLanguageExplanation:
         try:
             with self._unit_of_work_factory() as unit_of_work:
-                result, task, _, call, explanation = self._source_chain(
+                (
+                    result,
+                    task,
+                    _,
+                    call,
+                    explanation,
+                ) = self._load_and_validate_attempt_sources(
                     unit_of_work,
                     actor,
                     prepared,
@@ -280,98 +306,41 @@ class ExplanationService:
         *,
         result_id: str,
     ) -> PreparedExplanation:
+        return self._prepare_initial_attempt(actor, result_id=result_id)
+
+    def _prepare_initial_attempt(
+        self,
+        actor: ActorContext,
+        *,
+        result_id: str,
+    ) -> PreparedExplanation:
         explanation_id = self._explanation_id_factory()
         llm_call_id = self._llm_call_id_factory()
         created_at = self._clock()
+        attempt_no = _INITIAL_EXPLANATION_ATTEMPT
+        task_id: str | None = None
         try:
             with self._unit_of_work_factory() as unit_of_work:
-                result = unit_of_work.tool_results.get_owned(
-                    result_id,
-                    actor.actor_id,
+                sources = self._load_initial_prepare_sources(
+                    unit_of_work,
+                    actor,
+                    result_id=result_id,
+                    attempt_no=attempt_no,
                 )
-                if result is None:
-                    raise ResourceNotFoundError()
-                task = unit_of_work.tasks.get_owned(
-                    result.task_id,
-                    actor.actor_id,
-                )
-                if (
-                    task is None
-                    or task.selected_result_id != result.result_id
-                    or task.selected_tool_run_id != result.tool_run_id
-                ):
-                    raise ApplicationConflictError(task_id=result.task_id)
-                conversation = unit_of_work.conversations.get_owned(
-                    task.conversation_id,
-                    actor.actor_id,
-                )
-                tool_run = unit_of_work.tool_runs.get_owned(
-                    result.tool_run_id,
-                    actor.actor_id,
-                )
-                if (
-                    conversation is None
-                    or tool_run is None
-                    or tool_run.task_id != result.task_id
-                    or unit_of_work.explanations.get_for_result_attempt(
-                        result.result_id,
-                        1,
-                    )
-                    is not None
-                ):
-                    raise ApplicationConflictError(task_id=result.task_id)
-                projection = self._projection(unit_of_work, result)
-                call = LLMCall(
-                    llm_call_id=llm_call_id,
-                    task_id=task.task_id,
-                    conversation_id=conversation.conversation_id,
-                    request_id=tool_run.request_id,
-                    purpose="TOOL_RESULT_EXPLANATION",
-                    input_result_id=result.result_id,
-                    provider=self._port.provider,
-                    model_name=self._port.model_name,
-                    prompt_template_id=self._port.prompt_template_id,
-                    prompt_template_version=(
-                        self._port.prompt_template_version
-                    ),
-                    prompt_digest=_prompt_digest(projection),
-                    generation_parameters={
-                        "temperature": 0,
-                        "max_tokens": 512,
-                    },
-                    structured_output_summary=None,
-                    usage=None,
-                    provider_request_id=None,
-                    status="PENDING",
-                    created_at=created_at,
-                    started_at=None,
-                    completed_at=None,
-                    duration_ms=None,
-                    error_code=None,
-                    safe_error_message=None,
-                )
-                explanation = NaturalLanguageExplanation(
+                task_id = sources.task.task_id
+                call, explanation = self._build_initial_pending_facts(
+                    sources,
                     explanation_id=explanation_id,
-                    task_id=result.task_id,
-                    result_id=result.result_id,
-                    llm_call_id=call.llm_call_id,
-                    attempt_no=1,
-                    status="PENDING",
-                    language="zh-CN",
-                    text=None,
+                    llm_call_id=llm_call_id,
+                    attempt_no=attempt_no,
                     created_at=created_at,
-                    started_at=None,
-                    completed_at=None,
-                    duration_ms=None,
-                    error_code=None,
-                    safe_error_message=None,
                 )
                 unit_of_work.llm_calls.add(call)
                 unit_of_work.explanations.add(explanation)
                 unit_of_work.commit()
         except PersistenceError as error:
             raise ExplanationPersistenceError(
-                task_id=getattr(locals().get("result"), "task_id", None)
+                task_id=task_id
             ) from error
 
         try:
@@ -388,15 +357,118 @@ class ExplanationService:
                 )
         except PersistenceError as error:
             raise ExplanationPersistenceError(
-                task_id=getattr(locals().get("result"), "task_id", None)
+                task_id=task_id
             ) from error
         return PreparedExplanation(
             explanation_id=explanation_id,
             llm_call_id=llm_call_id,
             task_id=persisted_result.task_id,
             result_id=result_id,
+            attempt_no=attempt_no,
             projection=projection,
         )
+
+    def _load_initial_prepare_sources(
+        self,
+        unit_of_work: UnitOfWork,
+        actor: ActorContext,
+        *,
+        result_id: str,
+        attempt_no: int,
+    ) -> _InitialExplanationSources:
+        result = unit_of_work.tool_results.get_owned(
+            result_id,
+            actor.actor_id,
+        )
+        if result is None:
+            raise ResourceNotFoundError()
+        task = unit_of_work.tasks.get_owned(
+            result.task_id,
+            actor.actor_id,
+        )
+        if (
+            task is None
+            or task.selected_result_id != result.result_id
+            or task.selected_tool_run_id != result.tool_run_id
+        ):
+            raise ApplicationConflictError(task_id=result.task_id)
+        conversation = unit_of_work.conversations.get_owned(
+            task.conversation_id,
+            actor.actor_id,
+        )
+        tool_run = unit_of_work.tool_runs.get_owned(
+            result.tool_run_id,
+            actor.actor_id,
+        )
+        if (
+            conversation is None
+            or tool_run is None
+            or tool_run.task_id != result.task_id
+            or unit_of_work.explanations.get_for_result_attempt(
+                result.result_id,
+                attempt_no,
+            )
+            is not None
+        ):
+            raise ApplicationConflictError(task_id=result.task_id)
+        return _InitialExplanationSources(
+            result=result,
+            task=task,
+            conversation_id=conversation.conversation_id,
+            tool_run=tool_run,
+            projection=self._projection(unit_of_work, result),
+        )
+
+    def _build_initial_pending_facts(
+        self,
+        sources: _InitialExplanationSources,
+        *,
+        explanation_id: str,
+        llm_call_id: str,
+        attempt_no: int,
+        created_at: datetime,
+    ) -> tuple[LLMCall, NaturalLanguageExplanation]:
+        call = LLMCall(
+            llm_call_id=llm_call_id,
+            task_id=sources.task.task_id,
+            conversation_id=sources.conversation_id,
+            request_id=sources.tool_run.request_id,
+            purpose="TOOL_RESULT_EXPLANATION",
+            input_result_id=sources.result.result_id,
+            provider=self._port.provider,
+            model_name=self._port.model_name,
+            prompt_template_id=self._port.prompt_template_id,
+            prompt_template_version=self._port.prompt_template_version,
+            prompt_digest=_prompt_digest(sources.projection),
+            generation_parameters={"temperature": 0, "max_tokens": 512},
+            structured_output_summary=None,
+            usage=None,
+            provider_request_id=None,
+            status="PENDING",
+            created_at=created_at,
+            started_at=None,
+            completed_at=None,
+            duration_ms=None,
+            error_code=None,
+            safe_error_message=None,
+        )
+        explanation = NaturalLanguageExplanation(
+            explanation_id=explanation_id,
+            task_id=sources.result.task_id,
+            result_id=sources.result.result_id,
+            llm_call_id=call.llm_call_id,
+            attempt_no=attempt_no,
+            status="PENDING",
+            language="zh-CN",
+            text=None,
+            created_at=created_at,
+            started_at=None,
+            completed_at=None,
+            duration_ms=None,
+            error_code=None,
+            safe_error_message=None,
+        )
+        return call, explanation
 
     def _start(
         self,
@@ -407,7 +479,13 @@ class ExplanationService:
         needs_fresh_read = False
         try:
             with self._unit_of_work_factory() as unit_of_work:
-                _, _, _, call, explanation = self._source_chain(
+                (
+                    _,
+                    _,
+                    _,
+                    call,
+                    explanation,
+                ) = self._load_and_validate_attempt_sources(
                     unit_of_work,
                     actor,
                     prepared,
@@ -453,7 +531,13 @@ class ExplanationService:
         if needs_fresh_read:
             try:
                 with self._unit_of_work_factory() as unit_of_work:
-                    _, _, _, call, explanation = self._source_chain(
+                    (
+                        _,
+                        _,
+                        _,
+                        call,
+                        explanation,
+                    ) = self._load_and_validate_attempt_sources(
                         unit_of_work,
                         actor,
                         prepared,
@@ -505,7 +589,13 @@ class ExplanationService:
         needs_fresh_read = False
         try:
             with self._unit_of_work_factory() as unit_of_work:
-                result, task, _, call, explanation = self._source_chain(
+                (
+                    result,
+                    task,
+                    _,
+                    call,
+                    explanation,
+                ) = self._load_and_validate_attempt_sources(
                     unit_of_work,
                     actor,
                     prepared,
@@ -535,73 +625,22 @@ class ExplanationService:
                         task_id=prepared.task_id
                     )
 
-                status = (
-                    "SUCCEEDED" if outcome.text is not None else "FAILED"
-                )
-                call_duration = max(
-                    0,
-                    int(
-                        (
-                            completed_at - call.started_at
-                        ).total_seconds()
-                        * 1000
-                    ),
-                )
-                explanation_duration = max(
-                    0,
-                    int(
-                        (
-                            completed_at - explanation.started_at
-                        ).total_seconds()
-                        * 1000
-                    ),
-                )
-                terminal_call = replace(
+                terminal_facts = self._build_terminal_explanation_facts(
                     call,
-                    usage=outcome.usage,
-                    provider_request_id=outcome.provider_request_id,
-                    status=status,
-                    completed_at=completed_at,
-                    duration_ms=call_duration,
-                    error_code=outcome.error_code,
-                    safe_error_message=outcome.safe_error_message,
-                )
-                terminal_explanation = replace(
                     explanation,
-                    status=status,
-                    text=outcome.text,
+                    outcome=outcome,
                     completed_at=completed_at,
-                    duration_ms=explanation_duration,
-                    error_code=outcome.error_code,
-                    safe_error_message=outcome.safe_error_message,
                 )
-                if (
-                    unit_of_work.llm_calls.update(
-                        terminal_call,
-                        expected_status="RUNNING",
-                    )
-                    is None
-                    or unit_of_work.explanations.update(
-                        terminal_explanation,
-                        expected_status="RUNNING",
-                    )
-                    is None
+                if not self._persist_terminal_explanation(
+                    unit_of_work,
+                    terminal_facts,
                 ):
-                    unit_of_work.rollback()
                     needs_fresh_read = True
                 elif result.status == "SUCCEEDED":
-                    task_status = (
-                        "SUCCEEDED"
-                        if status == "SUCCEEDED"
-                        else "PARTIALLY_SUCCEEDED"
-                    )
-                    terminal_task = replace(
+                    terminal_task = self._build_terminal_task(
                         task,
-                        current_status=task_status,
-                        updated_at=completed_at,
+                        outcome=outcome,
                         completed_at=completed_at,
-                        error_code=outcome.error_code,
-                        safe_error_message=outcome.safe_error_message,
                     )
                     if (
                         unit_of_work.tasks.update(
@@ -647,20 +686,101 @@ class ExplanationService:
             outcome,
         )
 
-    def explain(
-        self,
-        actor: ActorContext,
+    @staticmethod
+    def _build_terminal_explanation_facts(
+        call: LLMCall,
+        explanation: NaturalLanguageExplanation,
         *,
-        result_id: str,
-    ) -> NaturalLanguageExplanation:
-        prepared = self.prepare(actor, result_id=result_id)
-        self._start(actor, prepared)
+        outcome: ExplanationOutcome,
+        completed_at: datetime,
+    ) -> _TerminalExplanationFacts:
+        status = "SUCCEEDED" if outcome.text is not None else "FAILED"
+        call_duration = max(
+            0,
+            int((completed_at - call.started_at).total_seconds() * 1000),
+        )
+        explanation_duration = max(
+            0,
+            int(
+                (completed_at - explanation.started_at).total_seconds()
+                * 1000
+            ),
+        )
+        return _TerminalExplanationFacts(
+            status=status,
+            call=replace(
+                call,
+                usage=outcome.usage,
+                provider_request_id=outcome.provider_request_id,
+                status=status,
+                completed_at=completed_at,
+                duration_ms=call_duration,
+                error_code=outcome.error_code,
+                safe_error_message=outcome.safe_error_message,
+            ),
+            explanation=replace(
+                explanation,
+                status=status,
+                text=outcome.text,
+                completed_at=completed_at,
+                duration_ms=explanation_duration,
+                error_code=outcome.error_code,
+                safe_error_message=outcome.safe_error_message,
+            ),
+        )
+
+    @staticmethod
+    def _persist_terminal_explanation(
+        unit_of_work: UnitOfWork,
+        terminal_facts: _TerminalExplanationFacts,
+    ) -> bool:
+        if (
+            unit_of_work.llm_calls.update(
+                terminal_facts.call,
+                expected_status="RUNNING",
+            )
+            is None
+            or unit_of_work.explanations.update(
+                terminal_facts.explanation,
+                expected_status="RUNNING",
+            )
+            is None
+        ):
+            unit_of_work.rollback()
+            return False
+        return True
+
+    @staticmethod
+    def _build_terminal_task(
+        task: Task,
+        *,
+        outcome: ExplanationOutcome,
+        completed_at: datetime,
+    ) -> Task:
+        return replace(
+            task,
+            current_status=(
+                "SUCCEEDED"
+                if outcome.text is not None
+                else "PARTIALLY_SUCCEEDED"
+            ),
+            updated_at=completed_at,
+            completed_at=completed_at,
+            error_code=outcome.error_code,
+            safe_error_message=outcome.safe_error_message,
+        )
+
+    def _invoke_provider_safely(
+        self,
+        projection: ExplanationInput,
+    ) -> ExplanationOutcome:
         try:
-            outcome = self._port.explain(prepared.projection)
+            outcome = self._port.explain(projection)
             if not isinstance(outcome, ExplanationOutcome):
                 raise ExplanationProtocolError()
+            return outcome
         except ExplanationTimeoutError:
-            outcome = ExplanationOutcome(
+            return ExplanationOutcome(
                 text=None,
                 usage=None,
                 provider_request_id=None,
@@ -668,7 +788,7 @@ class ExplanationService:
                 safe_error_message="Explanation generation timed out.",
             )
         except ExplanationProviderUnavailableError:
-            outcome = ExplanationOutcome(
+            return ExplanationOutcome(
                 text=None,
                 usage=None,
                 provider_request_id=None,
@@ -676,7 +796,7 @@ class ExplanationService:
                 safe_error_message="Explanation provider is unavailable.",
             )
         except (ExplanationProtocolError, ValueError, TypeError):
-            outcome = ExplanationOutcome(
+            return ExplanationOutcome(
                 text=None,
                 usage=None,
                 provider_request_id=None,
@@ -686,11 +806,21 @@ class ExplanationService:
                 ),
             )
         except Exception:
-            outcome = ExplanationOutcome(
+            return ExplanationOutcome(
                 text=None,
                 usage=None,
                 provider_request_id=None,
                 error_code="EXPLANATION_FAILED",
                 safe_error_message="Explanation generation failed.",
             )
+
+    def explain(
+        self,
+        actor: ActorContext,
+        *,
+        result_id: str,
+    ) -> NaturalLanguageExplanation:
+        prepared = self.prepare(actor, result_id=result_id)
+        self._start(actor, prepared)
+        outcome = self._invoke_provider_safely(prepared.projection)
         return self.finalize(actor, prepared=prepared, outcome=outcome)

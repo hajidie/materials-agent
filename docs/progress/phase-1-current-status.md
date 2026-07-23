@@ -7,26 +7,46 @@
 | 字段 | 当前值 |
 |---|---|
 | 当前阶段 | 阶段 1A |
-| 当前里程碑 | M7 |
-| 当前工作单元 | M7-A Result、M7-B Explanation、M7-C 公共同步 Tool 链 |
-| 状态 | `READY_FOR_M7_ACCEPTANCE_COMMIT` |
-| 上一已验收工作单元 | M6 唯一验收提交 `feat: add generated asset lifecycle` |
+| 当前里程碑 | Pre-M8 行为不变止损；M8 尚未开始 |
+| 当前工作单元 | Tool attempt、Result commit、Explanation attempt 内部边界澄清 |
+| 状态 | `READY_FOR_PRE_M8_STOP_LOSS_COMMIT` |
+| 上一已验收工作单元 | M7 唯一验收提交 `feat: add tool result and explanation slice` |
 | M6 | 已验收 |
-| M7 | 项目负责人代码审查已批准；唯一验收提交待创建 |
+| M7 | `ACCEPTED` |
 | M7 project-owner review | `APPROVED` |
-| M7 acceptance commit | `PENDING` |
+| M7 acceptance commit | `09a9ba8ac7aea9d53f6ae2594cccc27a1f2e2b23` |
+| Pre-M8 health check | `COMPLETE` |
+| Pre-M8 stop-loss review | `APPROVED` |
+| Pre-M8 stop-loss commit | `PENDING` |
 | M8 | `NOT STARTED` |
-| 实际 branch / HEAD | `main` / `19d540dc490f42d0e6c6e3695e558ed49f5e26d3` |
-| HEAD parent / subject | `8d75ad4974711880452b1c32384e6f34301bb3d7` / `feat: add generated asset lifecycle` |
+| 实际 branch / HEAD | `main` / `09a9ba8ac7aea9d53f6ae2594cccc27a1f2e2b23` |
+| HEAD parent / subject | `19d540dc490f42d0e6c6e3695e558ed49f5e26d3` / `feat: add tool result and explanation slice` |
 | 暂存区 | 空；未执行 `git add` |
-| 当前工作区 | M7 allowlist 内 27 个 tracked 修改和 22 个 untracked 新文件 |
+| 当前工作区 | Pre-M8 stop-loss allowlist 内 4 个 tracked 修改 |
 | 已确认设计基线 | 五份均未修改 |
-| 历史 migration | `0001`–`0006` 均未修改 |
-| `SEM/` | 未修改、未运行真实模型；完整性检查通过 |
+| 历史 migration | `0001`–`0007` 均未修改 |
+| `SEM/` | 未修改、未运行真实模型；`SEM_INTEGRITY_OK` |
 | Mock Runtime | 实现和协议未修改 |
 | Git 外部动作 | 未 commit、未 push、未 amend |
-| 是否处于项目负责人暂停点 | 否；已获准创建唯一 M7 验收提交 |
-| 更新时间 | `2026-07-23T16:42:29+08:00` |
+| 是否处于项目负责人暂停点 | 否；已获准创建唯一 Pre-M8 stop-loss 提交 |
+| 更新时间 | `2026-07-23T18:36:01+08:00` |
+
+## Pre-M8 行为不变止损
+
+- `ToolExecutionService.execute_revision_with_output` 只保留首次 attempt 的流程编排；内部明确分为首次 PENDING 创建、PENDING→RUNNING、事务外 Runtime 调用、成功事实持久化和失败事实持久化。没有 retry mode、attempt 参数或新公开方法。
+- `ResultService.commit_result` 在原有单一 UoW、原有锁顺序和唯一 commit 内，明确分离首次来源校验、Result 构造、Result/Link 写入及 ToolRun/Task 终结。首次 selected references 必须为空的规则已隔离为私有检查点，但没有实现替换策略。
+- `ExplanationService` 用私有上下文集中既有 `attempt_no=1`，并分离首次 prepare 来源、PENDING 事实构造、事务外 Provider 安全调用、终态事实构造和原事务内持久化。没有 attempt 2、retry 方法或新公开 Application 方法。
+- 三个文件相对 HEAD 的 UoW、commit、rollback、`FOR UPDATE` 和外部调用计数逐项未变；Runtime execute 与 Explanation Provider 调用仍各只有一个调用点，且均在 UoW 外。
+- 三个批次聚焦测试均为修改前绿、修改后同数绿：Tool `29 passed`；Result `37 passed`；Explanation `46 passed`。
+- 提交前完整验证：Backend `704 passed in 66.21s`；Mock Runtime `11 passed in 1.07s`；`pip check` 无破损依赖；compileall exit 0；Alembic head/current 为 `0007_tool_result_explanation` 且无新 upgrade；SEM 完整性通过。
+- 行为、公共 API、数据库 Schema、migration、Repository/UoW 接口、事务边界、锁顺序、错误码和状态聚合均未改变；没有删除测试，没有开始 M8。
+
+## Pre-M8 stop-loss 实际修改文件
+
+- `backend/src/materialsagent/application/tool_execution.py`
+- `backend/src/materialsagent/application/result_service.py`
+- `backend/src/materialsagent/application/explanation_service.py`
+- `docs/progress/phase-1-current-status.md`
 
 ## M7 已实现内容
 
@@ -187,17 +207,20 @@
 
 ## 已知风险
 
-- 本轮 Explanation Adapter 是确定性 Mock，不是真实外部 LLM；这是阶段 1A 的既定边界。
-- PostgreSQL 与 MinIO 仍不能形成单一 ACID 事务；M6 已有的 PENDING/ORPHANED 补偿与恢复事实继续适用。
-- 本轮真实 HTTP 验收使用 Mock Runtime 的受控场景输出，不加载或运行真实 ZTA35G 模型。
-- 当前变更已经项目负责人代码审查批准；唯一 M7 验收提交创建前仍不能视为已验收，也不能开始 M8。
+- 本轮只澄清内部边界，没有验证或实现任何 M8 retry/idempotency 行为。
+- `_PreparedToolAttempt`、`_ValidatedResultSources` 和 Explanation 私有 attempt 上下文只服务现有首次执行；M8 仍需单独设计并测试新的资格策略。
+- PostgreSQL 与 MinIO 的既有跨系统补偿边界未改变；本轮没有扩大或缩小该风险。
 
 ## 下一步
 
-仅创建已获批准的唯一 M7 验收提交；不 push、不 amend，不开始 M8。
+仅创建项目负责人已批准的唯一 Pre-M8 stop-loss 提交；不 push、不 amend、不开始 M8。
 
 ```text
-M7 project-owner review: APPROVED
-M7 acceptance commit: PENDING
+PRE_M8_HEALTH_CHECK: COMPLETE
+PRE_M8_STOP_LOSS_REVIEW: APPROVED
+Pre-M8 stop-loss implemented: YES
+Pre-M8 stop-loss commit: PENDING
+Push: NO
+Amend: NO
 M8: NOT STARTED
 ```

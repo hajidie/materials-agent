@@ -25,6 +25,7 @@ from materialsagent.domain.ports.tool_execution import (
     ToolClientRuntimeError,
     ToolClientTimeoutError,
     ToolClientUnavailableError,
+    ToolExecutionInput,
     ToolExecutionOutput,
     ToolRequestContext,
 )
@@ -65,6 +66,14 @@ class ToolExecutionReceipt:
         if self.output_fingerprint and self.output_fingerprint != fingerprint:
             raise ValueError("ToolExecutionReceipt fingerprint mismatch.")
         object.__setattr__(self, "output_fingerprint", fingerprint)
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedToolAttempt:
+    tool_run: ToolRun
+    validated_input: ToolExecutionInput
+    conversation_id: str
+    initial_chain_activated: bool
 
 
 def _tool_output_fingerprint(output: ToolExecutionOutput) -> str:
@@ -249,6 +258,74 @@ class ToolExecutionService:
         task_input_revision_id: str,
         request_id: str,
     ) -> ToolExecutionReceipt:
+        prepared = self._prepare_initial_attempt(
+            actor_context,
+            task_id=task_id,
+            task_input_revision_id=task_input_revision_id,
+            request_id=request_id,
+        )
+        try:
+            output = self._invoke_runtime(
+                actor_context,
+                prepared=prepared,
+                request_id=request_id,
+            )
+        except ToolClientError as error:
+            self._raise_persisted_runtime_failure(
+                prepared,
+                error=error,
+            )
+
+        runtime_error = self._runtime_output_error(
+            output,
+            initial_chain_activated=prepared.initial_chain_activated,
+        )
+        if runtime_error is not None:
+            self._raise_persisted_runtime_failure(
+                prepared,
+                error=runtime_error,
+                output=output,
+            )
+        return self._persist_runtime_success(prepared, output)
+
+    def _prepare_initial_attempt(
+        self,
+        actor_context: ActorContext,
+        *,
+        task_id: str,
+        task_input_revision_id: str,
+        request_id: str,
+    ) -> _PreparedToolAttempt:
+        (
+            pending,
+            validated_input,
+            conversation_id,
+            initial_chain_activated,
+        ) = self._create_initial_pending_attempt(
+            actor_context,
+            task_id=task_id,
+            task_input_revision_id=task_input_revision_id,
+            request_id=request_id,
+        )
+        running = self._start_pending_attempt(
+            pending.tool_run_id,
+            task_id=task_id,
+        )
+        return _PreparedToolAttempt(
+            tool_run=running,
+            validated_input=validated_input,
+            conversation_id=conversation_id,
+            initial_chain_activated=initial_chain_activated,
+        )
+
+    def _create_initial_pending_attempt(
+        self,
+        actor_context: ActorContext,
+        *,
+        task_id: str,
+        task_input_revision_id: str,
+        request_id: str,
+    ) -> tuple[ToolRun, ToolExecutionInput, str, bool]:
         tool_run_id = self._id_factory()
         try:
             with self._unit_of_work_factory() as unit_of_work:
@@ -349,11 +426,23 @@ class ToolExecutionService:
                 )
                 unit_of_work.tool_runs.add(pending)
                 unit_of_work.commit()
+                return (
+                    pending,
+                    validated_input,
+                    task.conversation_id,
+                    activated_chain,
+                )
         except ApplicationError:
             raise
         except Exception as error:
             raise from_persistence_error(error, task_id=task_id) from None
 
+    def _start_pending_attempt(
+        self,
+        tool_run_id: str,
+        *,
+        task_id: str,
+    ) -> ToolRun:
         try:
             with self._unit_of_work_factory() as unit_of_work:
                 pending = unit_of_work.tool_runs.get(tool_run_id)
@@ -366,43 +455,44 @@ class ToolExecutionService:
                 ) is None:
                     raise ResourceNotFoundError(task_id=task_id)
                 unit_of_work.commit()
+                return running
         except ApplicationError:
             raise
         except Exception as error:
             raise from_persistence_error(error, task_id=task_id) from None
 
+    def _invoke_runtime(
+        self,
+        actor_context: ActorContext,
+        *,
+        prepared: _PreparedToolAttempt,
+        request_id: str,
+    ) -> ToolExecutionOutput:
+        registration = self._registry.resolve(prepared.tool_run.tool_id)
         context = ToolRequestContext(
             request_id=request_id,
-            conversation_id=task.conversation_id,
-            task_id=task_id,
-            tool_run_id=tool_run_id,
+            conversation_id=prepared.conversation_id,
+            task_id=prepared.tool_run.task_id,
+            tool_run_id=prepared.tool_run.tool_run_id,
             actor_id=actor_context.actor_id,
             user_id=actor_context.user_id,
-            requested_at=running.started_at,
+            requested_at=prepared.tool_run.started_at,
         )
-        try:
-            output = registration.tool.execute(validated_input, context)
-        except ToolClientError as error:
-            code, safe_message, status_code = _safe_runtime_error(error)
-            self._persist_failure(
-                tool_run_id,
-                task_id=task_id,
-                code=code,
-                safe_message=safe_message,
-            )
-            raise ToolExecutionOutcomeError(
-                safe_message,
-                code=code,
-                status_code=status_code,
-                task_id=task_id,
-                tool_run_id=tool_run_id,
-            ) from None
+        return registration.tool.execute(prepared.validated_input, context)
 
+    @staticmethod
+    def _runtime_output_error(
+        output: ToolExecutionOutput,
+        *,
+        initial_chain_activated: bool,
+    ) -> ToolClientError | None:
         if output.status not in {
             "SUCCEEDED",
             "PARTIALLY_SUCCEEDED",
             "FAILED",
-        } or (output.status == "FAILED" and not activated_chain):
+        } or (
+            output.status == "FAILED" and not initial_chain_activated
+        ):
             error = output.error or {}
             if (
                 isinstance(error.get("code"), str)
@@ -416,25 +506,20 @@ class ToolExecutionService:
                 )
             else:
                 runtime_error = ToolClientProtocolError()
-            code, safe_message, status_code = _safe_runtime_error(runtime_error)
-            self._persist_failure(
-                tool_run_id,
-                task_id=task_id,
-                code=code,
-                safe_message=safe_message,
-                output=output,
-            )
-            raise ToolExecutionOutcomeError(
-                safe_message,
-                code=code,
-                status_code=status_code,
-                task_id=task_id,
-                tool_run_id=tool_run_id,
-            )
+            return runtime_error
+        return None
 
+    def _persist_runtime_success(
+        self,
+        prepared: _PreparedToolAttempt,
+        output: ToolExecutionOutput,
+    ) -> ToolExecutionReceipt:
+        task_id = prepared.tool_run.task_id
         try:
             with self._unit_of_work_factory() as unit_of_work:
-                current = unit_of_work.tool_runs.get(tool_run_id)
+                current = unit_of_work.tool_runs.get(
+                    prepared.tool_run.tool_run_id
+                )
                 if current is None:
                     raise ResourceNotFoundError(task_id=task_id)
                 recorded = current.record_runtime_output(
@@ -455,7 +540,30 @@ class ToolExecutionService:
         except Exception as error:
             raise from_persistence_error(error, task_id=task_id) from None
 
-    def _persist_failure(
+    def _raise_persisted_runtime_failure(
+        self,
+        prepared: _PreparedToolAttempt,
+        *,
+        error: ToolClientError,
+        output: ToolExecutionOutput | None = None,
+    ) -> None:
+        code, safe_message, status_code = _safe_runtime_error(error)
+        self._persist_runtime_failure(
+            prepared.tool_run.tool_run_id,
+            task_id=prepared.tool_run.task_id,
+            code=code,
+            safe_message=safe_message,
+            output=output,
+        )
+        raise ToolExecutionOutcomeError(
+            safe_message,
+            code=code,
+            status_code=status_code,
+            task_id=prepared.tool_run.task_id,
+            tool_run_id=prepared.tool_run.tool_run_id,
+        )
+
+    def _persist_runtime_failure(
         self,
         tool_run_id: str,
         *,
