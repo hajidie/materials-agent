@@ -65,8 +65,8 @@ $globalAllowedPaths = @(
     'docs/progress/phase-1-current-status.md'
 )
 
-# M0-M3 and configured M4 work units have reviewed exact allowlists.
-# G0 and M4-M16 are recognized so
+# M0-M8 configured milestones/work units have reviewed exact allowlists.
+# G0 and otherwise unconfigured recognized milestones are retained so
 # callers receive a stable configuration error until their exact plan allowlist
 # is reviewed and added; this deliberately avoids inventing future scope.
 $milestoneAllowlists = @{
@@ -295,6 +295,46 @@ $milestoneAllowlists = @{
         'backend/tests/unit/test_result_service.py'
         'backend/tests/unit/test_tool_execution_service.py'
         'backend/tests/unit/test_tool_result_domain.py'
+    )
+    M8 = @(
+        'scripts/dev/check-scope.ps1'
+        'backend/alembic/env.py'
+        'backend/alembic/versions/0008_create_idempotency_record.py'
+        'backend/src/materialsagent/main.py'
+        'backend/src/materialsagent/api/dependencies.py'
+        'backend/src/materialsagent/api/routes/conversations.py'
+        'backend/src/materialsagent/api/routes/tasks.py'
+        'backend/src/materialsagent/api/routes/tool_results.py'
+        'backend/src/materialsagent/application/chat_orchestration.py'
+        'backend/src/materialsagent/application/errors.py'
+        'backend/src/materialsagent/application/explanation_service.py'
+        'backend/src/materialsagent/application/idempotency.py'
+        'backend/src/materialsagent/application/messages.py'
+        'backend/src/materialsagent/application/result_service.py'
+        'backend/src/materialsagent/application/retries.py'
+        'backend/src/materialsagent/application/tool_execution.py'
+        'backend/src/materialsagent/application/tool_workflow.py'
+        'backend/src/materialsagent/domain/models/idempotency_record.py'
+        'backend/src/materialsagent/domain/ports/unit_of_work.py'
+        'backend/src/materialsagent/infrastructure/db/actor.py'
+        'backend/src/materialsagent/infrastructure/db/conversation_task.py'
+        'backend/src/materialsagent/infrastructure/db/idempotency_record.py'
+        'backend/src/materialsagent/infrastructure/db/tool_result.py'
+        'backend/src/materialsagent/infrastructure/db/unit_of_work.py'
+        'backend/tests/api/test_assets.py'
+        'backend/tests/api/test_conversations.py'
+        'backend/tests/api/test_explanation_outcomes.py'
+        'backend/tests/api/test_m8_explanation_retry.py'
+        'backend/tests/api/test_m8_message_idempotency.py'
+        'backend/tests/api/test_m8_tool_retry.py'
+        'backend/tests/api/test_message_orchestration.py'
+        'backend/tests/api/test_tasks.py'
+        'backend/tests/api/test_tools.py'
+        'backend/tests/integration/db/test_idempotency_persistence.py'
+        'backend/tests/integration/db/test_migrations.py'
+        'backend/tests/integration/db/test_result_commit.py'
+        'backend/tests/unit/test_explanation_service.py'
+        'backend/tests/unit/test_idempotency.py'
     )
 }
 

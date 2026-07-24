@@ -4,17 +4,24 @@ from datetime import datetime, timezone
 from collections.abc import Mapping
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Request
-from pydantic import BaseModel, ConfigDict
+from fastapi import APIRouter, Depends, Header, Request
+from pydantic import BaseModel, ConfigDict, Field
 
 from materialsagent.api.dependencies import (
     get_actor_context,
     get_tool_result_query_service,
+    get_explanation_retry_service,
 )
 from materialsagent.application.context import ActorContext
 from materialsagent.application.result_service import (
     ToolResultQueryService,
 )
+from materialsagent.application.retries import (
+    DEFAULT_RETRY_REASON,
+    ExplanationRetryService,
+)
+from materialsagent.application.errors import ApplicationValidationError
+from materialsagent.application.idempotency import validate_idempotency_key
 
 
 router = APIRouter(prefix="/api/v1/tool-results", tags=["tool-results"])
@@ -79,6 +86,47 @@ class ToolResultResponse(StrictModel):
     data: ToolResultView
 
 
+class ExplanationRetryRequest(StrictModel):
+    language: str = Field(default="zh-CN", min_length=1, max_length=32)
+    reason: str = Field(
+        default=DEFAULT_RETRY_REASON,
+        min_length=1,
+        max_length=256,
+    )
+
+
+class ExplanationRetryView(StrictModel):
+    explanation_id: str
+    result_id: str
+    attempt_no: int
+    status: Literal["PENDING", "RUNNING", "SUCCEEDED", "FAILED"]
+    language: str
+    text: str | None
+    error_code: str | None
+    safe_error_message: str | None
+    llm_call_id: str
+    llm_call_status: Literal["PENDING", "RUNNING", "SUCCEEDED", "FAILED"]
+
+
+class ExplanationRetryData(StrictModel):
+    task_id: str
+    task_status: Literal[
+        "PENDING",
+        "RUNNING",
+        "NEEDS_INPUT",
+        "SUCCEEDED",
+        "PARTIALLY_SUCCEEDED",
+        "FAILED",
+    ]
+    explanation: ExplanationRetryView
+    idempotency_replayed: bool
+
+
+class ExplanationRetryResponse(StrictModel):
+    request_id: str
+    data: ExplanationRetryData
+
+
 @router.get("/{result_id}", response_model=ToolResultResponse)
 def get_tool_result(
     result_id: str,
@@ -122,5 +170,59 @@ def get_tool_result(
                 else _public_json(result.error)
             ),
             created_at=_utc_text(result.created_at),
+        ),
+    )
+
+
+@router.post(
+    "/{result_id}/explanations",
+    response_model=ExplanationRetryResponse,
+)
+def retry_explanation(
+    result_id: str,
+    body: ExplanationRetryRequest,
+    request: Request,
+    actor: Annotated[ActorContext, Depends(get_actor_context)],
+    service: Annotated[
+        ExplanationRetryService,
+        Depends(get_explanation_retry_service),
+    ],
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key"),
+    ] = None,
+) -> ExplanationRetryResponse:
+    try:
+        key = validate_idempotency_key(idempotency_key)
+    except (TypeError, ValueError):
+        raise ApplicationValidationError() from None
+    projection = service.retry(
+        actor,
+        result_id=result_id,
+        request_id=request.state.request_id,
+        idempotency_key=key,
+        language=body.language,
+        reason=body.reason,
+    )
+    explanation = projection.explanation
+    call = projection.explanation_call
+    return ExplanationRetryResponse(
+        request_id=request.state.request_id,
+        data=ExplanationRetryData(
+            task_id=projection.task.task_id,
+            task_status=projection.task.current_status,
+            explanation=ExplanationRetryView(
+                explanation_id=explanation.explanation_id,
+                result_id=explanation.result_id,
+                attempt_no=explanation.attempt_no,
+                status=explanation.status,
+                language=explanation.language,
+                text=explanation.text,
+                error_code=explanation.error_code,
+                safe_error_message=explanation.safe_error_message,
+                llm_call_id=call.llm_call_id,
+                llm_call_status=call.status,
+            ),
+            idempotency_replayed=projection.idempotency_replayed,
         ),
     )

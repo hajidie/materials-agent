@@ -12,7 +12,10 @@ from materialsagent.application.errors import (
     ResourceNotFoundError,
     from_persistence_error,
 )
-from materialsagent.application.explanation_service import ExplanationService
+from materialsagent.application.explanation_service import (
+    ExplanationService,
+    select_explanation_attempts,
+)
 from materialsagent.application.result_service import (
     ResultArtifactProjection,
     ResultPersistenceError,
@@ -41,6 +44,8 @@ class ToolWorkflowProjection:
     artifacts: tuple[ResultArtifactProjection, ...]
     explanation: NaturalLanguageExplanation
     explanation_call: LLMCall
+    latest_failed_explanation: NaturalLanguageExplanation | None
+    latest_failed_explanation_call: LLMCall | None
 
 
 class ToolWorkflowService:
@@ -109,7 +114,7 @@ class ToolWorkflowService:
             raise
 
         try:
-            result = self._result_service.commit_result(
+            result = self._result_service.commit_initial_result(
                 actor,
                 receipt=receipt,
                 assets=assets,
@@ -131,6 +136,102 @@ class ToolWorkflowService:
             actor,
             task_id=task_id,
             result_id=result.result_id,
+            require_initial_attempt=True,
+        )
+
+    def execute_reserved_retry(
+        self,
+        actor: ActorContext,
+        *,
+        tool_run_id: str,
+    ) -> ToolWorkflowProjection | None:
+        try:
+            receipt = self._tool_execution_service.execute_reserved_retry(
+                actor,
+                tool_run_id=tool_run_id,
+            )
+        except ToolExecutionOutcomeError as error:
+            self._select_failed_execution(
+                actor,
+                task_id=error.task_id,
+                tool_run_id=error.tool_run_id,
+                code=error.code,
+                safe_message=str(error),
+            )
+            raise
+        if receipt is None:
+            return None
+        task_id = receipt.tool_run.task_id
+        try:
+            assets = (
+                self._asset_service.create_from_output(
+                    actor,
+                    task_id=task_id,
+                    tool_run_id=receipt.tool_run.tool_run_id,
+                    output=receipt.output,
+                )
+                if receipt.output.images
+                else []
+            )
+        except ApplicationError as error:
+            self._terminalize_asset_failure(
+                actor,
+                task_id=task_id,
+                tool_run_id=receipt.tool_run.tool_run_id,
+                code=error.code,
+                safe_message=str(error),
+            )
+            raise
+        try:
+            result = self._result_service.commit_retry_result(
+                actor,
+                receipt=receipt,
+                assets=assets,
+            )
+        except ResultPersistenceError as error:
+            self._terminalize_result_failure(
+                actor,
+                task_id=task_id,
+                tool_run_id=receipt.tool_run.tool_run_id,
+                code=error.code,
+                safe_message=str(error),
+            )
+            raise
+        self._explanation_service.explain(
+            actor,
+            result_id=result.result_id,
+        )
+        return self._load_committed(
+            actor,
+            task_id=task_id,
+            result_id=result.result_id,
+            require_initial_attempt=True,
+        )
+
+    def load_current_for_task(
+        self,
+        actor: ActorContext,
+        *,
+        task_id: str,
+    ) -> ToolWorkflowProjection:
+        try:
+            with self._unit_of_work_factory() as unit_of_work:
+                task = unit_of_work.tasks.get_owned(
+                    task_id,
+                    actor.actor_id,
+                )
+                if task is None or task.selected_result_id is None:
+                    raise ResourceNotFoundError(task_id=task_id)
+                result_id = task.selected_result_id
+        except ApplicationError:
+            raise
+        except PersistenceError as error:
+            raise from_persistence_error(error, task_id=task_id) from None
+        return self._load_committed(
+            actor,
+            task_id=task_id,
+            result_id=result_id,
+            require_initial_attempt=False,
         )
 
     def _terminalize_result_failure(
@@ -202,8 +303,6 @@ class ToolWorkflowService:
 
                 if (
                     task.current_status != "RUNNING"
-                    or task.selected_tool_run_id is not None
-                    or task.selected_result_id is not None
                     or tool_run.current_status != "RUNNING"
                 ):
                     raise ApplicationConflictError(task_id=task_id)
@@ -381,6 +480,7 @@ class ToolWorkflowService:
         *,
         task_id: str,
         result_id: str,
+        require_initial_attempt: bool,
     ) -> ToolWorkflowProjection:
         try:
             with self._unit_of_work_factory() as unit_of_work:
@@ -415,20 +515,48 @@ class ToolWorkflowService:
                     result.tool_run_id,
                     actor.actor_id,
                 )
-                explanation = unit_of_work.explanations.get_for_result_attempt(
-                    result.result_id,
-                    1,
+                explanations = unit_of_work.explanations.list_for_result(
+                    result.result_id
+                )
+                initial_explanation = next(
+                    (
+                        item
+                        for item in explanations
+                        if item.attempt_no == 1
+                    ),
+                    None,
                 )
                 if (
                     tool_run is None
-                    or explanation is None
                     or tool_run.task_id != task.task_id
                     or tool_run.current_status != result.status
-                    or explanation.task_id != task.task_id
-                    or explanation.result_id != result.result_id
-                    or explanation.attempt_no != 1
-                    or explanation.status not in {"SUCCEEDED", "FAILED"}
+                    or (
+                        require_initial_attempt
+                        and (
+                            initial_explanation is None
+                            or initial_explanation.status
+                            not in {"SUCCEEDED", "FAILED"}
+                        )
+                    )
                 ):
+                    raise ApplicationConflictError(task_id=task_id)
+                eligible_explanations = [
+                    item
+                    for item in explanations
+                    if (
+                        item.task_id == task.task_id
+                        and item.result_id == result.result_id
+                        and item.language == "zh-CN"
+                    )
+                ]
+                explanation_selection = select_explanation_attempts(
+                    eligible_explanations
+                )
+                explanation = explanation_selection.primary
+                latest_failed_explanation = (
+                    explanation_selection.latest_failed
+                )
+                if explanation is None:
                     raise ApplicationConflictError(task_id=task_id)
                 explanation_call = unit_of_work.llm_calls.get(
                     explanation.llm_call_id
@@ -438,11 +566,35 @@ class ToolWorkflowService:
                     or explanation_call.task_id != task.task_id
                     or explanation_call.conversation_id
                     != conversation.conversation_id
-                    or explanation_call.request_id != tool_run.request_id
                     or explanation_call.purpose
                     != "TOOL_RESULT_EXPLANATION"
                     or explanation_call.input_result_id != result.result_id
                     or explanation_call.status != explanation.status
+                ):
+                    raise ApplicationConflictError(task_id=task_id)
+                if (
+                    require_initial_attempt
+                    and explanation.attempt_no == 1
+                    and explanation_call.request_id != tool_run.request_id
+                ):
+                    raise ApplicationConflictError(task_id=task_id)
+                latest_failed_explanation_call = (
+                    None
+                    if latest_failed_explanation is None
+                    else unit_of_work.llm_calls.get(
+                        latest_failed_explanation.llm_call_id
+                    )
+                )
+                if latest_failed_explanation is not None and (
+                    latest_failed_explanation_call is None
+                    or latest_failed_explanation_call.task_id != task.task_id
+                    or latest_failed_explanation_call.conversation_id
+                    != conversation.conversation_id
+                    or latest_failed_explanation_call.purpose
+                    != "TOOL_RESULT_EXPLANATION"
+                    or latest_failed_explanation_call.input_result_id
+                    != result.result_id
+                    or latest_failed_explanation_call.status != "FAILED"
                 ):
                     raise ApplicationConflictError(task_id=task_id)
                 artifacts: list[ResultArtifactProjection] = []
@@ -493,4 +645,8 @@ class ToolWorkflowService:
             artifacts=tuple(artifacts),
             explanation=explanation,
             explanation_call=explanation_call,
+            latest_failed_explanation=latest_failed_explanation,
+            latest_failed_explanation_call=(
+                latest_failed_explanation_call
+            ),
         )

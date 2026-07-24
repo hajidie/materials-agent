@@ -27,7 +27,7 @@ M3_REVISION = "0003_task_time_order"
 M4_REVISION = "0004_llm_call"
 M5_REVISION = "0005_tool_run"
 IMMEDIATE_PREVIOUS_REVISION = "0006_asset"
-EXPECTED_REVISION = "0007_tool_result_explanation"
+EXPECTED_REVISION = "0008_idempotency_record"
 ALEMBIC_INI = Path(__file__).resolve().parents[3] / "alembic.ini"
 NEW_TASK_TIME_CHECKS = {
     "ck_task_started_at_not_before_created_at",
@@ -49,6 +49,7 @@ M7_TABLES = M6_TABLES | {
     "result_asset_link",
     "natural_language_explanation",
 }
+M8_TABLES = M7_TABLES | {"idempotency_record"}
 
 
 def _make_alembic_config(settings: AppSettings) -> Config:
@@ -127,11 +128,80 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
     engine = create_engine_from_settings(temporary_database)
     try:
         inspector = inspect(engine)
-        assert set(inspector.get_table_names(schema="public")) == M7_TABLES
+        assert set(inspector.get_table_names(schema="public")) == M8_TABLES
         version_columns = _column_map(inspector, "alembic_version")
         assert version_columns["version_num"]["type"].length >= len(
             EXPECTED_REVISION
         )
+        idempotency_columns = _column_map(
+            inspector,
+            "idempotency_record",
+        )
+        assert set(idempotency_columns) == {
+            "idempotency_record_id",
+            "actor_id",
+            "operation",
+            "idempotency_key",
+            "request_digest",
+            "first_request_id",
+            "task_id",
+            "message_id",
+            "task_input_revision_id",
+            "tool_run_id",
+            "explanation_id",
+            "created_at",
+            "expires_at",
+        }
+        assert idempotency_columns["expires_at"]["nullable"] is True
+        assert {
+            item["name"]: item["column_names"]
+            for item in inspector.get_unique_constraints(
+                "idempotency_record"
+            )
+        } == {
+            "uq_idempotency_first_request": ["first_request_id"],
+            "uq_idempotency_scope_key": [
+                "actor_id",
+                "operation",
+                "idempotency_key",
+            ],
+        }
+        assert {
+            item["name"]: item["referred_table"]
+            for item in inspector.get_foreign_keys("idempotency_record")
+        } == {
+            "fk_idempotency_actor": "actor",
+            "fk_idempotency_explanation": (
+                "natural_language_explanation"
+            ),
+            "fk_idempotency_message": "message",
+            "fk_idempotency_revision": "task_input_revision",
+            "fk_idempotency_task": "task",
+            "fk_idempotency_tool_run": "tool_run",
+        }
+        assert {
+            item["name"]
+            for item in inspector.get_check_constraints(
+                "idempotency_record"
+            )
+        } == {
+            "ck_idempotency_actor_id_not_blank",
+            "ck_idempotency_digest_sha256",
+            "ck_idempotency_first_request_not_blank",
+            "ck_idempotency_key_safe",
+            "ck_idempotency_operation_allowed",
+            "ck_idempotency_operation_binding",
+            "ck_idempotency_record_id_not_blank",
+        }
+        assert {
+            item["name"]
+            for item in inspector.get_indexes("idempotency_record")
+        } == {
+            "ix_idempotency_scope_created",
+            "ix_idempotency_task_created",
+            "uq_idempotency_first_request",
+            "uq_idempotency_scope_key",
+        }
 
         actor_columns = _column_map(inspector, "actor")
         assert set(actor_columns) == {
@@ -928,7 +998,7 @@ def test_m7_result_and_explanation_migration_round_trip(
     config = _make_alembic_config(temporary_database)
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["0007_tool_result_explanation"]
+    assert script.get_heads() == [EXPECTED_REVISION]
 
     command.upgrade(config, "0006_asset")
     historical_engine = create_engine_from_settings(temporary_database)
@@ -944,7 +1014,7 @@ def test_m7_result_and_explanation_migration_round_trip(
     finally:
         historical_engine.dispose()
 
-    command.upgrade(config, "head")
+    command.upgrade(config, "0007_tool_result_explanation")
     engine = create_engine_from_settings(temporary_database)
     try:
         from backend.tests.integration.db.test_result_commit import (
@@ -1155,9 +1225,7 @@ def test_m7_result_and_explanation_migration_round_trip(
         downgraded.dispose()
 
     command.upgrade(config, "head")
-    assert _current_revision(temporary_database) == (
-        "0007_tool_result_explanation"
-    )
+    assert _current_revision(temporary_database) == EXPECTED_REVISION
     reupgraded = create_engine_from_settings(temporary_database)
     try:
         with reupgraded.connect() as connection:
@@ -1179,5 +1247,133 @@ def test_m7_result_and_explanation_migration_round_trip(
             assert connection.scalar(
                 text("SELECT count(*) FROM natural_language_explanation")
             ) == 0
+    finally:
+        reupgraded.dispose()
+
+
+def test_m8_idempotency_migration_downgrade_only_removes_m8_table(
+    temporary_database: AppSettings,
+) -> None:
+    from materialsagent.domain.models.actor import Actor
+    from materialsagent.domain.models.conversation import Conversation
+    from materialsagent.domain.models.idempotency_record import (
+        IdempotencyRecord,
+    )
+    from materialsagent.domain.models.message import Message
+    from materialsagent.domain.models.task import Task
+    from materialsagent.infrastructure.db.session import (
+        create_session_factory,
+    )
+    from materialsagent.infrastructure.db.unit_of_work import (
+        SQLAlchemyUnitOfWork,
+    )
+
+    config = _make_alembic_config(temporary_database)
+    command.upgrade(config, "head")
+    engine = create_engine_from_settings(temporary_database)
+    created_at = datetime(2026, 7, 24, 1, 0, tzinfo=timezone.utc)
+    try:
+        with SQLAlchemyUnitOfWork(
+            create_session_factory(engine)
+        ) as unit_of_work:
+            unit_of_work.actors.add(
+                Actor.local_anonymous(
+                    "actor_m8_round_trip",
+                    created_at=created_at,
+                )
+            )
+            unit_of_work.conversations.add(
+                Conversation(
+                    conversation_id="conversation_m8_round_trip",
+                    actor_id="actor_m8_round_trip",
+                    title=None,
+                    created_at=created_at,
+                    updated_at=created_at,
+                )
+            )
+            unit_of_work.tasks.add(
+                Task.pending(
+                    task_id="task_m8_round_trip",
+                    conversation_id="conversation_m8_round_trip",
+                    actor_id="actor_m8_round_trip",
+                    created_at=created_at,
+                )
+            )
+            unit_of_work.messages.add(
+                Message.user(
+                    message_id="message_m8_round_trip",
+                    conversation_id="conversation_m8_round_trip",
+                    task_id="task_m8_round_trip",
+                    actor_id="actor_m8_round_trip",
+                    request_id="request_m8_round_trip",
+                    content_text="round trip",
+                    created_at=created_at,
+                )
+            )
+            unit_of_work.idempotency_records.add(
+                IdempotencyRecord(
+                    idempotency_record_id="idempotency_m8_round_trip",
+                    actor_id="actor_m8_round_trip",
+                    operation="TASK_CREATE",
+                    idempotency_key="m8-round-trip",
+                    request_digest="a" * 64,
+                    first_request_id="request_m8_round_trip",
+                    task_id="task_m8_round_trip",
+                    message_id="message_m8_round_trip",
+                    task_input_revision_id=None,
+                    tool_run_id=None,
+                    explanation_id=None,
+                    created_at=created_at,
+                    expires_at=None,
+                )
+            )
+            unit_of_work.commit()
+    finally:
+        engine.dispose()
+
+    command.downgrade(config, "0007_tool_result_explanation")
+    downgraded = create_engine_from_settings(temporary_database)
+    try:
+        assert "idempotency_record" not in inspect(
+            downgraded
+        ).get_table_names()
+        with downgraded.connect() as connection:
+            assert connection.scalar(
+                text(
+                    "SELECT count(*) FROM actor "
+                    "WHERE actor_id = 'actor_m8_round_trip'"
+                )
+            ) == 1
+            assert connection.scalar(
+                text(
+                    "SELECT count(*) FROM task "
+                    "WHERE task_id = 'task_m8_round_trip'"
+                )
+            ) == 1
+            assert connection.scalar(
+                text(
+                    "SELECT count(*) FROM message "
+                    "WHERE message_id = 'message_m8_round_trip'"
+                )
+            ) == 1
+    finally:
+        downgraded.dispose()
+
+    command.upgrade(config, "head")
+    reupgraded = create_engine_from_settings(temporary_database)
+    try:
+        assert "idempotency_record" in inspect(
+            reupgraded
+        ).get_table_names()
+        with reupgraded.connect() as connection:
+            assert connection.scalar(
+                text("SELECT count(*) FROM idempotency_record")
+            ) == 0
+            assert connection.scalar(
+                text(
+                    "SELECT count(*) FROM message "
+                    "WHERE message_id = 'message_m8_round_trip'"
+                )
+            ) == 1
     finally:
         reupgraded.dispose()

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from hashlib import sha256
 from uuid import uuid4
@@ -15,8 +15,16 @@ from materialsagent.application.errors import (
     ApplicationInternalError,
     ApplicationValidationError,
     ResourceNotFoundError,
+    IdempotencyConflictError,
+    TaskNotRetryableError,
     from_persistence_error,
 )
+from materialsagent.application.idempotency import (
+    IdempotencyOutcome,
+    TOOL_RETRY,
+    recovered_idempotency_outcome,
+)
+from materialsagent.domain.models.idempotency_record import IdempotencyRecord
 from materialsagent.application.tools import StaticToolRegistry, UnknownToolError
 from materialsagent.domain.models.tool_run import ToolRun
 from materialsagent.domain.ports.tool_execution import (
@@ -29,7 +37,10 @@ from materialsagent.domain.ports.tool_execution import (
     ToolExecutionOutput,
     ToolRequestContext,
 )
-from materialsagent.domain.ports.unit_of_work import UnitOfWorkFactory
+from materialsagent.domain.ports.unit_of_work import (
+    PersistenceError,
+    UnitOfWorkFactory,
+)
 
 
 class ToolExecutionOutcomeError(ApplicationError):
@@ -74,6 +85,22 @@ class _PreparedToolAttempt:
     validated_input: ToolExecutionInput
     conversation_id: str
     initial_chain_activated: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ReservedToolRetry:
+    tool_run: ToolRun
+    idempotency_outcome: IdempotencyOutcome
+
+    @property
+    def idempotency_replayed(self) -> bool:
+        return self.idempotency_outcome.replayed
+
+
+@dataclass(frozen=True, slots=True)
+class _StartedToolAttempt:
+    tool_run: ToolRun
+    invoke_runtime: bool
 
 
 def _tool_output_fingerprint(output: ToolExecutionOutput) -> str:
@@ -288,6 +315,445 @@ class ToolExecutionService:
             )
         return self._persist_runtime_success(prepared, output)
 
+    def reserve_retry_attempt(
+        self,
+        actor_context: ActorContext,
+        *,
+        task_id: str,
+        request_id: str,
+        idempotency_key: str,
+        request_digest: str,
+    ) -> ReservedToolRetry:
+        tool_run_id = self._id_factory()
+        timestamp = self._clock()
+        record_id = f"idem_{uuid4().hex}"
+        try:
+            with self._unit_of_work_factory() as unit_of_work:
+                existing_record = (
+                    unit_of_work.idempotency_records.get_by_scope(
+                        actor_context.actor_id,
+                        TOOL_RETRY,
+                        idempotency_key,
+                    )
+                )
+                if existing_record is not None:
+                    return self._load_reserved_retry(
+                        unit_of_work,
+                        actor_context,
+                        task_id=task_id,
+                        record=existing_record,
+                        request_digest=request_digest,
+                        idempotency_outcome=IdempotencyOutcome.REPLAY,
+                    )
+                task = unit_of_work.tasks.get_owned_for_update(
+                    task_id,
+                    actor_context.actor_id,
+                )
+                if task is None:
+                    raise ResourceNotFoundError(task_id=task_id)
+                existing_record = (
+                    unit_of_work.idempotency_records.get_by_scope(
+                        actor_context.actor_id,
+                        TOOL_RETRY,
+                        idempotency_key,
+                    )
+                )
+                if existing_record is not None:
+                    return self._load_reserved_retry(
+                        unit_of_work,
+                        actor_context,
+                        task_id=task_id,
+                        record=existing_record,
+                        request_digest=request_digest,
+                        idempotency_outcome=IdempotencyOutcome.REPLAY,
+                    )
+                revisions = unit_of_work.task_input_revisions.list_for_task(
+                    task_id
+                )
+                runs = unit_of_work.tool_runs.list_for_task(task_id)
+                if (
+                    task.task_type != "TOOL_EXECUTION"
+                    or task.current_status
+                    not in {"FAILED", "PARTIALLY_SUCCEEDED"}
+                    or not revisions
+                    or any(
+                        run.current_status in {"PENDING", "RUNNING"}
+                        for run in runs
+                    )
+                ):
+                    raise TaskNotRetryableError(task_id=task_id)
+                revision = max(revisions, key=lambda item: item.revision)
+                if (
+                    revision.normalized_input is None
+                    or revision.missing_fields
+                    or revision.ambiguous_fields
+                    or revision.validation_errors
+                    or revision.source_llm_call_id is None
+                ):
+                    raise TaskNotRetryableError(task_id=task_id)
+                selected_run = (
+                    None
+                    if task.selected_tool_run_id is None
+                    else next(
+                        (
+                            item
+                            for item in runs
+                            if item.tool_run_id
+                            == task.selected_tool_run_id
+                        ),
+                        None,
+                    )
+                )
+                selected_result = (
+                    None
+                    if task.selected_result_id is None
+                    else unit_of_work.tool_results.get(
+                        task.selected_result_id
+                    )
+                )
+                failed_without_result = (
+                    task.current_status == "FAILED"
+                    and task.selected_tool_run_id is not None
+                    and task.selected_result_id is None
+                    and selected_run is not None
+                    and selected_run.task_id == task.task_id
+                    and selected_run.current_status == "FAILED"
+                    and unit_of_work.tool_results.get_for_tool_run(
+                        selected_run.tool_run_id
+                    )
+                    is None
+                )
+                failed_before_run = (
+                    task.current_status == "FAILED"
+                    and task.selected_tool_run_id is None
+                    and task.selected_result_id is None
+                    and selected_run is None
+                    and selected_result is None
+                    and not runs
+                )
+                failed_or_partial_result = (
+                    selected_run is not None
+                    and selected_result is not None
+                    and task.selected_tool_run_id
+                    == selected_run.tool_run_id
+                    and task.selected_result_id
+                    == selected_result.result_id
+                    and selected_result.actor_id
+                    == actor_context.actor_id
+                    and selected_result.task_id == task.task_id
+                    and selected_result.tool_run_id
+                    == selected_run.tool_run_id
+                    and selected_run.task_id == task.task_id
+                    and tuple(selected_run.requested_outputs)
+                    == tuple(selected_result.requested_outputs)
+                    and tuple(selected_run.completed_outputs)
+                    == tuple(selected_result.completed_outputs)
+                    and tuple(selected_run.failed_outputs)
+                    == tuple(selected_result.failed_outputs)
+                    and (
+                        (
+                            task.current_status == "FAILED"
+                            and selected_run.current_status == "FAILED"
+                            and selected_result.status == "FAILED"
+                        )
+                        or (
+                            task.current_status == "PARTIALLY_SUCCEEDED"
+                            and selected_run.current_status
+                            == "PARTIALLY_SUCCEEDED"
+                            and selected_result.status
+                            == "PARTIALLY_SUCCEEDED"
+                        )
+                    )
+                )
+                if (
+                    not (
+                        failed_before_run
+                        or failed_without_result
+                        or failed_or_partial_result
+                    )
+                    or (
+                        selected_run is not None
+                        and selected_run.task_input_revision_id
+                        != revision.task_input_revision_id
+                    )
+                ):
+                    raise TaskNotRetryableError(task_id=task_id)
+                llm_call = unit_of_work.llm_calls.get(
+                    revision.source_llm_call_id
+                )
+                summary = (
+                    None
+                    if llm_call is None
+                    else llm_call.structured_output_summary
+                )
+                if (
+                    llm_call is None
+                    or llm_call.status != "SUCCEEDED"
+                    or not isinstance(summary, Mapping)
+                    or summary.get("route") != "TOOL_EXECUTION"
+                    or not isinstance(summary.get("tool_id"), str)
+                ):
+                    raise TaskNotRetryableError(task_id=task_id)
+                try:
+                    registration = self._registry.resolve(summary["tool_id"])
+                except UnknownToolError:
+                    raise TaskNotRetryableError(task_id=task_id) from None
+                used_seeds = {
+                    parameters["seed"]
+                    for item in runs
+                    if isinstance(
+                        parameters := item.execution_input.get(
+                            "runtime_parameters"
+                        ),
+                        dict,
+                    )
+                    and isinstance(parameters.get("seed"), int)
+                }
+                for _ in range(16):
+                    seed = self._seed_factory()
+                    if (
+                        isinstance(seed, int)
+                        and not isinstance(seed, bool)
+                        and seed >= 0
+                        and seed not in used_seeds
+                    ):
+                        break
+                else:
+                    raise ApplicationConflictError(task_id=task_id)
+                try:
+                    validated_input = registration.tool.validate_input(
+                        revision.normalized_input,
+                        seed=seed,
+                    )
+                except ValueError:
+                    raise TaskNotRetryableError(task_id=task_id) from None
+                pending = ToolRun.pending(
+                    tool_run_id=tool_run_id,
+                    task_id=task_id,
+                    request_id=request_id,
+                    task_input_revision_id=revision.task_input_revision_id,
+                    attempt_no=max(
+                        (item.attempt_no for item in runs),
+                        default=0,
+                    )
+                    + 1,
+                    tool_id=registration.metadata.tool_id,
+                    tool_version=registration.metadata.tool_version,
+                    schema_version=registration.metadata.schema_version,
+                    execution_input=validated_input.to_json(),
+                    requested_outputs=list(validated_input.requested_outputs),
+                    created_at=timestamp,
+                )
+                record = IdempotencyRecord(
+                    idempotency_record_id=record_id,
+                    actor_id=actor_context.actor_id,
+                    operation=TOOL_RETRY,
+                    idempotency_key=idempotency_key,
+                    request_digest=request_digest,
+                    first_request_id=request_id,
+                    task_id=task_id,
+                    message_id=None,
+                    task_input_revision_id=None,
+                    tool_run_id=tool_run_id,
+                    explanation_id=None,
+                    created_at=timestamp,
+                    expires_at=None,
+                )
+                running_task = replace(
+                    task,
+                    current_status="RUNNING",
+                    updated_at=timestamp,
+                    completed_at=None,
+                    error_code=None,
+                    safe_error_message=None,
+                )
+                unit_of_work.tool_runs.add(pending)
+                unit_of_work.idempotency_records.add(record)
+                if unit_of_work.tasks.update(
+                    running_task,
+                    expected_status=task.current_status,
+                ) is None:
+                    raise ApplicationConflictError(task_id=task_id)
+                unit_of_work.commit()
+                return ReservedToolRetry(
+                    tool_run=pending,
+                    idempotency_outcome=IdempotencyOutcome.CREATED,
+                )
+        except (
+            ApplicationError,
+            PersistenceError,
+        ) as error:
+            if isinstance(error, PersistenceError):
+                replay = self._recover_reserved_retry(
+                    actor_context,
+                    task_id=task_id,
+                    idempotency_key=idempotency_key,
+                    request_digest=request_digest,
+                    request_id=request_id,
+                )
+                if replay is not None:
+                    return replay
+                raise from_persistence_error(error, task_id=task_id) from None
+            raise
+
+    def execute_reserved_retry(
+        self,
+        actor_context: ActorContext,
+        *,
+        tool_run_id: str,
+    ) -> ToolExecutionReceipt | None:
+        try:
+            with self._unit_of_work_factory() as unit_of_work:
+                pending = unit_of_work.tool_runs.get_owned(
+                    tool_run_id,
+                    actor_context.actor_id,
+                )
+                task = (
+                    None
+                    if pending is None
+                    else unit_of_work.tasks.get_owned(
+                        pending.task_id,
+                        actor_context.actor_id,
+                    )
+                )
+                revision = (
+                    None
+                    if pending is None
+                    else unit_of_work.task_input_revisions.get(
+                        pending.task_input_revision_id
+                    )
+                )
+                if (
+                    pending is None
+                    or task is None
+                    or revision is None
+                    or pending.current_status != "PENDING"
+                    or task.current_status != "RUNNING"
+                    or revision.task_id != task.task_id
+                    or revision.normalized_input is None
+                ):
+                    raise ApplicationConflictError(
+                        task_id=None if pending is None else pending.task_id
+                    )
+                registration = self._registry.resolve(pending.tool_id)
+                parameters = pending.execution_input.get(
+                    "runtime_parameters"
+                )
+                seed = (
+                    parameters.get("seed")
+                    if isinstance(parameters, dict)
+                    else None
+                )
+                validated_input = registration.tool.validate_input(
+                    revision.normalized_input,
+                    seed=seed,
+                )
+                if validated_input.to_json() != pending.execution_input:
+                    raise ApplicationConflictError(task_id=task.task_id)
+                conversation_id = task.conversation_id
+        except ApplicationError:
+            raise
+        except Exception as error:
+            raise from_persistence_error(error) from None
+        started = self._start_pending_attempt(
+            pending.tool_run_id,
+            task_id=pending.task_id,
+        )
+        if not started.invoke_runtime:
+            return None
+        running = started.tool_run
+        prepared = _PreparedToolAttempt(
+            tool_run=running,
+            validated_input=validated_input,
+            conversation_id=conversation_id,
+            initial_chain_activated=True,
+        )
+        try:
+            output = self._invoke_runtime(
+                actor_context,
+                prepared=prepared,
+                request_id=running.request_id,
+            )
+        except ToolClientError as error:
+            self._raise_persisted_runtime_failure(prepared, error=error)
+        runtime_error = self._runtime_output_error(
+            output,
+            initial_chain_activated=True,
+        )
+        if runtime_error is not None:
+            self._raise_persisted_runtime_failure(
+                prepared,
+                error=runtime_error,
+                output=output,
+            )
+        return self._persist_runtime_success(prepared, output)
+
+    def _recover_reserved_retry(
+        self,
+        actor_context: ActorContext,
+        *,
+        task_id: str,
+        idempotency_key: str,
+        request_digest: str,
+        request_id: str,
+    ) -> ReservedToolRetry | None:
+        try:
+            with self._unit_of_work_factory() as unit_of_work:
+                record = unit_of_work.idempotency_records.get_by_scope(
+                    actor_context.actor_id,
+                    TOOL_RETRY,
+                    idempotency_key,
+                )
+                if record is None:
+                    return None
+                return self._load_reserved_retry(
+                    unit_of_work,
+                    actor_context,
+                    task_id=task_id,
+                    record=record,
+                    request_digest=request_digest,
+                    idempotency_outcome=recovered_idempotency_outcome(
+                        first_request_id=record.first_request_id,
+                        current_request_id=request_id,
+                    ),
+                )
+        except PersistenceError:
+            return None
+
+    @staticmethod
+    def _load_reserved_retry(
+        unit_of_work: object,
+        actor_context: ActorContext,
+        *,
+        task_id: str,
+        record: IdempotencyRecord,
+        request_digest: str,
+        idempotency_outcome: IdempotencyOutcome,
+    ) -> ReservedToolRetry:
+        if record.request_digest != request_digest:
+            raise IdempotencyConflictError(
+                task_id=record.task_id or task_id
+            )
+        tool_run = (
+            None
+            if record.tool_run_id is None
+            else unit_of_work.tool_runs.get_owned(
+                record.tool_run_id,
+                actor_context.actor_id,
+            )
+        )
+        if (
+            record.task_id != task_id
+            or tool_run is None
+            or tool_run.task_id != task_id
+            or tool_run.request_id != record.first_request_id
+        ):
+            raise ResourceNotFoundError(task_id=task_id)
+        return ReservedToolRetry(
+            tool_run=tool_run,
+            idempotency_outcome=idempotency_outcome,
+        )
+
     def _prepare_initial_attempt(
         self,
         actor_context: ActorContext,
@@ -307,10 +773,13 @@ class ToolExecutionService:
             task_input_revision_id=task_input_revision_id,
             request_id=request_id,
         )
-        running = self._start_pending_attempt(
+        started = self._start_pending_attempt(
             pending.tool_run_id,
             task_id=task_id,
         )
+        if not started.invoke_runtime:
+            raise ApplicationConflictError(task_id=task_id)
+        running = started.tool_run
         return _PreparedToolAttempt(
             tool_run=running,
             validated_input=validated_input,
@@ -327,6 +796,10 @@ class ToolExecutionService:
         request_id: str,
     ) -> tuple[ToolRun, ToolExecutionInput, str, bool]:
         tool_run_id = self._id_factory()
+        pending: ToolRun | None = None
+        validated_input: ToolExecutionInput | None = None
+        conversation_id: str | None = None
+        initial_chain_activated: bool | None = None
         try:
             with self._unit_of_work_factory() as unit_of_work:
                 task = unit_of_work.tasks.get_owned(task_id, actor_context.actor_id)
@@ -424,30 +897,94 @@ class ToolExecutionService:
                     requested_outputs=list(validated_input.requested_outputs),
                     created_at=self._clock(),
                 )
+                conversation_id = task.conversation_id
+                initial_chain_activated = activated_chain
                 unit_of_work.tool_runs.add(pending)
                 unit_of_work.commit()
                 return (
                     pending,
                     validated_input,
-                    task.conversation_id,
-                    activated_chain,
+                    conversation_id,
+                    initial_chain_activated,
                 )
         except ApplicationError:
             raise
+        except PersistenceError as error:
+            recovered = self._recover_initial_pending_attempt(
+                actor_context,
+                task_id=task_id,
+                expected_pending=pending,
+                validated_input=validated_input,
+                conversation_id=conversation_id,
+                initial_chain_activated=initial_chain_activated,
+            )
+            if recovered is not None:
+                return recovered
+            raise from_persistence_error(error, task_id=task_id) from None
         except Exception as error:
             raise from_persistence_error(error, task_id=task_id) from None
+
+    def _recover_initial_pending_attempt(
+        self,
+        actor_context: ActorContext,
+        *,
+        task_id: str,
+        expected_pending: ToolRun | None,
+        validated_input: ToolExecutionInput | None,
+        conversation_id: str | None,
+        initial_chain_activated: bool | None,
+    ) -> tuple[ToolRun, ToolExecutionInput, str, bool] | None:
+        if (
+            expected_pending is None
+            or validated_input is None
+            or conversation_id is None
+            or initial_chain_activated is None
+        ):
+            return None
+        try:
+            with self._unit_of_work_factory() as unit_of_work:
+                current = unit_of_work.tool_runs.get_owned(
+                    expected_pending.tool_run_id,
+                    actor_context.actor_id,
+                )
+        except PersistenceError:
+            return None
+        if current is None:
+            return None
+        if (
+            current.current_status != "PENDING"
+            or current != expected_pending
+        ):
+            raise ApplicationConflictError(task_id=task_id)
+        return (
+            current,
+            validated_input,
+            conversation_id,
+            initial_chain_activated,
+        )
 
     def _start_pending_attempt(
         self,
         tool_run_id: str,
         *,
         task_id: str,
-    ) -> ToolRun:
+    ) -> _StartedToolAttempt:
+        running: ToolRun | None = None
         try:
             with self._unit_of_work_factory() as unit_of_work:
                 pending = unit_of_work.tool_runs.get(tool_run_id)
-                if pending is None:
+                if pending is None or pending.task_id != task_id:
                     raise ResourceNotFoundError(task_id=task_id)
+                if pending.current_status in {
+                    "RUNNING",
+                    "SUCCEEDED",
+                    "PARTIALLY_SUCCEEDED",
+                    "FAILED",
+                }:
+                    return _StartedToolAttempt(
+                        tool_run=pending,
+                        invoke_runtime=False,
+                    )
                 running = pending.start(started_at=self._clock())
                 if unit_of_work.tool_runs.update(
                     running,
@@ -455,11 +992,78 @@ class ToolExecutionService:
                 ) is None:
                     raise ResourceNotFoundError(task_id=task_id)
                 unit_of_work.commit()
-                return running
+                return _StartedToolAttempt(
+                    tool_run=running,
+                    invoke_runtime=True,
+                )
         except ApplicationError:
             raise
+        except PersistenceError as error:
+            recovered = self._recover_started_attempt(
+                tool_run_id,
+                task_id=task_id,
+                expected_running=running,
+            )
+            if recovered is not None:
+                return recovered
+            raise from_persistence_error(error, task_id=task_id) from None
         except Exception as error:
             raise from_persistence_error(error, task_id=task_id) from None
+
+    def _recover_started_attempt(
+        self,
+        tool_run_id: str,
+        *,
+        task_id: str,
+        expected_running: ToolRun | None,
+    ) -> _StartedToolAttempt | None:
+        if expected_running is None:
+            return None
+        try:
+            with self._unit_of_work_factory() as unit_of_work:
+                current = unit_of_work.tool_runs.get(tool_run_id)
+        except PersistenceError:
+            return None
+        if current is None or not self._same_attempt_identity(
+            current,
+            expected_running,
+        ):
+            raise ApplicationConflictError(task_id=task_id)
+        if current == expected_running:
+            return _StartedToolAttempt(
+                tool_run=current,
+                invoke_runtime=True,
+            )
+        if current.current_status in {
+            "RUNNING",
+            "SUCCEEDED",
+            "PARTIALLY_SUCCEEDED",
+            "FAILED",
+        }:
+            return _StartedToolAttempt(
+                tool_run=current,
+                invoke_runtime=False,
+            )
+        return None
+
+    @staticmethod
+    def _same_attempt_identity(left: ToolRun, right: ToolRun) -> bool:
+        return all(
+            getattr(left, field_name) == getattr(right, field_name)
+            for field_name in (
+                "tool_run_id",
+                "task_id",
+                "request_id",
+                "task_input_revision_id",
+                "attempt_no",
+                "tool_id",
+                "tool_version",
+                "schema_version",
+                "requested_outputs",
+                "execution_input",
+                "created_at",
+            )
+        )
 
     def _invoke_runtime(
         self,
@@ -515,6 +1119,7 @@ class ToolExecutionService:
         output: ToolExecutionOutput,
     ) -> ToolExecutionReceipt:
         task_id = prepared.tool_run.task_id
+        recorded: ToolRun | None = None
         try:
             with self._unit_of_work_factory() as unit_of_work:
                 current = unit_of_work.tool_runs.get(
@@ -537,8 +1142,51 @@ class ToolExecutionService:
                 return ToolExecutionReceipt(tool_run=recorded, output=output)
         except ApplicationError:
             raise
+        except PersistenceError as error:
+            recovered = self._recover_runtime_success(
+                prepared,
+                expected_recorded=recorded,
+            )
+            if recovered is not None:
+                return ToolExecutionReceipt(
+                    tool_run=recovered,
+                    output=output,
+                )
+            raise from_persistence_error(error, task_id=task_id) from None
         except Exception as error:
             raise from_persistence_error(error, task_id=task_id) from None
+
+    def _recover_runtime_success(
+        self,
+        prepared: _PreparedToolAttempt,
+        *,
+        expected_recorded: ToolRun | None,
+    ) -> ToolRun | None:
+        if expected_recorded is None:
+            return None
+        try:
+            with self._unit_of_work_factory() as unit_of_work:
+                current = unit_of_work.tool_runs.get(
+                    expected_recorded.tool_run_id
+                )
+        except PersistenceError:
+            return None
+        if current is None:
+            return None
+        if current == prepared.tool_run:
+            return None
+        if (
+            current.current_status != "RUNNING"
+            or not self._same_attempt_identity(
+                current,
+                prepared.tool_run,
+            )
+            or current != expected_recorded
+        ):
+            raise ApplicationConflictError(
+                task_id=prepared.tool_run.task_id
+            )
+        return current
 
     def _raise_persisted_runtime_failure(
         self,
@@ -572,6 +1220,8 @@ class ToolExecutionService:
         safe_message: str,
         output: ToolExecutionOutput | None = None,
     ) -> None:
+        failed: ToolRun | None = None
+        running_before_failure: ToolRun | None = None
         try:
             with self._unit_of_work_factory() as unit_of_work:
                 current = unit_of_work.tool_runs.get(tool_run_id)
@@ -586,6 +1236,7 @@ class ToolExecutionService:
                     ):
                         return
                     raise ApplicationConflictError(task_id=task_id)
+                running_before_failure = current
                 failed = current.fail(
                     failed_at=self._clock(),
                     error_code=code,
@@ -618,8 +1269,58 @@ class ToolExecutionService:
                 unit_of_work.commit()
         except ApplicationError:
             raise
+        except PersistenceError as error:
+            recovered = self._recover_runtime_failure(
+                tool_run_id,
+                task_id=task_id,
+                expected_failed=failed,
+                expected_running=running_before_failure,
+                code=code,
+                safe_message=safe_message,
+                output=output,
+            )
+            if recovered:
+                return
+            raise from_persistence_error(error, task_id=task_id) from None
         except Exception as error:
             raise from_persistence_error(error, task_id=task_id) from None
+
+    def _recover_runtime_failure(
+        self,
+        tool_run_id: str,
+        *,
+        task_id: str,
+        expected_failed: ToolRun | None,
+        expected_running: ToolRun | None,
+        code: str,
+        safe_message: str,
+        output: ToolExecutionOutput | None,
+    ) -> bool:
+        if expected_failed is None:
+            return False
+        try:
+            with self._unit_of_work_factory() as unit_of_work:
+                current = unit_of_work.tool_runs.get(tool_run_id)
+        except PersistenceError:
+            return False
+        if current is None:
+            return False
+        if current == expected_running:
+            return False
+        if (
+            _is_equivalent_failed_fact(
+                current,
+                code=code,
+                safe_message=safe_message,
+                output=output,
+            )
+            and self._same_attempt_identity(
+                current,
+                expected_failed,
+            )
+        ):
+            return True
+        raise ApplicationConflictError(task_id=task_id)
 
 
 class ToolRunQueryService:

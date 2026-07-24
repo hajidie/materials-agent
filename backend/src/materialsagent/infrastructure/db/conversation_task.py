@@ -625,10 +625,10 @@ TASK_ALLOWED_TRANSITIONS: Final = {
             "FAILED",
         }
     ),
-    "NEEDS_INPUT": frozenset(),
+    "NEEDS_INPUT": frozenset({"RUNNING"}),
     "SUCCEEDED": frozenset(),
-    "PARTIALLY_SUCCEEDED": frozenset(),
-    "FAILED": frozenset(),
+    "PARTIALLY_SUCCEEDED": frozenset({"RUNNING"}),
+    "FAILED": frozenset({"RUNNING"}),
 }
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 import pytest
@@ -15,6 +16,13 @@ from materialsagent.infrastructure.db.unit_of_work import SQLAlchemyUnitOfWork
 
 
 BASE_TIME = datetime(2026, 7, 19, 0, 0, tzinfo=timezone.utc)
+
+
+def _message_headers(**values: str) -> dict[str, str]:
+    return {
+        "Idempotency-Key": f"message-{uuid4().hex}",
+        **values,
+    }
 
 
 def _assert_utc(value: str) -> None:
@@ -257,7 +265,7 @@ def test_new_task_submission_persists_orchestrated_facts_and_first_title(
                 "submission_mode": "NEW_TASK",
                 "content_text": "  请帮我分析这一材料问题。  ",
             },
-            headers={"X-Actor-Id": foreign_actor_id},
+            headers=_message_headers(**{"X-Actor-Id": foreign_actor_id}),
         )
 
     assert response.status_code == 200
@@ -271,6 +279,7 @@ def test_new_task_submission_persists_orchestrated_facts_and_first_title(
         "needs_input",
         "result_summary",
         "explanation",
+        "latest_explanation_failure",
         "idempotency_replayed",
     }
     assert body["data"]["conversation_id"] == conversation.conversation_id
@@ -322,6 +331,7 @@ def test_new_task_submission_keeps_conversation_updated_at_monotonic(
     with api_harness.create_client(actor_id) as client:
         response = client.post(
             f"/api/v1/conversations/{conversation.conversation_id}/messages",
+            headers=_message_headers(),
             json={"submission_mode": "NEW_TASK", "content_text": "旧时钟标题"},
         )
 
@@ -349,14 +359,17 @@ def test_second_message_and_explicit_title_are_never_overwritten(
     with api_harness.create_client(actor_id) as client:
         first = client.post(
             f"/api/v1/conversations/{automatic.conversation_id}/messages",
+            headers=_message_headers(),
             json={"submission_mode": "NEW_TASK", "content_text": "第一条消息"},
         )
         second = client.post(
             f"/api/v1/conversations/{automatic.conversation_id}/messages",
+            headers=_message_headers(),
             json={"submission_mode": "NEW_TASK", "content_text": "第二条消息"},
         )
         explicit_response = client.post(
             f"/api/v1/conversations/{explicit.conversation_id}/messages",
+            headers=_message_headers(),
             json={"submission_mode": "NEW_TASK", "content_text": "不会覆盖"},
         )
 
@@ -404,6 +417,7 @@ def test_message_submission_rejects_invalid_m3_inputs_without_writes(
     with api_harness.create_client(actor_id) as client:
         response = client.post(
             f"/api/v1/conversations/{conversation.conversation_id}/messages",
+            headers=_message_headers(),
             json=payload,
         )
 
@@ -429,10 +443,12 @@ def test_foreign_and_missing_conversation_have_indistinguishable_safe_404(
     with api_harness.create_client(actor_id) as client:
         foreign_response = client.post(
             f"/api/v1/conversations/{foreign.conversation_id}/messages",
+            headers=_message_headers(),
             json=payload,
         )
         missing_response = client.post(
             "/api/v1/conversations/conv_missing/messages",
+            headers=_message_headers(),
             json=payload,
         )
 
@@ -458,6 +474,7 @@ def test_title_generator_failure_does_not_rollback_message_or_task(
     with api_harness.create_client(actor_id, title_generator=fail_title) as client:
         response = client.post(
             f"/api/v1/conversations/{conversation.conversation_id}/messages",
+            headers=_message_headers(),
             json={"submission_mode": "NEW_TASK", "content_text": "valid"},
         )
 
@@ -518,6 +535,7 @@ def test_title_persistence_failure_does_not_rollback_message_or_task(
     ) as client:
         response = client.post(
             f"/api/v1/conversations/{conversation.conversation_id}/messages",
+            headers=_message_headers(),
             json={"submission_mode": "NEW_TASK", "content_text": "valid"},
         )
 
@@ -613,6 +631,7 @@ def test_real_database_commit_failure_rolls_back_all_and_closes_session(
     ) as client:
         failed = client.post(
             f"/api/v1/conversations/{conversation.conversation_id}/messages",
+            headers=_message_headers(),
             json={"submission_mode": "NEW_TASK", "content_text": "valid"},
         )
 
@@ -629,6 +648,7 @@ def test_real_database_commit_failure_rolls_back_all_and_closes_session(
     with api_harness.create_client(actor_id) as healthy_client:
         recovered = healthy_client.post(
             f"/api/v1/conversations/{conversation.conversation_id}/messages",
+            headers=_message_headers(),
             json={"submission_mode": "NEW_TASK", "content_text": "recovered"},
         )
     assert recovered.status_code == 200
@@ -652,6 +672,7 @@ def test_generic_persistence_failure_returns_safe_internal_error(
     ) as client:
         response = client.post(
             f"/api/v1/conversations/{conversation.conversation_id}/messages",
+            headers=_message_headers(),
             json={"submission_mode": "NEW_TASK", "content_text": "valid"},
         )
 

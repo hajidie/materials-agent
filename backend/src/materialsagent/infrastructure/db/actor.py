@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, DateTime, String, Text
+from sqlalchemy import CheckConstraint, DateTime, String, Text, select
 from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
@@ -59,6 +59,26 @@ class SQLAlchemyActorRepository:
         except SQLAlchemyError as error:
             _raise_safe_persistence_error(error)
 
+        if row is None:
+            return None
+        return Actor(
+            actor_id=row.actor_id,
+            user_id=row.user_id,
+            actor_origin=row.actor_origin,
+            created_at=row.created_at,
+            linked_at=row.linked_at,
+        )
+
+    def get_for_update(self, actor_id: str) -> Actor | None:
+        statement = (
+            select(ActorRow)
+            .where(ActorRow.actor_id == actor_id)
+            .with_for_update()
+        )
+        try:
+            row = self._session.scalar(statement)
+        except SQLAlchemyError as error:
+            _raise_safe_persistence_error(error)
         if row is None:
             return None
         return Actor(

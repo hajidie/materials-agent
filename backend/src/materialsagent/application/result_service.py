@@ -71,6 +71,15 @@ class _ResultTerminalFacts:
     task_status: str
 
 
+@dataclass(frozen=True, slots=True)
+class _ExpectedResultCommit:
+    result: ToolResult
+    links: tuple[ResultAssetLink, ...]
+    tool_run: ToolRun
+    task: Task
+    assets: tuple[Asset, ...]
+
+
 class ToolResultQueryService:
     def __init__(self, unit_of_work_factory: UnitOfWorkFactory) -> None:
         self._unit_of_work_factory = unit_of_work_factory
@@ -148,12 +157,55 @@ class ResultService:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._id_factory = id_factory or (lambda: str(uuid4()))
 
+    def commit_initial_result(
+        self,
+        actor: ActorContext,
+        *,
+        receipt: ToolExecutionReceipt,
+        assets: list[Asset],
+    ) -> ToolResult:
+        return self._commit_result(
+            actor,
+            receipt=receipt,
+            assets=assets,
+            selection_policy="INITIAL",
+        )
+
+    def commit_retry_result(
+        self,
+        actor: ActorContext,
+        *,
+        receipt: ToolExecutionReceipt,
+        assets: list[Asset],
+    ) -> ToolResult:
+        return self._commit_result(
+            actor,
+            receipt=receipt,
+            assets=assets,
+            selection_policy="RETRY",
+        )
+
     def commit_result(
         self,
         actor: ActorContext,
         *,
         receipt: ToolExecutionReceipt,
         assets: list[Asset],
+    ) -> ToolResult:
+        """Compatibility name for the explicit initial-result entry."""
+        return self.commit_initial_result(
+            actor,
+            receipt=receipt,
+            assets=assets,
+        )
+
+    def _commit_result(
+        self,
+        actor: ActorContext,
+        *,
+        receipt: ToolExecutionReceipt,
+        assets: list[Asset],
+        selection_policy: str,
     ) -> ToolResult:
         result_id = self._id_factory()
         completed_at = self._clock()
@@ -162,6 +214,7 @@ class ResultService:
         if _tool_output_fingerprint(output) != receipt.output_fingerprint:
             raise ApplicationConflictError(task_id=task_id)
         normalized_summary = normalize_tool_output_summary(output)
+        expected_commit: _ExpectedResultCommit | None = None
 
         try:
             with self._unit_of_work_factory() as unit_of_work:
@@ -171,6 +224,7 @@ class ResultService:
                     receipt=receipt,
                     assets=assets,
                     normalized_summary=normalized_summary,
+                    selection_policy=selection_policy,
                 )
                 result = self._build_tool_result(
                     result_id=result_id,
@@ -180,22 +234,45 @@ class ResultService:
                     normalized_summary=normalized_summary,
                     completed_at=completed_at,
                 )
-                self._persist_result_and_links(
-                    unit_of_work,
+                links = self._build_result_links(
                     result=result,
                     stored_assets=sources.stored_assets,
                     completed_at=completed_at,
                 )
+                terminal_facts = self._result_terminal_facts(result)
+                completed_run, completed_task = (
+                    self._build_terminal_run_and_task(
+                        sources=sources,
+                        result=result,
+                        output=output,
+                        terminal_facts=terminal_facts,
+                        completed_at=completed_at,
+                    )
+                )
+                expected_commit = _ExpectedResultCommit(
+                    result=result,
+                    links=links,
+                    tool_run=completed_run,
+                    task=completed_task,
+                    assets=sources.stored_assets,
+                )
+                self._persist_result_and_links(
+                    unit_of_work,
+                    result=result,
+                    links=links,
+                )
                 self._terminalize_tool_run_and_select_result(
                     unit_of_work,
-                    sources=sources,
-                    result=result,
-                    output=output,
-                    terminal_facts=self._result_terminal_facts(result),
-                    completed_at=completed_at,
+                    completed_run=completed_run,
+                    completed_task=completed_task,
                 )
                 unit_of_work.commit()
         except PersistenceError as error:
+            if expected_commit is not None:
+                return self._recover_committed_result(
+                    actor,
+                    expected=expected_commit,
+                )
             raise ResultPersistenceError(task_id=task_id) from error
 
         try:
@@ -210,6 +287,61 @@ class ResultService:
             raise ResultPersistenceError(task_id=task_id)
         return persisted
 
+    def _recover_committed_result(
+        self,
+        actor: ActorContext,
+        *,
+        expected: _ExpectedResultCommit,
+    ) -> ToolResult:
+        task_id = expected.result.task_id
+        try:
+            with self._unit_of_work_factory() as unit_of_work:
+                persisted = unit_of_work.tool_results.get_owned(
+                    expected.result.result_id,
+                    actor.actor_id,
+                )
+                if persisted is None:
+                    raise ResultPersistenceError(task_id=task_id)
+                links = tuple(
+                    unit_of_work.result_asset_links.list_for_result(
+                        expected.result.result_id
+                    )
+                )
+                tool_run = unit_of_work.tool_runs.get_owned(
+                    expected.tool_run.tool_run_id,
+                    actor.actor_id,
+                )
+                task = unit_of_work.tasks.get_owned(
+                    expected.task.task_id,
+                    actor.actor_id,
+                )
+                stored_assets = tuple(
+                    unit_of_work.assets.get_owned(
+                        asset.asset_id,
+                        actor.actor_id,
+                    )
+                    for asset in expected.assets
+                )
+        except PersistenceError as error:
+            raise ResultPersistenceError(task_id=task_id) from error
+        if (
+            persisted != expected.result
+            or links != expected.links
+            or tool_run != expected.tool_run
+            or task != expected.task
+            or any(
+                current is None
+                or current.current_status != "AVAILABLE"
+                or current.actor_id != actor.actor_id
+                or current.task_id != expected.result.task_id
+                or current.producer_tool_run_id
+                != expected.result.tool_run_id
+                for current in stored_assets
+            )
+        ):
+            raise ApplicationConflictError(task_id=task_id)
+        return persisted
+
     def _load_and_validate_initial_sources(
         self,
         unit_of_work: UnitOfWork,
@@ -218,6 +350,7 @@ class ResultService:
         receipt: ToolExecutionReceipt,
         assets: list[Asset],
         normalized_summary: dict[str, object],
+        selection_policy: str,
     ) -> _ValidatedResultSources:
         output = receipt.output
         task_id = receipt.tool_run.task_id
@@ -234,11 +367,19 @@ class ResultService:
         if tool_run is None or tool_run.task_id != task.task_id:
             raise ResourceNotFoundError(task_id=task_id)
 
+        if selection_policy == "RETRY":
+            self._validate_retry_selection(
+                unit_of_work,
+                actor,
+                task=task,
+                retry_run=tool_run,
+            )
         self._validate_initial_task_and_run(
             task,
             tool_run,
             receipt=receipt,
             normalized_summary=normalized_summary,
+            selection_policy=selection_policy,
         )
         self._validate_output_partition(output, task_id=task_id)
         if (
@@ -255,6 +396,7 @@ class ResultService:
             unit_of_work,
             task=task,
             tool_run=tool_run,
+            selection_policy=selection_policy,
         )
         stored_assets = self._load_and_validate_assets(
             unit_of_work,
@@ -280,6 +422,105 @@ class ResultService:
         ):
             raise ApplicationConflictError(task_id=task.task_id)
 
+    @staticmethod
+    def _validate_retry_selection(
+        unit_of_work: UnitOfWork,
+        actor: ActorContext,
+        *,
+        task: Task,
+        retry_run: ToolRun,
+    ) -> None:
+        if (
+            task.selected_result_id is not None
+            and task.selected_tool_run_id is None
+        ):
+            raise ApplicationConflictError(task_id=task.task_id)
+
+        task_runs = unit_of_work.tool_runs.list_for_task(task.task_id)
+        active_runs = [
+            item
+            for item in task_runs
+            if item.current_status in {"PENDING", "RUNNING"}
+        ]
+        prior_runs = [
+            item
+            for item in task_runs
+            if item.tool_run_id != retry_run.tool_run_id
+        ]
+        if (
+            len(active_runs) != 1
+            or active_runs[0].tool_run_id != retry_run.tool_run_id
+            or any(item.task_id != task.task_id for item in task_runs)
+            or any(
+                retry_run.attempt_no <= item.attempt_no
+                for item in prior_runs
+            )
+        ):
+            raise ApplicationConflictError(task_id=task.task_id)
+
+        if task.selected_tool_run_id is None:
+            if (
+                task.selected_result_id is not None
+                or prior_runs
+                or retry_run.attempt_no != 1
+            ):
+                raise ApplicationConflictError(task_id=task.task_id)
+            return
+
+        selected_run = unit_of_work.tool_runs.get_owned_for_update(
+            task.selected_tool_run_id,
+            actor.actor_id,
+        )
+        if (
+            selected_run is None
+            or selected_run.task_id != task.task_id
+            or selected_run.tool_run_id == retry_run.tool_run_id
+            or selected_run.attempt_no >= retry_run.attempt_no
+        ):
+            raise ApplicationConflictError(task_id=task.task_id)
+
+        if task.selected_result_id is None:
+            if (
+                selected_run.current_status != "FAILED"
+                or unit_of_work.tool_results.get_for_tool_run(
+                    selected_run.tool_run_id
+                )
+                is not None
+            ):
+                raise ApplicationConflictError(task_id=task.task_id)
+            return
+
+        selected_result = unit_of_work.tool_results.get_owned_for_update(
+            task.selected_result_id,
+            actor.actor_id,
+        )
+        expected_status = (
+            "SUCCEEDED"
+            if (
+                selected_run.completed_outputs
+                == selected_run.requested_outputs
+                and not selected_run.failed_outputs
+            )
+            else "PARTIALLY_SUCCEEDED"
+            if selected_run.completed_outputs
+            else "FAILED"
+        )
+        if (
+            selected_result is None
+            or selected_result.actor_id != actor.actor_id
+            or selected_result.task_id != task.task_id
+            or selected_result.tool_run_id != selected_run.tool_run_id
+            or selected_result.status != expected_status
+            or selected_run.current_status != expected_status
+            or tuple(selected_result.requested_outputs)
+            != tuple(selected_run.requested_outputs)
+            or tuple(selected_result.completed_outputs)
+            != tuple(selected_run.completed_outputs)
+            or tuple(selected_result.failed_outputs)
+            != tuple(selected_run.failed_outputs)
+        ):
+            raise ApplicationConflictError(task_id=task.task_id)
+
     @classmethod
     def _validate_initial_task_and_run(
         cls,
@@ -288,8 +529,12 @@ class ResultService:
         *,
         receipt: ToolExecutionReceipt,
         normalized_summary: dict[str, object],
+        selection_policy: str,
     ) -> None:
-        cls._require_initial_selection_empty(task)
+        if selection_policy == "INITIAL":
+            cls._require_initial_selection_empty(task)
+        elif selection_policy != "RETRY":
+            raise ValueError("selection_policy is invalid.")
         output = receipt.output
         if (
             task.task_type != "TOOL_EXECUTION"
@@ -336,6 +581,7 @@ class ResultService:
         *,
         task: Task,
         tool_run: ToolRun,
+        selection_policy: str,
     ) -> tuple[int, dict[str, object]]:
         revision = unit_of_work.task_input_revisions.get(
             tool_run.task_input_revision_id
@@ -345,7 +591,11 @@ class ResultService:
             or revision.task_id != task.task_id
             or revision.task_input_revision_id
             != tool_run.task_input_revision_id
-            or revision.request_id != tool_run.request_id
+            or (
+                selection_policy == "INITIAL"
+                and revision.request_id != tool_run.request_id
+            )
+            or selection_policy not in {"INITIAL", "RETRY"}
             or revision.normalized_input is None
         ):
             raise ApplicationConflictError(task_id=task.task_id)
@@ -491,19 +741,28 @@ class ResultService:
         unit_of_work: UnitOfWork,
         *,
         result: ToolResult,
-        stored_assets: tuple[Asset, ...],
-        completed_at: datetime,
+        links: tuple[ResultAssetLink, ...],
     ) -> None:
         unit_of_work.tool_results.add(result)
-        for artifact_order, stored_asset in enumerate(stored_assets):
-            unit_of_work.result_asset_links.add(
-                ResultAssetLink(
-                    result_id=result.result_id,
-                    asset_id=stored_asset.asset_id,
-                    artifact_order=artifact_order,
-                    created_at=completed_at,
-                )
+        for link in links:
+            unit_of_work.result_asset_links.add(link)
+
+    @staticmethod
+    def _build_result_links(
+        *,
+        result: ToolResult,
+        stored_assets: tuple[Asset, ...],
+        completed_at: datetime,
+    ) -> tuple[ResultAssetLink, ...]:
+        return tuple(
+            ResultAssetLink(
+                result_id=result.result_id,
+                asset_id=stored_asset.asset_id,
+                artifact_order=artifact_order,
+                created_at=completed_at,
             )
+            for artifact_order, stored_asset in enumerate(stored_assets)
+        )
 
     @staticmethod
     def _result_terminal_facts(
@@ -529,19 +788,9 @@ class ResultService:
     def _terminalize_tool_run_and_select_result(
         unit_of_work: UnitOfWork,
         *,
-        sources: _ValidatedResultSources,
-        result: ToolResult,
-        output: ToolExecutionOutput,
-        terminal_facts: _ResultTerminalFacts,
-        completed_at: datetime,
+        completed_run: ToolRun,
+        completed_task: Task,
     ) -> None:
-        completed_run = sources.tool_run.complete_from_result(
-            completed_outputs=list(output.completed_outputs),
-            failed_outputs=list(output.failed_outputs),
-            completed_at=completed_at,
-            error_code=terminal_facts.error_code,
-            safe_error_message=terminal_facts.safe_error_message,
-        )
         if (
             unit_of_work.tool_runs.update(
                 completed_run,
@@ -550,9 +799,36 @@ class ResultService:
             is None
         ):
             raise ApplicationConflictError(
-                task_id=sources.task.task_id
+                task_id=completed_task.task_id
             )
 
+        if (
+            unit_of_work.tasks.update(
+                completed_task,
+                expected_status="RUNNING",
+            )
+            is None
+        ):
+            raise ApplicationConflictError(
+                task_id=completed_task.task_id
+            )
+
+    @staticmethod
+    def _build_terminal_run_and_task(
+        *,
+        sources: _ValidatedResultSources,
+        result: ToolResult,
+        output: ToolExecutionOutput,
+        terminal_facts: _ResultTerminalFacts,
+        completed_at: datetime,
+    ) -> tuple[ToolRun, Task]:
+        completed_run = sources.tool_run.complete_from_result(
+            completed_outputs=list(output.completed_outputs),
+            failed_outputs=list(output.failed_outputs),
+            completed_at=completed_at,
+            error_code=terminal_facts.error_code,
+            safe_error_message=terminal_facts.safe_error_message,
+        )
         completed_task = replace(
             sources.task,
             current_status=terminal_facts.task_status,
@@ -567,13 +843,4 @@ class ResultService:
             error_code=terminal_facts.error_code,
             safe_error_message=terminal_facts.safe_error_message,
         )
-        if (
-            unit_of_work.tasks.update(
-                completed_task,
-                expected_status="RUNNING",
-            )
-            is None
-        ):
-            raise ApplicationConflictError(
-                task_id=sources.task.task_id
-            )
+        return completed_run, completed_task

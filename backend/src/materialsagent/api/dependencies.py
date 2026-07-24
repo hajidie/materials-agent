@@ -14,6 +14,10 @@ from materialsagent.application.errors import (
 )
 from materialsagent.application.messages import MessageSubmissionService
 from materialsagent.application.tasks import TaskQueryService
+from materialsagent.application.retries import (
+    ExplanationRetryService,
+    ToolRetryService,
+)
 from materialsagent.application.result_service import ToolResultQueryService
 from materialsagent.application.tool_workflow import ToolWorkflowService
 from materialsagent.application.tool_execution import (
@@ -52,6 +56,16 @@ def get_chat_orchestration_service(
 
 def get_task_query_service(request: Request) -> TaskQueryService:
     return _required_app_state(request, "task_query_service")
+
+
+def get_tool_retry_service(request: Request) -> ToolRetryService:
+    return _required_app_state(request, "tool_retry_service")
+
+
+def get_explanation_retry_service(
+    request: Request,
+) -> ExplanationRetryService:
+    return _required_app_state(request, "explanation_retry_service")
 
 
 def get_tool_catalog_service(request: Request) -> ToolCatalogService:

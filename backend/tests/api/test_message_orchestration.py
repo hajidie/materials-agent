@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from uuid import uuid4
+
 from sqlalchemy import func, select, text
 
 from materialsagent.application.chat_orchestration import (
@@ -28,6 +30,7 @@ def _create_conversation(client) -> str:
 def _submit(client, conversation_id: str, content_text: str):
     return client.post(
         f"/api/v1/conversations/{conversation_id}/messages",
+        headers={"Idempotency-Key": f"message-{uuid4().hex}"},
         json={
             "submission_mode": "NEW_TASK",
             "content_text": content_text,

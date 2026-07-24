@@ -20,7 +20,11 @@ from materialsagent.application.errors import (
     ResourceNotFoundError,
     from_persistence_error,
 )
-from materialsagent.application.messages import PreparedSubmission
+from materialsagent.application.messages import (
+    NEW_TASK,
+    SUPPLEMENT_TASK,
+    PreparedSubmission,
+)
 from materialsagent.application.zta35g_input import (
     ZTA35GValidationResult,
     normalize_zta35g_candidate,
@@ -82,9 +86,15 @@ class ChatOrchestrationProjection:
     conversation_id: str
     user_message: Message
     task: Task
-    llm_call: LLMCall
+    llm_call: LLMCall | None
     assistant_message: Message | None
     revision: TaskInputRevision | None
+
+
+@dataclass(frozen=True, slots=True)
+class _StartedChatCall:
+    call: LLMCall
+    invoke_adapter: bool
 
 
 class ChatOrchestrationService:
@@ -126,7 +136,10 @@ class ChatOrchestrationService:
         submission: PreparedSubmission,
     ) -> ChatOrchestrationProjection:
         call = self._prepare_call(actor_context, submission)
-        self._start_call(actor_context, submission, call)
+        started = self._start_call(actor_context, submission, call)
+        if not started.invoke_adapter:
+            return self.load_current_submission(actor_context, submission)
+        call = started.call
         self._log_event("chat_orchestration_started", submission, call.llm_call_id)
         try:
             result = self._orchestration_port.orchestrate(
@@ -143,6 +156,13 @@ class ChatOrchestrationService:
             ):
                 raise ChatOrchestrationProtocolError(
                     "Chat orchestration result has an invalid runtime type."
+                )
+            if (
+                submission.submission_mode == SUPPLEMENT_TASK
+                and isinstance(result, KnowledgeAnswer)
+            ):
+                raise ChatOrchestrationProtocolError(
+                    "A task supplement must remain a tool candidate."
                 )
         except ChatOrchestrationTimeoutError:
             self._finalize_failure(
@@ -264,6 +284,123 @@ class ChatOrchestrationService:
             )
         return projection
 
+    def load_current_submission(
+        self,
+        actor_context: ActorContext,
+        submission: PreparedSubmission,
+    ) -> ChatOrchestrationProjection:
+        try:
+            with self._unit_of_work_factory() as unit_of_work:
+                conversation = unit_of_work.conversations.get_owned(
+                    submission.conversation_id,
+                    actor_context.actor_id,
+                )
+                message = unit_of_work.messages.get(
+                    submission.user_message.message_id
+                )
+                task = unit_of_work.tasks.get_owned_for_update(
+                    submission.task.task_id,
+                    actor_context.actor_id,
+                )
+                if conversation is None or message is None or task is None:
+                    raise ResourceNotFoundError()
+                self._require_source_identity(
+                    actor_context,
+                    submission,
+                    message,
+                    task,
+                )
+                calls = [
+                    call
+                    for call in unit_of_work.llm_calls.list_for_task(
+                        task.task_id,
+                        request_id=message.request_id,
+                    )
+                    if call.purpose == CHAT_ORCHESTRATION
+                ]
+                if len(calls) > 1:
+                    raise self._conflict(submission)
+                call = calls[0] if calls else None
+                assistant = (
+                    None
+                    if call is None
+                    else unit_of_work.messages.get_by_llm_call_id(
+                        call.llm_call_id
+                    )
+                )
+                revisions = (
+                    []
+                    if call is None
+                    else unit_of_work.task_input_revisions.list_for_llm_call_id(
+                        call.llm_call_id
+                    )
+                )
+                if len(revisions) > 1:
+                    raise self._conflict(submission)
+                if call is None:
+                    expected_without_call = (
+                        TASK_PENDING
+                        if submission.submission_mode == NEW_TASK
+                        else TASK_NEEDS_INPUT
+                    )
+                    if (
+                        task.current_status != expected_without_call
+                        or assistant is not None
+                        or revisions
+                    ):
+                        raise self._conflict(submission)
+                elif call.status == LLM_PENDING:
+                    expected_pending = (
+                        TASK_PENDING
+                        if submission.submission_mode == NEW_TASK
+                        else TASK_NEEDS_INPUT
+                    )
+                    if (
+                        task.current_status != expected_pending
+                        or assistant is not None
+                        or revisions
+                    ):
+                        raise self._conflict(submission)
+                elif call.status == LLM_RUNNING:
+                    if (
+                        task.current_status != TASK_RUNNING
+                        or assistant is not None
+                        or revisions
+                    ):
+                        raise self._conflict(submission)
+                else:
+                    all_revisions = (
+                        unit_of_work.task_input_revisions.list_for_task(
+                            task.task_id
+                        )
+                    )
+                    task_messages = unit_of_work.messages.list_for_task(
+                        task.task_id
+                    )
+                    self._require_projection_identity(
+                        actor_context,
+                        submission,
+                        call,
+                        assistant,
+                        revisions,
+                        all_revisions,
+                        task_messages,
+                    )
+        except PersistenceError as error:
+            raise from_persistence_error(
+                error,
+                conversation_id=submission.conversation_id,
+                task_id=submission.task.task_id,
+            ) from None
+        return ChatOrchestrationProjection(
+            conversation_id=conversation.conversation_id,
+            user_message=message,
+            task=task,
+            llm_call=call,
+            assistant_message=assistant,
+            revision=revisions[0] if revisions else None,
+        )
+
     def finalize_result(
         self,
         actor_context: ActorContext,
@@ -330,6 +467,15 @@ class ChatOrchestrationService:
                     )
                     unit_of_work.commit()
         except PersistenceError as error:
+            recovered = self._recover_successful_finalize(
+                actor_context,
+                submission,
+                llm_call_id=llm_call_id,
+                result=result,
+                validation=validation,
+            )
+            if recovered is not None:
+                return recovered
             raise from_persistence_error(
                 error,
                 conversation_id=submission.conversation_id,
@@ -345,6 +491,110 @@ class ChatOrchestrationService:
             actor_context,
             submission,
             llm_call_id,
+        )
+
+    def _recover_successful_finalize(
+        self,
+        actor_context: ActorContext,
+        submission: PreparedSubmission,
+        *,
+        llm_call_id: str,
+        result: KnowledgeAnswer | ToolCandidate | NeedsInputCandidate,
+        validation: ZTA35GValidationResult | None,
+    ) -> ChatOrchestrationProjection | None:
+        try:
+            with self._unit_of_work_factory() as unit_of_work:
+                call = unit_of_work.llm_calls.get(llm_call_id)
+                task = unit_of_work.tasks.get_owned(
+                    submission.task.task_id,
+                    actor_context.actor_id,
+                )
+        except PersistenceError:
+            return None
+        if call is None or task is None:
+            return None
+        if call.status in {LLM_PENDING, LLM_RUNNING}:
+            return None
+        projection = self._load_projection(
+            actor_context,
+            submission,
+            llm_call_id,
+        )
+        if not self._is_equivalent_success_projection(
+            projection,
+            result=result,
+            validation=validation,
+        ):
+            raise self._conflict(submission)
+        return projection
+
+    @staticmethod
+    def _is_equivalent_success_projection(
+        projection: ChatOrchestrationProjection,
+        *,
+        result: KnowledgeAnswer | ToolCandidate | NeedsInputCandidate,
+        validation: ZTA35GValidationResult | None,
+    ) -> bool:
+        call = projection.llm_call
+        if call is None or call.status != LLM_SUCCEEDED:
+            return False
+        if isinstance(result, KnowledgeAnswer):
+            answer_text = result.answer_text.strip()
+            return (
+                call.structured_output_summary
+                == {
+                    "route": "KNOWLEDGE_ANSWER",
+                    "answer_length": len(answer_text),
+                    "answer_digest": sha256(
+                        answer_text.encode("utf-8")
+                    ).hexdigest(),
+                }
+                and projection.assistant_message is not None
+                and projection.assistant_message.content_text == answer_text
+                and projection.revision is None
+            )
+        if validation is None or projection.revision is None:
+            return False
+        payloads = validation.to_revision_payloads()
+        has_missing_or_ambiguous = bool(
+            validation.missing_fields or validation.ambiguous_fields
+        )
+        expected_summary = (
+            {
+                "route": "NEEDS_INPUT",
+                "tool_id": result.tool_id,
+                "missing_fields": tuple(validation.missing_fields),
+                "ambiguous_fields": tuple(
+                    item.field for item in validation.ambiguous_fields
+                ),
+            }
+            if has_missing_or_ambiguous
+            else {
+                "route": "TOOL_EXECUTION",
+                "tool_id": result.tool_id,
+            }
+        )
+        expected_validation_errors = (
+            []
+            if has_missing_or_ambiguous
+            else payloads["validation_errors"]
+        )
+        revision = projection.revision
+        return (
+            call.structured_output_summary == expected_summary
+            and (
+                not has_missing_or_ambiguous
+                or (
+                    projection.assistant_message is not None
+                    and projection.assistant_message.content_text
+                    == FOLLOW_UP_TEXT
+                )
+            )
+            and revision.raw_input == payloads["raw_input"]
+            and revision.normalized_input == payloads["normalized_input"]
+            and revision.missing_fields == payloads["missing_fields"]
+            and revision.ambiguous_fields == payloads["ambiguous_fields"]
+            and revision.validation_errors == expected_validation_errors
         )
 
     def _prepare_call(
@@ -383,11 +633,22 @@ class ChatOrchestrationService:
                     unit_of_work,
                     actor_context,
                     submission,
-                    expected_task_status=TASK_PENDING,
+                    expected_task_status=(
+                        TASK_PENDING
+                        if submission.submission_mode == NEW_TASK
+                        else TASK_NEEDS_INPUT
+                    ),
                 )
                 unit_of_work.llm_calls.add(call)
                 unit_of_work.commit()
         except PersistenceError as error:
+            recovered = self._recover_call_after_uncertain_commit(
+                actor_context,
+                submission,
+                expected=call,
+            )
+            if recovered is not None:
+                return recovered
             raise from_persistence_error(
                 error,
                 conversation_id=submission.conversation_id,
@@ -400,7 +661,13 @@ class ChatOrchestrationService:
         actor_context: ActorContext,
         submission: PreparedSubmission,
         call: LLMCall,
-    ) -> LLMCall:
+    ) -> _StartedChatCall:
+        if call.status in {
+            LLM_RUNNING,
+            LLM_SUCCEEDED,
+            LLM_FAILED,
+        }:
+            return _StartedChatCall(call=call, invoke_adapter=False)
         timestamp = _validated_utc_now(self._clock)
         running_call = replace(
             call,
@@ -413,7 +680,11 @@ class ChatOrchestrationService:
                     unit_of_work,
                     actor_context,
                     submission,
-                    expected_task_status=TASK_PENDING,
+                    expected_task_status=(
+                        TASK_PENDING
+                        if submission.submission_mode == NEW_TASK
+                        else TASK_NEEDS_INPUT
+                    ),
                 )
                 persisted_call = unit_of_work.llm_calls.get(call.llm_call_id)
                 if persisted_call != call:
@@ -432,17 +703,92 @@ class ChatOrchestrationService:
                     expected_status=LLM_PENDING,
                 ) is None or unit_of_work.tasks.update(
                     running_task,
-                    expected_status=TASK_PENDING,
+                    expected_status=(
+                        TASK_PENDING
+                        if submission.submission_mode == NEW_TASK
+                        else TASK_NEEDS_INPUT
+                    ),
                 ) is None:
                     raise self._conflict(submission)
                 unit_of_work.commit()
         except PersistenceError as error:
+            recovered = self._recover_call_after_uncertain_commit(
+                actor_context,
+                submission,
+                expected=running_call,
+            )
+            if recovered == running_call:
+                return _StartedChatCall(
+                    call=recovered,
+                    invoke_adapter=True,
+                )
+            if recovered is not None and recovered.status in {
+                LLM_RUNNING,
+                LLM_SUCCEEDED,
+                LLM_FAILED,
+            }:
+                return _StartedChatCall(
+                    call=recovered,
+                    invoke_adapter=False,
+                )
             raise from_persistence_error(
                 error,
                 conversation_id=submission.conversation_id,
                 task_id=submission.task.task_id,
             ) from None
-        return running_call
+        return _StartedChatCall(
+            call=running_call,
+            invoke_adapter=True,
+        )
+
+    def _recover_call_after_uncertain_commit(
+        self,
+        actor_context: ActorContext,
+        submission: PreparedSubmission,
+        *,
+        expected: LLMCall,
+    ) -> LLMCall | None:
+        try:
+            projection = self.load_current_submission(
+                actor_context,
+                submission,
+            )
+        except PersistenceError:
+            return None
+        current = projection.llm_call
+        if current is None:
+            return None
+        if not self._same_call_identity(current, expected):
+            raise self._conflict(submission)
+        if current.status in {
+            LLM_PENDING,
+            LLM_RUNNING,
+            LLM_SUCCEEDED,
+            LLM_FAILED,
+        }:
+            return current
+        raise self._conflict(submission)
+
+    @staticmethod
+    def _same_call_identity(left: LLMCall, right: LLMCall) -> bool:
+        return all(
+            getattr(left, field_name) == getattr(right, field_name)
+            for field_name in (
+                "llm_call_id",
+                "task_id",
+                "conversation_id",
+                "request_id",
+                "purpose",
+                "input_result_id",
+                "provider",
+                "model_name",
+                "prompt_template_id",
+                "prompt_template_version",
+                "prompt_digest",
+                "generation_parameters",
+                "created_at",
+            )
+        )
 
     def _write_success_outcome(
         self,
@@ -459,6 +805,8 @@ class ChatOrchestrationService:
         assistant_message: Message | None = None
         revision: TaskInputRevision | None = None
         if isinstance(result, KnowledgeAnswer):
+            if submission.submission_mode != NEW_TASK:
+                raise self._conflict(submission)
             answer_text = result.answer_text.strip()
             summary = {
                 "route": "KNOWLEDGE_ANSWER",
@@ -574,13 +922,25 @@ class ChatOrchestrationService:
                     error_code=error_code,
                     safe_error_message=safe_error_message,
                 )
+            prior_revisions = unit_of_work.task_input_revisions.list_for_task(
+                task.task_id
+            )
+            source_messages = [
+                message.message_id
+                for message in unit_of_work.messages.list_for_task(task.task_id)
+                if message.role == "USER"
+            ]
             revision = TaskInputRevision(
                 task_input_revision_id=self._id_factory("revision"),
                 task_id=task.task_id,
                 request_id=submission.user_message.request_id,
                 source_llm_call_id=running_call.llm_call_id,
-                source_message_ids=[submission.user_message.message_id],
-                revision=1,
+                source_message_ids=source_messages,
+                revision=(
+                    1
+                    if submission.submission_mode == NEW_TASK
+                    else max(item.revision for item in prior_revisions) + 1
+                ),
                 raw_input=payloads["raw_input"],
                 normalized_input=payloads["normalized_input"],
                 missing_fields=payloads["missing_fields"],
@@ -597,6 +957,23 @@ class ChatOrchestrationService:
         )
         if revision is not None:
             unit_of_work.task_input_revisions.add(revision)
+            if submission.submission_mode == SUPPLEMENT_TASK:
+                record = (
+                    unit_of_work.idempotency_records.get_by_first_request_id(
+                        submission.user_message.request_id
+                    )
+                )
+                if (
+                    record is None
+                    or record.idempotency_record_id
+                    != submission.idempotency_record_id
+                    or unit_of_work.idempotency_records.bind_task_input_revision(
+                        record,
+                        revision.task_input_revision_id,
+                    )
+                    is None
+                ):
+                    raise self._conflict(submission)
         if assistant_message is not None:
             unit_of_work.messages.add(assistant_message)
         if unit_of_work.llm_calls.update(
@@ -667,11 +1044,64 @@ class ChatOrchestrationService:
                     raise self._conflict(submission)
                 unit_of_work.commit()
         except PersistenceError as error:
+            recovered = self._recover_failed_finalize(
+                actor_context,
+                submission,
+                llm_call_id=llm_call_id,
+                error_code=error_code,
+                safe_error_message=safe_error_message,
+            )
+            if recovered:
+                return
             raise from_persistence_error(
                 error,
                 conversation_id=submission.conversation_id,
                 task_id=submission.task.task_id,
             ) from None
+
+    def _recover_failed_finalize(
+        self,
+        actor_context: ActorContext,
+        submission: PreparedSubmission,
+        *,
+        llm_call_id: str,
+        error_code: str,
+        safe_error_message: str,
+    ) -> bool:
+        try:
+            with self._unit_of_work_factory() as unit_of_work:
+                call = unit_of_work.llm_calls.get(llm_call_id)
+                task = unit_of_work.tasks.get_owned(
+                    submission.task.task_id,
+                    actor_context.actor_id,
+                )
+        except PersistenceError:
+            return False
+        if call is None or task is None:
+            return False
+        if (
+            call.status == LLM_RUNNING
+            and task.current_status == TASK_RUNNING
+        ):
+            return False
+        projection = self._load_projection(
+            actor_context,
+            submission,
+            llm_call_id,
+        )
+        persisted_call = projection.llm_call
+        if (
+            persisted_call is None
+            or persisted_call.status != LLM_FAILED
+            or persisted_call.structured_output_summary is not None
+            or persisted_call.error_code != error_code
+            or persisted_call.safe_error_message != safe_error_message
+            or projection.task.current_status != TASK_FAILED
+            or projection.task.error_code != error_code
+            or projection.task.safe_error_message != safe_error_message
+        ):
+            raise self._conflict(submission)
+        return True
 
     @staticmethod
     def _outcome_error(
@@ -727,12 +1157,18 @@ class ChatOrchestrationService:
                         llm_call_id
                     )
                 )
+                all_revisions = unit_of_work.task_input_revisions.list_for_task(
+                    task.task_id
+                )
+                task_messages = unit_of_work.messages.list_for_task(task.task_id)
                 self._require_projection_identity(
                     actor_context,
                     submission,
                     call,
                     assistant_message,
                     revisions,
+                    all_revisions,
+                    task_messages,
                 )
                 self._require_terminal_outcome_consistency(
                     submission,
@@ -810,13 +1246,15 @@ class ChatOrchestrationService:
         ):
             raise ChatOrchestrationService._conflict(submission)
 
-    @staticmethod
     def _require_projection_identity(
+        self,
         actor_context: ActorContext,
         submission: PreparedSubmission,
         call: LLMCall,
         assistant_message: Message | None,
         revisions: list[TaskInputRevision],
+        all_revisions: list[TaskInputRevision],
+        task_messages: list[Message],
     ) -> None:
         source_identity = (
             submission.task.task_id,
@@ -844,13 +1282,22 @@ class ChatOrchestrationService:
         ):
             raise ChatOrchestrationService._conflict(submission)
         for revision in revisions:
+            expected_source_messages = [
+                message.message_id
+                for message in task_messages
+                if message.role == "USER"
+            ]
+            expected_revision = (
+                1
+                if submission.submission_mode == NEW_TASK
+                else max(item.revision for item in all_revisions)
+            )
             if (
                 revision.task_id != submission.task.task_id
                 or revision.request_id != submission.user_message.request_id
                 or revision.source_llm_call_id != call.llm_call_id
-                or revision.source_message_ids
-                != [submission.user_message.message_id]
-                or revision.revision != 1
+                or revision.source_message_ids != expected_source_messages
+                or revision.revision != expected_revision
             ):
                 raise ChatOrchestrationService._conflict(submission)
 

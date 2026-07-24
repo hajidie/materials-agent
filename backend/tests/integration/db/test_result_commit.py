@@ -105,6 +105,111 @@ class _RevisionOverrideFactory:
         return unit_of_work
 
 
+class _SelectedReferenceFaultRepository:
+    def __init__(self, repository, transform, selected_id: str) -> None:
+        self._repository = repository
+        self._transform = transform
+        self._selected_id = selected_id
+
+    def _apply(self, item):
+        if item is None:
+            return None
+        item_id = (
+            getattr(item, "task_id", None)
+            if self._selected_id == "task_1"
+            else getattr(item, "tool_run_id", None)
+            if self._selected_id == "tool_run_1"
+            else getattr(item, "result_id", None)
+        )
+        return self._transform(item) if item_id == self._selected_id else item
+
+    def get(self, item_id: str):
+        return self._apply(self._repository.get(item_id))
+
+    def get_owned(self, item_id: str, actor_id: str):
+        return self._apply(self._repository.get_owned(item_id, actor_id))
+
+    def get_owned_for_update(self, item_id: str, actor_id: str):
+        return self._apply(
+            self._repository.get_owned_for_update(item_id, actor_id)
+        )
+
+    def __getattr__(self, name: str):
+        return getattr(self._repository, name)
+
+
+class _SelectedReferenceFaultUnitOfWork:
+    def __init__(self, unit_of_work, mode: str) -> None:
+        self._unit_of_work = unit_of_work
+        self._mode = mode
+
+    def __enter__(self):
+        self._unit_of_work.__enter__()
+
+        def transform_task(task):
+            if self._mode == "RESULT_ONLY":
+                task.selected_tool_run_id = None
+            if self._mode == "BOTH_NULL":
+                task.selected_tool_run_id = None
+                task.selected_result_id = None
+            return task
+
+        def transform_run(run):
+            if self._mode == "RUN_OTHER_TASK":
+                return replace(run, task_id="task_other")
+            if self._mode == "STATE_MISMATCH":
+                run.current_status = "FAILED"
+            return run
+
+        def transform_result(result):
+            if self._mode == "RESULT_OTHER_RUN":
+                object.__setattr__(
+                    result,
+                    "tool_run_id",
+                    "tool_run_retry",
+                )
+            return result
+
+        self.tasks = _SelectedReferenceFaultRepository(
+            self._unit_of_work.tasks,
+            transform_task,
+            "task_1",
+        )
+        self.tool_runs = _SelectedReferenceFaultRepository(
+            self._unit_of_work.tool_runs,
+            transform_run,
+            "tool_run_1",
+        )
+        self.tool_results = _SelectedReferenceFaultRepository(
+            self._unit_of_work.tool_results,
+            transform_result,
+            "result_old",
+        )
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return self._unit_of_work.__exit__(
+            exc_type,
+            exc_value,
+            traceback,
+        )
+
+    def __getattr__(self, name: str):
+        return getattr(self._unit_of_work, name)
+
+
+class _SelectedReferenceFaultFactory:
+    def __init__(self, factory, mode: str) -> None:
+        self._factory = factory
+        self._mode = mode
+
+    def __call__(self):
+        return _SelectedReferenceFaultUnitOfWork(
+            self._factory(),
+            self._mode,
+        )
+
+
 def _image(*, requested_output: bool) -> ToolImagePayload:
     return ToolImagePayload(
         image_role="generated_sem",
@@ -409,6 +514,78 @@ def _seed(
     return (
         ToolExecutionReceipt(tool_run=run, output=output),
         [asset] if include_image else [],
+    )
+
+
+def _seed_retry_result(
+    engine: Engine,
+) -> tuple[ToolExecutionReceipt, list[Asset]]:
+    initial_receipt, initial_assets = _seed(
+        engine,
+        requested=("sem_image",),
+        completed=("sem_image",),
+        failed=(),
+    )
+    factory = _factory(engine)
+    ResultService(
+        factory,
+        clock=lambda: BASE + timedelta(seconds=5),
+        id_factory=lambda: "result_old",
+    ).commit_initial_result(
+        ACTOR,
+        receipt=initial_receipt,
+        assets=initial_assets,
+    )
+    output = initial_receipt.output
+    with factory() as unit_of_work:
+        old_run = unit_of_work.tool_runs.get("tool_run_1")
+        assert old_run is not None
+        retry_run = ToolRun.pending(
+            tool_run_id="tool_run_retry",
+            task_id="task_1",
+            request_id="request_retry",
+            task_input_revision_id="revision_1",
+            attempt_no=2,
+            tool_id=old_run.tool_id,
+            tool_version=old_run.tool_version,
+            schema_version=old_run.schema_version,
+            execution_input=dict(old_run.execution_input),
+            requested_outputs=list(old_run.requested_outputs),
+            created_at=BASE + timedelta(seconds=6),
+        ).start(
+            started_at=BASE + timedelta(seconds=7)
+        ).record_runtime_output(
+            actual_runtime_parameters=dict(output.actual_runtime_parameters),
+            diagnostics=[],
+            output_summary=normalize_tool_output_summary(output),
+            model_bundle_id=output.model_bundle_id,
+        )
+        retry_asset = Asset.pending(
+            asset_id="asset_retry",
+            task_id="task_1",
+            producer_tool_run_id=retry_run.tool_run_id,
+            actor_id="actor_1",
+            operation_id="asset_operation_retry",
+            role="requested_output",
+            object_key="assets/test/asset_retry.png",
+            pending_since=BASE + timedelta(seconds=8),
+            created_at=BASE + timedelta(seconds=8),
+        ).mark_available(
+            sha256="d" * 64,
+            size_bytes=1480,
+            width=512,
+            height=512,
+            bit_depth=8,
+            media_type="image/png",
+            encoding_rule="linear[-1,1]-half-up-uint8-png-l",
+            available_at=BASE + timedelta(seconds=9),
+        )
+        unit_of_work.tool_runs.add(retry_run)
+        unit_of_work.assets.add(retry_asset)
+        unit_of_work.commit()
+    return (
+        ToolExecutionReceipt(tool_run=retry_run, output=output),
+        [retry_asset],
     )
 
 
@@ -807,6 +984,55 @@ def test_result_commit_rejects_version_and_selected_reference_mismatches(
         service.commit_result(ACTOR, receipt=receipt, assets=assets)
 
 
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "RESULT_OTHER_RUN",
+        "RUN_OTHER_TASK",
+        "RESULT_ONLY",
+        "STATE_MISMATCH",
+        "BOTH_NULL",
+    ],
+)
+def test_retry_result_rejects_corrupt_old_selected_references_before_writes(
+    migrated_database_engine: Engine,
+    mode: str,
+) -> None:
+    receipt, assets = _seed_retry_result(migrated_database_engine)
+    normal_factory = _factory(migrated_database_engine)
+    service = ResultService(
+        _SelectedReferenceFaultFactory(normal_factory, mode),
+        clock=lambda: BASE + timedelta(seconds=10),
+        id_factory=lambda: "result_retry",
+    )
+    with normal_factory() as unit_of_work:
+        old_task = unit_of_work.tasks.get("task_1")
+        old_run = unit_of_work.tool_runs.get("tool_run_1")
+        old_result = unit_of_work.tool_results.get("result_old")
+        old_links = unit_of_work.result_asset_links.list_for_result(
+            "result_old"
+        )
+
+    with pytest.raises(ApplicationConflictError):
+        service.commit_retry_result(
+            ACTOR,
+            receipt=receipt,
+            assets=assets,
+        )
+
+    with normal_factory() as unit_of_work:
+        assert unit_of_work.tool_results.get("result_retry") is None
+        assert unit_of_work.result_asset_links.list_for_result(
+            "result_retry"
+        ) == []
+        assert unit_of_work.tasks.get("task_1") == old_task
+        assert unit_of_work.tool_runs.get("tool_run_1") == old_run
+        assert unit_of_work.tool_results.get("result_old") == old_result
+        assert unit_of_work.result_asset_links.list_for_result(
+            "result_old"
+        ) == old_links
+
+
 class _FailFirstCommitUoW(SQLAlchemyUnitOfWork):
     def __init__(self, session_factory, failure_state: dict[str, bool]) -> None:
         super().__init__(session_factory)
@@ -852,17 +1078,28 @@ class _StaticAssetService:
         return self.assets
 
 
-class _CommitThenReportFailureResultService:
-    def __init__(self, service: ResultService) -> None:
-        self._service = service
+class _CommitThenReportFailureUoW(SQLAlchemyUnitOfWork):
+    def __init__(self, session_factory, controller) -> None:
+        super().__init__(session_factory)
+        self._controller = controller
 
-    def commit_result(self, actor, *, receipt, assets):
-        self._service.commit_result(
-            actor,
-            receipt=receipt,
-            assets=assets,
+    def commit(self) -> None:
+        super().commit()
+        if not self._controller.reported:
+            self._controller.reported = True
+            raise PersistenceError("Commit result was uncertain.")
+
+
+class _CommitThenReportFailureFactory:
+    def __init__(self, engine: Engine) -> None:
+        self._session_factory = create_session_factory(engine)
+        self.reported = False
+
+    def __call__(self) -> SQLAlchemyUnitOfWork:
+        return _CommitThenReportFailureUoW(
+            self._session_factory,
+            self,
         )
-        raise ResultPersistenceError(task_id=receipt.tool_run.task_id)
 
 
 def _workflow_for_result_failure(
@@ -959,7 +1196,7 @@ def test_result_commit_failure_rolls_back_and_returns_no_memory_result(
     assert explanation_adapter.call_count == 0
 
 
-def test_uncertain_result_commit_does_not_overwrite_persisted_result(
+def test_uncertain_initial_result_commit_recovers_and_continues_explanation(
     migrated_database_engine: Engine,
 ) -> None:
     receipt, assets = _seed(
@@ -972,12 +1209,10 @@ def test_uncertain_result_commit_does_not_overwrite_persisted_result(
     execution = _StaticExecutionService(receipt)
     asset_service = _StaticAssetService(assets)
     explanation_adapter = MockExplanationAdapter(mode="success")
-    result_service = _CommitThenReportFailureResultService(
-        ResultService(
-            normal_factory,
-            clock=lambda: BASE + timedelta(seconds=5),
-            id_factory=lambda: "result_1",
-        )
+    result_service = ResultService(
+        _CommitThenReportFailureFactory(migrated_database_engine),
+        clock=lambda: BASE + timedelta(seconds=5),
+        id_factory=lambda: "result_1",
     )
     workflow = ToolWorkflowService(
         normal_factory,
@@ -992,13 +1227,12 @@ def test_uncertain_result_commit_does_not_overwrite_persisted_result(
         clock=lambda: BASE + timedelta(seconds=6),
     )
 
-    with pytest.raises(ResultPersistenceError):
-        workflow.execute(
-            ACTOR,
-            task_id="task_1",
-            task_input_revision_id="revision_1",
-            request_id="request_1",
-        )
+    projection = workflow.execute(
+        ACTOR,
+        task_id="task_1",
+        task_input_revision_id="revision_1",
+        request_id="request_1",
+    )
 
     with normal_factory() as unit_of_work:
         result = unit_of_work.tool_results.get("result_1")
@@ -1007,7 +1241,7 @@ def test_uncertain_result_commit_does_not_overwrite_persisted_result(
         run = unit_of_work.tool_runs.get("tool_run_1")
         assert result is not None
         assert len(links) == 1
-        assert task.current_status == "RUNNING"
+        assert task.current_status == "SUCCEEDED"
         assert task.selected_tool_run_id == "tool_run_1"
         assert task.selected_result_id == "result_1"
         assert task.error_code is None
@@ -1015,9 +1249,14 @@ def test_uncertain_result_commit_does_not_overwrite_persisted_result(
         assert run.completed_outputs == ["sem_image"]
         assert run.failed_outputs == []
         assert run.error_code is None
+        assert len(
+            unit_of_work.explanations.list_for_result("result_1")
+        ) == 1
+    assert projection.result.result_id == "result_1"
+    assert projection.task.current_status == "SUCCEEDED"
     assert execution.calls == 1
     assert asset_service.calls == 1
-    assert explanation_adapter.call_count == 0
+    assert explanation_adapter.call_count == 1
 
 
 def test_result_failure_terminalization_commit_failure_preserves_real_state(

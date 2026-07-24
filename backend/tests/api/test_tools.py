@@ -91,6 +91,7 @@ def _create_valid_revision(client, api_harness) -> tuple[str, str]:
     conversation_id = conversation.json()["data"]["conversation_id"]
     message = client.post(
         f"/api/v1/conversations/{conversation_id}/messages",
+        headers={"Idempotency-Key": "tool-valid-revision"},
         json={
             "submission_mode": "NEW_TASK",
             "content_text": "完整合法 Tool 请求",

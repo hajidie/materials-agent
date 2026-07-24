@@ -42,6 +42,26 @@ class ApplicationConflictError(ApplicationError):
     default_status_code = 409
 
 
+class IdempotencyConflictError(ApplicationConflictError):
+    default_message = "幂等键已用于不同的业务请求。"
+    default_code = "IDEMPOTENCY_CONFLICT"
+
+
+class TaskNotRetryableError(ApplicationConflictError):
+    default_message = "当前任务不允许重试材料工具。"
+    default_code = "TASK_NOT_RETRYABLE"
+
+
+class TargetTaskNotRecoverableError(ApplicationConflictError):
+    default_message = "目标任务已有正在处理的补充请求。"
+    default_code = "TARGET_TASK_NOT_RECOVERABLE"
+
+
+class ExplanationNotRetryableError(ApplicationConflictError):
+    default_message = "当前结果不允许重试解释。"
+    default_code = "EXPLANATION_NOT_RETRYABLE"
+
+
 class DependencyUnavailableError(ApplicationError):
     default_message = "依赖服务暂不可用。"
     default_code = "DEPENDENCY_UNAVAILABLE"

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from uuid import uuid4
+
 from dataclasses import replace
 
 from sqlalchemy import text
@@ -152,6 +154,7 @@ class _CountingMemoryStorage(_MemoryStorage):
 def _submit(client, conversation_id: str):
     return client.post(
         f"/api/v1/conversations/{conversation_id}/messages",
+        headers={"Idempotency-Key": f"explanation-{uuid4().hex}"},
         json={
             "submission_mode": "NEW_TASK",
             "content_text": "完整合法 Tool 请求",

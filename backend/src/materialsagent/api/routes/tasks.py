@@ -3,15 +3,22 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Request
-from pydantic import BaseModel, ConfigDict
+from fastapi import APIRouter, Depends, Header, Request
+from pydantic import BaseModel, ConfigDict, Field
 
 from materialsagent.api.dependencies import (
     get_actor_context,
     get_task_query_service,
+    get_tool_retry_service,
 )
 from materialsagent.application.context import ActorContext
 from materialsagent.application.tasks import TaskQueryService
+from materialsagent.application.retries import (
+    DEFAULT_RETRY_REASON,
+    ToolRetryService,
+)
+from materialsagent.application.errors import ApplicationValidationError
+from materialsagent.application.idempotency import validate_idempotency_key
 
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["tasks"])
@@ -69,6 +76,59 @@ class TaskResponse(StrictModel):
     data: TaskView
 
 
+class ToolRetryRequest(StrictModel):
+    reason: str = Field(
+        default=DEFAULT_RETRY_REASON,
+        min_length=1,
+        max_length=256,
+    )
+
+
+class RetriedToolRunView(StrictModel):
+    tool_run_id: str
+    attempt_no: int
+    status: Literal[
+        "PENDING",
+        "RUNNING",
+        "SUCCEEDED",
+        "PARTIALLY_SUCCEEDED",
+        "FAILED",
+    ]
+    task_input_revision_id: str
+
+
+class ToolRetryData(StrictModel):
+    task_id: str
+    task_status: Literal[
+        "PENDING",
+        "RUNNING",
+        "NEEDS_INPUT",
+        "SUCCEEDED",
+        "PARTIALLY_SUCCEEDED",
+        "FAILED",
+    ]
+    tool_run: RetriedToolRunView
+    result_id: str | None
+    result_status: Literal[
+        "SUCCEEDED",
+        "PARTIALLY_SUCCEEDED",
+        "FAILED",
+    ] | None
+    explanation_id: str | None
+    explanation_status: Literal[
+        "PENDING",
+        "RUNNING",
+        "SUCCEEDED",
+        "FAILED",
+    ] | None
+    idempotency_replayed: bool
+
+
+class ToolRetryResponse(StrictModel):
+    request_id: str
+    data: ToolRetryData
+
+
 @router.get("/{task_id}", response_model=TaskResponse)
 def get_task(
     task_id: str,
@@ -105,5 +165,72 @@ def get_task(
                     failed_outputs=list(result.failed_outputs),
                 )
             ),
+        ),
+    )
+
+
+@router.post(
+    "/{task_id}/tool-runs",
+    response_model=ToolRetryResponse,
+)
+def retry_tool_run(
+    task_id: str,
+    body: ToolRetryRequest,
+    request: Request,
+    actor_context: Annotated[ActorContext, Depends(get_actor_context)],
+    service: Annotated[
+        ToolRetryService,
+        Depends(get_tool_retry_service),
+    ],
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key"),
+    ] = None,
+) -> ToolRetryResponse:
+    try:
+        key = validate_idempotency_key(idempotency_key)
+    except (TypeError, ValueError):
+        raise ApplicationValidationError(task_id=task_id) from None
+    projection = service.retry(
+        actor_context,
+        task_id=task_id,
+        request_id=request.state.request_id,
+        idempotency_key=key,
+        reason=body.reason,
+    )
+    return ToolRetryResponse(
+        request_id=request.state.request_id,
+        data=ToolRetryData(
+            task_id=projection.task.task_id,
+            task_status=projection.task.current_status,
+            tool_run=RetriedToolRunView(
+                tool_run_id=projection.tool_run.tool_run_id,
+                attempt_no=projection.tool_run.attempt_no,
+                status=projection.tool_run.current_status,
+                task_input_revision_id=(
+                    projection.tool_run.task_input_revision_id
+                ),
+            ),
+            result_id=(
+                None
+                if projection.result is None
+                else projection.result.result_id
+            ),
+            result_status=(
+                None
+                if projection.result is None
+                else projection.result.status
+            ),
+            explanation_id=(
+                None
+                if projection.explanation is None
+                else projection.explanation.explanation_id
+            ),
+            explanation_status=(
+                None
+                if projection.explanation is None
+                else projection.explanation.status
+            ),
+            idempotency_replayed=projection.idempotency_replayed,
         ),
     )

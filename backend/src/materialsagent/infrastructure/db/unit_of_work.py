@@ -11,6 +11,7 @@ from materialsagent.domain.ports.unit_of_work import (
     ConversationRepository,
     DatabaseUnavailableError,
     ExplanationRepository,
+    IdempotencyRecordRepository,
     LLMCallRepository,
     MessageRepository,
     PersistenceConflictError,
@@ -26,6 +27,9 @@ from materialsagent.infrastructure.db.asset import SQLAlchemyAssetRepository
 from materialsagent.infrastructure.db.llm_call import SQLAlchemyLLMCallRepository
 from materialsagent.infrastructure.db.explanation import (
     SQLAlchemyExplanationRepository,
+)
+from materialsagent.infrastructure.db.idempotency_record import (
+    SQLAlchemyIdempotencyRecordRepository,
 )
 from materialsagent.infrastructure.db.tool_result import (
     SQLAlchemyResultAssetLinkRepository,
@@ -55,6 +59,7 @@ class SQLAlchemyUnitOfWork:
         self._tool_results: ToolResultRepository | None = None
         self._result_asset_links: ResultAssetLinkRepository | None = None
         self._explanations: ExplanationRepository | None = None
+        self._idempotency_records: IdempotencyRecordRepository | None = None
 
     @property
     def actors(self) -> ActorRepository:
@@ -122,6 +127,12 @@ class SQLAlchemyUnitOfWork:
             raise RuntimeError("UnitOfWork has not been entered.")
         return self._explanations
 
+    @property
+    def idempotency_records(self) -> IdempotencyRecordRepository:
+        if self._idempotency_records is None:
+            raise RuntimeError("UnitOfWork has not been entered.")
+        return self._idempotency_records
+
     def __enter__(self) -> SQLAlchemyUnitOfWork:
         if self.session is not None:
             raise RuntimeError("UnitOfWork is already active.")
@@ -141,6 +152,9 @@ class SQLAlchemyUnitOfWork:
             self.session
         )
         self._explanations = SQLAlchemyExplanationRepository(self.session)
+        self._idempotency_records = SQLAlchemyIdempotencyRecordRepository(
+            self.session
+        )
         return self
 
     def __exit__(
@@ -169,6 +183,7 @@ class SQLAlchemyUnitOfWork:
                 self._tool_results = None
                 self._result_asset_links = None
                 self._explanations = None
+                self._idempotency_records = None
 
     def _active_session(self) -> Session:
         if self.session is None:

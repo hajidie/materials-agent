@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Query, Request, status
+from fastapi import APIRouter, Depends, Header, Query, Request, status
 from pydantic import BaseModel, ConfigDict
 
 from materialsagent.api.dependencies import (
@@ -18,7 +18,11 @@ from materialsagent.application.chat_orchestration import (
 )
 from materialsagent.application.context import ActorContext
 from materialsagent.application.conversations import ConversationService
-from materialsagent.application.errors import ApplicationInternalError
+from materialsagent.application.errors import (
+    ApplicationInternalError,
+    ApplicationValidationError,
+)
+from materialsagent.application.idempotency import validate_idempotency_key
 from materialsagent.application.messages import MessageSubmissionService
 from materialsagent.application.tool_workflow import (
     ToolWorkflowProjection,
@@ -154,7 +158,8 @@ class MessageSubmissionData(StrictModel):
     needs_input: NeedsInputView | None = None
     result_summary: ResultSummaryView | None = None
     explanation: ExplanationView | None = None
-    idempotency_replayed: Literal[False] = False
+    latest_explanation_failure: ExplanationView | None = None
+    idempotency_replayed: bool = False
 
 
 class MessageSubmissionResponse(StrictModel):
@@ -243,7 +248,15 @@ def submit_message(
         ToolWorkflowService | None,
         Depends(get_optional_tool_workflow_service),
     ],
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key"),
+    ] = None,
 ) -> MessageSubmissionResponse:
+    try:
+        validated_idempotency_key = validate_idempotency_key(idempotency_key)
+    except (TypeError, ValueError):
+        raise ApplicationValidationError() from None
     submission = service.prepare_submission(
         actor_context,
         conversation_id=conversation_id,
@@ -251,14 +264,23 @@ def submit_message(
         content_text=body.content_text,
         submission_mode=body.submission_mode,
         target_task_id=body.target_task_id,
+        idempotency_key=validated_idempotency_key,
     )
-    projection = orchestration_service.orchestrate_submission(
-        actor_context,
-        submission,
+    projection = (
+        orchestration_service.load_current_submission(
+            actor_context,
+            submission,
+        )
+        if submission.idempotency_replayed
+        else orchestration_service.orchestrate_submission(
+            actor_context,
+            submission,
+        )
     )
     workflow: ToolWorkflowProjection | None = None
     if (
-        projection.task.task_type == "TOOL_EXECUTION"
+        not submission.idempotency_replayed
+        and projection.task.task_type == "TOOL_EXECUTION"
         and projection.task.current_status == "RUNNING"
     ):
         if tool_workflow_service is None or projection.revision is None:
@@ -270,6 +292,17 @@ def submit_message(
                 projection.revision.task_input_revision_id
             ),
             request_id=projection.user_message.request_id,
+        )
+    elif (
+        submission.idempotency_replayed
+        and projection.task.task_type == "TOOL_EXECUTION"
+        and projection.task.selected_result_id is not None
+    ):
+        if tool_workflow_service is None:
+            raise ApplicationInternalError(task_id=projection.task.task_id)
+        workflow = tool_workflow_service.load_current_for_task(
+            actor_context,
+            task_id=projection.task.task_id,
         )
     message = projection.user_message
     task = workflow.task if workflow is not None else projection.task
@@ -373,5 +406,37 @@ def submit_message(
                     ),
                 )
             ),
+            latest_explanation_failure=(
+                None
+                if (
+                    workflow is None
+                    or workflow.latest_failed_explanation is None
+                    or workflow.latest_failed_explanation_call is None
+                )
+                else ExplanationView(
+                    explanation_id=(
+                        workflow.latest_failed_explanation.explanation_id
+                    ),
+                    result_id=(
+                        workflow.latest_failed_explanation.result_id
+                    ),
+                    status="FAILED",
+                    language=(
+                        workflow.latest_failed_explanation.language
+                    ),
+                    text=None,
+                    error_code=(
+                        workflow.latest_failed_explanation.error_code
+                    ),
+                    safe_error_message=(
+                        workflow.latest_failed_explanation.safe_error_message
+                    ),
+                    llm_call_id=(
+                        workflow.latest_failed_explanation_call.llm_call_id
+                    ),
+                    llm_call_status="FAILED",
+                )
+            ),
+            idempotency_replayed=submission.idempotency_replayed,
         ),
     )

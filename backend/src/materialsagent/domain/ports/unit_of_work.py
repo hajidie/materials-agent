@@ -6,6 +6,7 @@ from materialsagent.domain.models.actor import Actor
 from materialsagent.domain.models.asset import Asset
 from materialsagent.domain.models.conversation import Conversation
 from materialsagent.domain.models.explanation import NaturalLanguageExplanation
+from materialsagent.domain.models.idempotency_record import IdempotencyRecord
 from materialsagent.domain.models.message import Message
 from materialsagent.domain.models.llm_call import LLMCall
 from materialsagent.domain.models.result_asset_link import ResultAssetLink
@@ -29,6 +30,8 @@ class DatabaseUnavailableError(PersistenceError):
 
 class ActorRepository(Protocol):
     def get(self, actor_id: str) -> Actor | None: ...
+
+    def get_for_update(self, actor_id: str) -> Actor | None: ...
 
     def add(self, actor: Actor) -> None: ...
 
@@ -169,6 +172,12 @@ class ToolResultRepository(Protocol):
 
     def get_owned(self, result_id: str, actor_id: str) -> ToolResult | None: ...
 
+    def get_owned_for_update(
+        self,
+        result_id: str,
+        actor_id: str,
+    ) -> ToolResult | None: ...
+
     def get_for_tool_run(self, tool_run_id: str) -> ToolResult | None: ...
 
     def add(self, result: ToolResult) -> None: ...
@@ -207,6 +216,33 @@ class ExplanationRepository(Protocol):
     ) -> NaturalLanguageExplanation | None: ...
 
 
+class IdempotencyRecordRepository(Protocol):
+    def get_by_scope(
+        self,
+        actor_id: str,
+        operation: str,
+        idempotency_key: str,
+    ) -> IdempotencyRecord | None: ...
+
+    def get_by_first_request_id(
+        self,
+        first_request_id: str,
+    ) -> IdempotencyRecord | None: ...
+
+    def get_unbound_supplement_for_task(
+        self,
+        task_id: str,
+    ) -> IdempotencyRecord | None: ...
+
+    def add(self, record: IdempotencyRecord) -> None: ...
+
+    def bind_task_input_revision(
+        self,
+        record: IdempotencyRecord,
+        task_input_revision_id: str,
+    ) -> IdempotencyRecord | None: ...
+
+
 class UnitOfWork(Protocol):
     actors: ActorRepository
     conversations: ConversationRepository
@@ -219,6 +255,7 @@ class UnitOfWork(Protocol):
     tool_results: ToolResultRepository
     result_asset_links: ResultAssetLinkRepository
     explanations: ExplanationRepository
+    idempotency_records: IdempotencyRecordRepository
 
     def __enter__(self) -> Self: ...
 

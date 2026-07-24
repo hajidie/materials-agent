@@ -16,6 +16,9 @@ from materialsagent.infrastructure.db.conversation_task import (
     TaskRow,
 )
 from materialsagent.infrastructure.db.llm_call import LLMCallRow
+from materialsagent.infrastructure.db.idempotency_record import (
+    IdempotencyRecordRow,
+)
 from materialsagent.infrastructure.db.explanation import (
     NaturalLanguageExplanationRow,
 )
@@ -39,6 +42,7 @@ _ = (
     AssetRow,
     ConversationRow,
     LLMCallRow,
+    IdempotencyRecordRow,
     NaturalLanguageExplanationRow,
     MessageRow,
     TaskInputRevisionRow,

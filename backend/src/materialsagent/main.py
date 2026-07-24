@@ -48,6 +48,10 @@ from materialsagent.application.readiness import (
     build_readiness_service,
 )
 from materialsagent.application.tasks import TaskQueryService
+from materialsagent.application.retries import (
+    ExplanationRetryService,
+    ToolRetryService,
+)
 from materialsagent.application.result_service import (
     ResultService,
     ToolResultQueryService,
@@ -299,6 +303,8 @@ def create_app(
     explanation_port: ExplanationPort | None = None,
     explanation_service: ExplanationService | None = None,
     tool_workflow_service: ToolWorkflowService | None = None,
+    tool_retry_service: ToolRetryService | None = None,
+    explanation_retry_service: ExplanationRetryService | None = None,
     m7_tool_chain_enabled: bool | None = None,
 ) -> FastAPI:
     resolved_settings = settings or load_settings()
@@ -360,6 +366,8 @@ def create_app(
     resolved_result_service = result_service
     resolved_explanation_service = explanation_service
     resolved_tool_workflow_service = tool_workflow_service
+    resolved_tool_retry_service = tool_retry_service
+    resolved_explanation_retry_service = explanation_retry_service
     tool_chain_requested = (
         m7_tool_chain_enabled is True
         or (
@@ -444,6 +452,26 @@ def create_app(
                 resolved_explanation_service,
                 clock=clock,
             )
+        if (
+            resolved_tool_retry_service is None
+            and resolved_tool_workflow_service is not None
+            and resolved_tool_execution_service is not None
+            and resolved_tool_result_query_service is not None
+        ):
+            resolved_tool_retry_service = ToolRetryService(
+                resolved_unit_of_work_factory,
+                resolved_tool_execution_service,
+                resolved_tool_workflow_service,
+                resolved_tool_result_query_service,
+            )
+        if (
+            resolved_explanation_retry_service is None
+            and resolved_explanation_service is not None
+        ):
+            resolved_explanation_retry_service = ExplanationRetryService(
+                resolved_unit_of_work_factory,
+                resolved_explanation_service,
+            )
         tool_chain_activated = (
             auto_tool_chain_enabled
             and resolved_tool_workflow_service is not None
@@ -497,6 +525,10 @@ def create_app(
     app.state.asset_service = resolved_asset_service
     app.state.tool_result_query_service = resolved_tool_result_query_service
     app.state.tool_workflow_service = resolved_tool_workflow_service
+    app.state.tool_retry_service = resolved_tool_retry_service
+    app.state.explanation_retry_service = (
+        resolved_explanation_retry_service
+    )
     app.state.m5_dev_routes_enabled = resolved_settings.m5_dev_routes_enabled
 
     @app.middleware("http")

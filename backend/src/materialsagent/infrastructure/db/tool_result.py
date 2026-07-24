@@ -259,6 +259,27 @@ class SQLAlchemyToolResultRepository:
             _raise_safe_persistence_error(error)
         return None if row is None else _result_from_row(row)
 
+    def get_owned_for_update(
+        self,
+        result_id: str,
+        actor_id: str,
+    ) -> ToolResult | None:
+        statement = (
+            select(ToolResultRow)
+            .join(TaskRow, TaskRow.task_id == ToolResultRow.task_id)
+            .where(
+                ToolResultRow.result_id == result_id,
+                ToolResultRow.actor_id == actor_id,
+                TaskRow.actor_id == actor_id,
+            )
+            .with_for_update(of=ToolResultRow)
+        )
+        try:
+            row = self._session.scalar(statement)
+        except SQLAlchemyError as error:
+            _raise_safe_persistence_error(error)
+        return None if row is None else _result_from_row(row)
+
     def get_for_tool_run(self, tool_run_id: str) -> ToolResult | None:
         try:
             row = self._session.scalar(

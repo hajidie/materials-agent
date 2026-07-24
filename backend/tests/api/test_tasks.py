@@ -143,6 +143,7 @@ def test_get_task_returns_persisted_tool_unavailable_terminal_fact(
         conversation_id = conversation.json()["data"]["conversation_id"]
         submitted = client.post(
             f"/api/v1/conversations/{conversation_id}/messages",
+            headers={"Idempotency-Key": "task-query-source"},
             json={
                 "submission_mode": "NEW_TASK",
                 "content_text": "完整合法 Tool 请求",

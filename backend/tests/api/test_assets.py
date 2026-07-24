@@ -165,6 +165,7 @@ def _create_valid_revision(client, api_harness) -> tuple[str, str]:
     assert conversation.status_code == 201
     message = client.post(
         f"/api/v1/conversations/{conversation.json()['data']['conversation_id']}/messages",
+        headers={"Idempotency-Key": "asset-valid-revision"},
         json={
             "submission_mode": "NEW_TASK",
             "content_text": "完整合法 Tool 请求",
