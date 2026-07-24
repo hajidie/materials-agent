@@ -7,25 +7,30 @@
 | 字段 | 当前值 |
 |---|---|
 | 当前阶段 | 阶段 1A |
-| 当前里程碑 | M9：Conversation 统一时间线 API |
-| 当前工作单元 | M9 第一轮统一代码审查修订已完成；等待项目负责人最终代码审查 |
-| 状态 | `M9_TASK_QUERY_REVISION_COMPLETE_AWAITING_PROJECT_OWNER_REVIEW` |
-| 上一已验收工作单元 | M8：幂等、Tool retry、Explanation retry 与失败恢复 |
+| 当前里程碑 | M10：最小 Vue 3 + Vite 前端 |
+| 当前工作单元 | M10-A：前端基础与可靠数据层 |
+| 状态 | `M10_A_PROJECT_OWNER_ACCEPTED_COMMIT_AUTHORIZED` |
+| 上一已验收工作单元 | M10-A：前端基础与可靠数据层 |
 | Pre-M8 stop-loss commit | `891714dd58cf069073a7d4037be43ef66304d0ac` |
 | M8 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M8 acceptance commit | `18005944982ca5191412e06154effc67465ca3a7` |
-| 实际 branch / HEAD | `main` / `18005944982ca5191412e06154effc67465ca3a7` |
-| HEAD parent / subject | `891714dd58cf069073a7d4037be43ef66304d0ac` / `feat: add idempotent task retries` |
-| 暂存区 | 空；未执行 `git add` |
-| 当前工作区 | 仅 M9 allowlist 内未暂存修改 |
+| M9 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
+| M9 acceptance commit | `d7dee06c1f1294b010f64f5c532f5cb276ca53fa` |
+| M10-A acceptance commit | `PENDING` |
+| 实际 branch / HEAD | `main` / `d7dee06c1f1294b010f64f5c532f5cb276ca53fa` |
+| HEAD parent / subject | `18005944982ca5191412e06154effc67465ca3a7` / `feat: add stable conversation timeline` |
+| 暂存区 | M10-A 精确 28 个批准路径 |
+| 当前工作区 | M10-A 已获项目负责人验收并授权 commit；批准内容已精确暂存，commit 尚未创建 |
 | 已确认设计基线 | 五份均未修改 |
 | 历史 migration | `0001`–`0008` 均未修改；当前唯一 head/current 为 `0009_timeline_query_indexes` |
 | `SEM/` | 未修改、未加载或运行真实模型；`SEM_INTEGRITY_OK` |
 | Mock Runtime | 实现和协议未修改 |
-| Git 外部动作 | 未 commit、未 push、未 amend、未 rebase、未 reset、未 stash |
-| M9 | `TASK QUERY REVISION COMPLETE / FINAL PROJECT_OWNER REVIEW AWAITING` |
-| 是否处于项目负责人暂停点 | 是；两个 Important 和 Session close Minor 已修复，停在最终代码审查点，未暂存、未提交、未开始 M10 |
-| 更新时间 | `2026-07-24T15:23:24+08:00` |
+| Git 外部动作 | Commit 已授权但尚未创建；未 push、未 amend、未 rebase、未 reset、未 stash |
+| M10-A | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
+| M10-B | `NOT STARTED` |
+| M11 | `NOT STARTED` |
+| 是否处于项目负责人暂停点 | 是；只允许后续创建已授权的 M10-A 本地验收 commit，不得 push、amend 或进入 M10-B |
+| 更新时间 | `2026-07-24` |
 
 ## M8 已实现内容
 
@@ -230,7 +235,7 @@ Runtime、MinIO 和 Explanation Provider 调用均不在数据库 UoW 内。Back
 - IdempotencyRecord 目前不设置自动过期或清理策略；阶段 1A 本地 MVP 会持续保存这些审计/回放锚点。引入清理必须作为后续明确设计，而不是在 M8 内隐式删除。
 - 回放返回“当前稳定业务投影”而不是逐字节重放历史 HTTP body，因此 task/explanation 的后续合法状态变化会反映在同 key 回放中；资源绑定 ID 保持不变。
 
-## M9 当前执行记录
+## M9 已验收执行记录
 
 - M9-P 基线 gate：`main@18005944982ca5191412e06154effc67465ca3a7`，暂存区与工作区均为空，`git diff --check` 与 `git diff --cached --check` 通过。
 - Docker：PostgreSQL 与 MinIO 均为 healthy；命名 volumes 为 `materialsagent_postgresql_data` 与 `materialsagent_minio_data`，未删除。
@@ -276,20 +281,83 @@ Runtime、MinIO 和 Explanation Provider 调用均不在数据库 UoW 内。Back
 - Timeline 是跨多表的稳定读取投影，但并不冻结两次 HTTP 请求之间的业务状态；单次请求由只读可重复读快照保证一致，后续请求可合法看到 retry 或 Explanation 新事实。
 - PostgreSQL 与 MinIO 之间既有非分布式事务边界仍然存在；M9 只读取已经持久化且通过来源一致性校验的 AVAILABLE Asset，没有扩大或掩盖该风险。
 
+## M10-A 当前执行记录
+
+- 已按实时 Git 修正 M9 为 `COMPLETE / PROJECT_OWNER_ACCEPTED`，验收提交为 `d7dee06c1f1294b010f64f5c532f5cb276ca53fa`。
+- M10-A 开始基线为 `main@d7dee06c1f1294b010f64f5c532f5cb276ca53fa`；开始时工作区与暂存区为空。
+- 已在阶段 1 计划中确认 M10-A/M10-B 拆分，并在 `check-scope.ps1` 中加入仅覆盖本工作单元的 M10 精确 allowlist；管理文件内部 gate 为 `SCOPE_OK M10`、`SEM_INTEGRITY_OK`、两个 diff check 均通过。
+- Node/npm 为 `v24.14.0` / `11.9.0`。直接依赖全部精确锁定：Vue `3.5.40`、Vite `8.1.5`、`@vitejs/plugin-vue` `6.0.8`、TypeScript `6.0.3`、`vue-tsc` `3.3.8`、Vitest `4.1.10`、Vue Test Utils `2.4.11`、jsdom `29.1.1`、`@types/node` `26.1.1`。
+- `npm --prefix frontend ci` 成功，安装 166 packages，audit 为 0 vulnerabilities；存在 dev-only 传递依赖弃用提示：`@vue/test-utils@2.4.11 → js-beautify@1.15.4 → glob@10.5.0`。
+- TDD 红测分别确认 API Client、幂等状态机、轮询协调器和应用级 composable 模块尚不存在；实现后聚焦结果依次为 `24 passed`、`21 passed`、`14 passed`、`30 passed`。最终 `npm --prefix frontend run test -- --run` 为 4 files、`89 passed`、0 failed。
+- `npm --prefix frontend run typecheck` 为 0 errors；`npm --prefix frontend run build` 使用 Vite `8.1.5` 成功构建 17 modules，生成的 `dist` 仅为被忽略的本地产物。
+- 实现了原生 fetch Client、公共响应/错误类型、安全错误投影、写请求 Idempotency-Key、单个 sessionStorage 待定写操作、UNCERTAIN 恢复与同 key/body 手动重试、Timeline `limit=50` 全分页原序原子替换、AbortController + generation 陈旧响应保护、递归 timeout 单轮询协调器和应用级 `useMaterialsAgent`。
+- 最小浏览器验收已通过：Vite 在 `127.0.0.1:4173` 启动，页面显示“材料智能体”“M10-A 前端基础已就绪”“前端数据层已加载”，API base 为 `/api/v1`，mutation 状态为 `IDLE`，控制台 0 warning/error；未触发真实 API 写请求，验收后已停止 dev server。未对 Backend proxy 进行可选的在线只读验证。
+- 最终 `check-scope.ps1 -Milestone M10` 为 `SCOPE_OK M10`；SEM 为 57 files、`total_size_bytes=2043071133`、fingerprint `62bbb0878ed5d659490755e401fba0e3e09f1f36e3a67667ea04227927546b4a`；`git diff --check` 与 `git diff --cached --check` 均为 exit 0。
+- production source 与 `frontend/dist` 对 `object_key`、bucket/MinIO、Runtime token、Timeline signing key、PostgreSQL URL、weight path、用户绝对路径和 `SEM/` 的有界扫描均无命中；无 Backend、五份设计基线、SEM 或 M10-B component diff。
+- 修改文件仅为三个管理文件与 `frontend/` M10-A allowlist 文件：前端环境/包与 TypeScript/Vite 配置、最小 App/CSS、API types/errors/client、三个 composable、测试 setup 和四个测试文件。`node_modules`、`dist`、coverage、其他 lockfile 均未进入 Git 状态。
+- 已知风险：M10-A 仍是最小占位页而非完整产品 UI；手写 TypeScript 类型需要在 Backend 公共契约变化时同步；sessionStorage 的待定恢复只覆盖同一标签页；上述 dev-only `glob@10.5.0` 弃用提示等待上游依赖链更新。
+- 当前只执行 M10-A：前端基础与可靠数据层；M10-B 和 M11 均未开始。
+- 未执行 `git add`、commit、push、amend、rebase、reset、stash、分支或 worktree 操作。
+
+## M10-A 首轮代码审查修订证据
+
+- 首轮结论为 `M10_A_CODE_REVIEW: CHANGES_REQUESTED`；本轮仅修改审查允许的六个生产文件、四个测试文件和本动态进度文件，没有创建新生产文件、修改依赖或进入 M10-B。
+- Critical 1 根因是 POST 与写后 GET reconciliation 位于同一 `try/catch`，导致已确认写入被后续读取失败重新报告为写失败。现已把服务器确认与 best-effort reconciliation 分成两个阶段：POST 成功立即固定 `SUCCEEDED`、清 pending、保存 POST request_id、执行 cache invalidation/补参目标清理；后续 GET 失败只显示固定安全刷新提示且不重新抛出。
+- Critical 2 根因是切换 Conversation ID 时沿用旧 Timeline，目标 Conversation 首次 GET 失败后仍会展示旧 Conversation 数据。现已在真实 ID 切换时立即清空 Timeline；同一 Conversation 的普通 refresh 失败仍保留现有完整 Timeline。
+- 红测：API Client 为 `6 failed, 29 passed`，失败覆盖 GET/Conversation 网络分类和 Asset URL 白名单；幂等状态机为 `7 failed, 21 passed`，覆盖四类 body 校验、255 字符边界和 Unicode control；轮询为 `1 failed, 14 passed`，实际错误为 3 次 poll 而预期 2 次；应用级 composable 为 `13 failed, 30 passed`，覆盖 POST/GET 分离、Conversation 混用、Task history 竞态、UNCERTAIN 保留和 scope dispose；`warnings: unknown[]` 类型红测产生 2 个 `TS2344`。
+- Task history 现按 `task_id` 使用 AbortController + generation；retry invalidation 会 abort/失效旧 GET，较早并发请求不再提前清除较新请求的 loading 状态。
+- API Client 现区分读取网络失败、四类幂等写结果不确定和 Conversation 创建结果不确定；Conversation 创建固定提示先刷新列表避免重复创建，不自动重试。
+- sessionStorage descriptor 已改为 operation-specific 判别联合并按 operation 严格校验 body；损坏记录安全清除且不发送。Idempotency-Key 允许最大 255 字符，并拒绝 Unicode control character。
+- Asset 公共 URL 只接受 `/api/v1/assets/{asset_id}/content` 及其 query；拒绝第三方绝对 URL、protocol-relative、javascript/data 和其他公共路径。绝对 API base 只提供解析 origin，attachment 保留既有 query。
+- 有效 Vue scope dispose 会停止 polling、移除 visibility listener，并 abort Conversation、Timeline 和全部 Task history GET；generation 同时阻止不响应 abort 的迟到响应写回状态。
+- hidden 时会清除 queued poll trigger，恢复 visible 后只执行一次立即 poll。成功后台 GET 不再清除仍需用户处理的 `UNCERTAIN` 提示。
+- Vue 在 `package.json`、`package-lock.json` 和 `node_modules` 三处均为 `3.5.40`；直接依赖版本未修改。`npm ci` 成功，audit 为 0 vulnerabilities，保留既有 dev-only `glob@10.5.0` 上游弃用提示。
+- 修复后聚焦结果为 API Client `36 passed`、幂等状态机 `28 passed`、轮询 `15 passed`、应用级 composable `43 passed`；全量为 4 files、`122 passed`、0 failed。
+- 最终 `npm --prefix frontend run typecheck` 为 0 errors；Vite `8.1.5` build 成功、17 modules；`SCOPE_OK M10`；SEM 57 files、`total_size_bytes=2043071133`、fingerprint `62bbb0878ed5d659490755e401fba0e3e09f1f36e3a67667ea04227927546b4a`；两个 diff check 均为 exit 0。
+- 未发现 `as unknown as`、生产 `any` 或 skipped tests；暂存区为空，未执行 commit、push 或 amend。
+
+## M10-A 最终代码复审修订证据
+
+- 最终复审结论为 `M10_A_FINAL_CODE_REVIEW: CHANGES_REQUESTED`；本轮只处理最后两个 Important 和一个 Minor，没有修改依赖、lockfile、计划、scope、Backend、CORS、设计基线、`SEM/`、Mock Runtime 或 M10-B 文件。
+- 开始前已删除仓库根目录未跟踪审查传输文件 `m10-a-code-review-revision.zip`；随后及最终检查的根目录 `*code-review*.zip` 数量均为 0，Git 状态也没有 zip、`node_modules`、`dist` 或 coverage。
+- 定向红测为 2 files、`8 failed / 81 passed`：Conversation 创建非 JSON 的 HTTP 200/500/503 共 3 项；discard 后旧提示 1 项；Conversation 切换期间 dispose 后 polling 复活 1 项；普通幂等写、pending retry 和 Conversation 创建在 POST 晚于 dispose 成功后仍触发 GET 共 3 项。
+- `loadConversations`、Timeline 两个读取入口、`selectConversation`、Task history 和写后 reconciliation 现有明确 disposed 生命周期门；`selectConversation` 只在 `restartPolling && !disposed` 时恢复 polling，公开 `startPolling` 也不会在已销毁 scope 上启动。切换 B 的迟到响应不写 Timeline，推进 fake timers 60 秒没有新增 Timeline GET，visibility listener 的 add/remove 数量配平。
+- 已发送的写 POST 没有取消或自动重试。服务器明确成功后，幂等状态机仍进入 `SUCCEEDED` 并清除 pending；若 scope 已 dispose，普通写和 pending retry 都不执行 cache invalidation、页面状态写回或 Timeline/Conversation reconciliation。Conversation 创建晚到成功同样直接返回已创建对象且不启动 GET。
+- API Client 在 Conversation 创建响应无法解析 JSON 时，无论 HTTP 200、500 或 503，均抛出固定安全的 `ConversationCreationUncertaintyError`，提示先刷新列表以避免重复创建；普通 GET 和幂等写的非 JSON 响应仍是 `ProtocolResponseError`，不暴露原始 HTML 或响应正文。
+- `discardPendingMutation()` 只有实际丢弃 pending descriptor 时才清除旧 `globalError`；成功丢弃后状态为 `IDLE`、pending 为 `null`、globalError 为 `null`，没有 pending 时保留无关错误。
+- 本轮新增 10 项测试；定向绿测为 2 files、`89 passed`，全量为 4 files、`132 passed`、0 failed。`npm ci` 安装 166 packages、audit 0 vulnerabilities；保留既有 dev-only `glob@10.5.0` 上游弃用提示。typecheck 为 0 errors，Vite `8.1.5` build 成功、17 modules。
+- `SCOPE_OK M10`；`SEM_INTEGRITY_OK` 为 57 files、`total_size_bytes=2043071133`、fingerprint `62bbb0878ed5d659490755e401fba0e3e09f1f36e3a67667ea04227927546b4a`；两个 diff check 均为 exit 0。Vue 在 `package.json`、lockfile 和实际安装三处均为 `3.5.40`。
+- 当前仍为 `main@d7dee06c1f1294b010f64f5c532f5cb276ca53fa`，暂存区为空；未执行 `git add`、commit、push 或 amend，M10-B 和 M11 均未开始。
+
+## M10-A 项目负责人验收
+
+- 项目负责人已验收 M10-A：`COMPLETE / PROJECT_OWNER_ACCEPTED`。
+- M9 保持 `COMPLETE / PROJECT_OWNER_ACCEPTED`，acceptance commit 为 `d7dee06c1f1294b010f64f5c532f5cb276ca53fa`。
+- M10-A acceptance commit 当前为 `PENDING`；项目负责人已授权创建该本地 commit，但本轮尚未创建。
+- 暂存区精确包含 M10-A 的 28 个批准路径；没有 scope 外暂存路径。
+- M10-B 与 M11 均为 `NOT STARTED`；未执行 push 或 amend。
+
 ## 下一步
 
-等待项目负责人最终代码审查。当前不得暂存、commit、push、amend，也不得开始 M10。
+下一步只允许创建已获授权的 M10-A 本地验收 commit；本轮尚不创建 commit，不 push、不 amend，也不进入 M10-B：
 
 ```text
-M9_TASK_QUERY_REVISION_COMPLETE_AWAITING_PROJECT_OWNER_REVIEW
+M10_A_PROJECT_OWNER_ACCEPTED_COMMIT_AUTHORIZED
 
-Original Critical: 0
-Original Important 1: FIXED
-Original Important 2: FIXED
-Session close Minor: FIXED
-Route coupling Minor: DEFERRED
-Commit: NO
+M9:
+COMPLETE / PROJECT_OWNER_ACCEPTED
+Acceptance commit:
+d7dee06c1f1294b010f64f5c532f5cb276ca53fa
+
+M10-A:
+COMPLETE / PROJECT_OWNER_ACCEPTED
+Acceptance commit:
+PENDING
+
+M10-B: NOT STARTED
+Staged paths: 28
+Commit: AUTHORIZED / NOT YET CREATED
 Push: NO
 Amend: NO
-M10: NOT STARTED
+M11: NOT STARTED
 ```

@@ -65,7 +65,7 @@ $globalAllowedPaths = @(
     'docs/progress/phase-1-current-status.md'
 )
 
-# M0-M9 configured milestones/work units have reviewed exact allowlists.
+# M0-M10 configured milestones/work units have reviewed exact allowlists.
 # G0 and otherwise unconfigured recognized milestones are retained so
 # callers receive a stable configuration error until their exact plan allowlist
 # is reviewed and added; this deliberately avoids inventing future scope.
@@ -364,6 +364,36 @@ $milestoneAllowlists = @{
         'backend/tests/api/test_tasks.py'
         'backend/tests/conftest.py'
         'backend/tests/integration/db/conftest.py'
+    )
+    M10 = @(
+        'docs/superpowers/plans/2026-07-17-sem-mvp-phase-1-implementation-plan.md'
+        'scripts/dev/check-scope.ps1'
+        '.env.example'
+        'frontend/.env.example'
+        'frontend/.gitignore'
+        'frontend/.node-version'
+        'frontend/index.html'
+        'frontend/package.json'
+        'frontend/package-lock.json'
+        'frontend/tsconfig.json'
+        'frontend/tsconfig.app.json'
+        'frontend/tsconfig.node.json'
+        'frontend/vite.config.ts'
+        'frontend/src/env.d.ts'
+        'frontend/src/main.ts'
+        'frontend/src/App.vue'
+        'frontend/src/styles.css'
+        'frontend/src/api/types.ts'
+        'frontend/src/api/errors.ts'
+        'frontend/src/api/client.ts'
+        'frontend/src/composables/useIdempotentRequest.ts'
+        'frontend/src/composables/usePolling.ts'
+        'frontend/src/composables/useMaterialsAgent.ts'
+        'frontend/src/test/setup.ts'
+        'frontend/tests/api/client.test.ts'
+        'frontend/tests/composables/idempotent-request.test.ts'
+        'frontend/tests/composables/polling.test.ts'
+        'frontend/tests/composables/materials-agent.test.ts'
     )
 }
 

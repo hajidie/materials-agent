@@ -634,36 +634,105 @@ selected_result_id = null
 
 ## M10：最小 Vue 3 + Vite 前端
 
-**目标：** 在 Mock 后端已稳定后建立最小聊天界面、Task 卡、图片、结果、NEEDS_INPUT、重试和轮询。
+**状态与执行拆分：** M10 明确拆成两个独立负责人验收工作单元：
 
-**用户价值：** 项目负责人无需读 JSON 即可完成主要产品验收。
+1. `M10-A：前端基础与可靠数据层`；
+2. `M10-B：完整最小界面与交互`。
 
-**前置条件：** M9 通过；不得在 Mock 闭环前开始复杂前端。
+M10-A 和 M10-B 分别停在项目负责人验收点。M10-A 获批前不得开始 M10-B；M10-B 获批前不得开始 M11。
 
-**允许修改的文件范围：** `frontend/**`、`.env.example` 前端 API base 变量、前端 tests；仅在发现契约生成缺口时修改 Backend OpenAPI 导出脚本。
+**总目标与用户价值：** M10-A 先建立可测试、可构建且能可靠消费当前公共 API 的 Vue 数据层；M10-B 再在该数据层上建立 Conversation 列表、聊天输入、三类 TimelineItem、Tool Task 状态卡、Result/Asset/Explanation、补参和两类重试。项目负责人最终无需直接阅读 JSON 即可完成主要产品验收。
 
-**明确不做：** 不实现登录、上传、SSE、复杂设计系统、管理后台、模型选择或多 Tool 页面。
+**前置条件：** M9 已由项目负责人验收并提交；M10-A 的实时恢复基线为 `main@d7dee06c1f1294b010f64f5c532f5cb276ca53fa`（`feat: add stable conversation timeline`），工作区和暂存区为空，Node.js 为 `24.14.0`，npm 为 `11.9.0`。
 
-**界面：** Conversation 列表、聊天输入、三类 TimelineItem、Tool Task 状态卡、missing fields、Result/Asset/Explanation、Tool/Explanation retry 按钮。
+### M10 已确认技术决定
 
-**实现步骤：**
+1. 使用 Vue 3、Vite、TypeScript、Vitest、Vue Test Utils、jsdom、Composition API、普通 CSS、npm 和 `package-lock.json`。
+2. 不使用 Pinia、Vue Router、Axios、Zod、MSW、Tailwind CSS、UI 组件库、Redux 风格状态库、复杂实时库、OpenAPI 类型生成或 Playwright。
+3. 公共 API 类型使用手写严格 TypeScript 类型；动态 Tool 数据使用 `Record<string, unknown>`，不使用 `any`。
+4. API Client 使用原生 `fetch`，开发环境通过 Vite `/api` 代理访问 Backend；M10 默认不修改 Backend CORS。
+5. 写操作在 fetch 前持久化幂等描述符；网络或协议结果不确定时以 `sessionStorage` 保存原 operation、resource、body 和 key，不自动重放，只允许用户用原 key 重试或显式放弃。
+6. 全局只允许一个 `SENDING` 或 `UNCERTAIN` 待定写操作。
+7. 页面只使用一个轮询协调器；递归 `setTimeout` 保证同一时刻最多一个 GET poll，页面隐藏时暂停，重新可见时立即刷新。
+8. Timeline 按 Backend 返回数组顺序逐页追加，不调用 `sort`，不根据 `updated_at`、完成时间或 Task 状态重排。
+9. Timeline 使用 cursor 顺序读取全部页面；任何一页失败都不替换现有完整 Timeline，重复 cursor 或缺少必需 next cursor 视为安全协议错误。
+10. Task GET 只在用户展开历史或明确需要活动 Task 详情时读取，不在每轮 Timeline poll 中为所有卡片查询。
+11. Conversation/Timeline GET 同时使用 `AbortController` 和 generation token，防止旧 Conversation 的迟到响应覆盖新选择。
+12. Asset 图片只使用公共 `content_url`；inline 展示，下载时安全追加 `disposition=attachment`，不构造 MinIO URL。
 
-1. 先写 API client 类型、Task 卡状态和幂等 key 保留测试。
-2. 创建 Vue/Vite/TypeScript 最小项目，固定 Node.js 版本，提交 lockfile，禁止未锁定浮动依赖；API base 只来自启动配置。
-3. 实现提交时持有 Idempotency-Key，网络结果不确定时复用同 key。
-4. 使用 Task/timeline 轮询最终事实；图片 inline，下载时显式 attachment。
+### M10-A：前端基础与可靠数据层
 
-**自动化测试与四类场景：** 成功显示知识回答和 Tool 结果；输入错误空消息/NEEDS_INPUT目标缺失在 UI 阻止或展示；依赖失败网络/Runtime/Explanation错误保留可用结果；重复点击和网络重试复用 key，不重复创建卡片。
+**M10-A 精确 allowlist：**
 
-运行：`npm --prefix frontend install`；`npm --prefix frontend run test -- --run`；`npm --prefix frontend run build`
+- 实施管理：本计划、`docs/progress/phase-1-current-status.md`、`scripts/dev/check-scope.ps1`、根 `.env.example`（仅当它继续承担仓库级环境变量索引时）。
+- 配置与骨架：`frontend/.env.example`、`frontend/.gitignore`、`frontend/.node-version`、`frontend/index.html`、`frontend/package.json`、`frontend/package-lock.json`、`frontend/tsconfig.json`、`frontend/tsconfig.app.json`、`frontend/tsconfig.node.json`、`frontend/vite.config.ts`、`frontend/src/env.d.ts`、`frontend/src/main.ts`、`frontend/src/App.vue`、`frontend/src/styles.css`。
+- API 与状态层：`frontend/src/api/types.ts`、`frontend/src/api/errors.ts`、`frontend/src/api/client.ts`、`frontend/src/composables/useIdempotentRequest.ts`、`frontend/src/composables/usePolling.ts`、`frontend/src/composables/useMaterialsAgent.ts`。
+- 测试：`frontend/src/test/setup.ts`、`frontend/tests/api/client.test.ts`、`frontend/tests/composables/idempotent-request.test.ts`、`frontend/tests/composables/polling.test.ts`、`frontend/tests/composables/materials-agent.test.ts`。
 
-预期：测试 0 failed；production Vite build 成功；Node 版本和 lockfile 已固定；bundle 中不含 Runtime URL、Token、object_key 或 MinIO secret。
+**M10-A 明确不做：** 不创建 `frontend/src/components/**`、`frontend/src/views/**`、`frontend/src/stores/**`、`frontend/src/router/**`、`frontend/public/**`、`frontend/src/assets/**` 或 `frontend/README.md`；不实现完整产品界面、浏览器 E2E、登录、上传、SSE、WebSocket；不修改 Backend、CORS、五份设计基线、`SEM/`、Mock Runtime 或 M11 文件。
 
-**人工验收步骤：** `npm --prefix frontend run dev -- --host 127.0.0.1`；浏览器完成知识问答、Tool、补参、两类重试、图片查看/下载和错误场景。
+**M10-A 实现步骤：**
 
-**失败时回退：** 前端回到上一可构建提交；Backend API/M9 时间线继续可用，禁止为前端临时绕过 API 所有权或契约。
+1. 先细化本节、为 M10-A 配置精确 scope、修正 M9 验收提交并把动态状态置为 `M10_A_IN_PROGRESS`；通过 scope、SEM 和 Git 内部 gate 后才创建前端。
+2. 查询 npm 官方 registry 的稳定版本、engines 与 peer dependencies，选择支持 Node.js 24.14.0 的兼容组合；所有直接依赖使用精确版本，固定 `packageManager=npm@11.9.0`、Node `24.14.x`、npm `11.9.x`，生成并用 `npm ci` 验证 lockfile。
+3. 创建 Vue/Vite/TypeScript/Vitest 最小骨架和安全环境配置；Vite 使用 `/api` 代理且只接受 `http/https` Backend origin，production bundle 不嵌入代理 origin。
+4. 先写并运行 API Client 红测，再实现手写公共类型、有界安全错误、原生 fetch Client、公共 Asset URL 和 attachment helper。
+5. 先写并运行幂等状态红测，再实现 `sessionStorage` descriptor、`SENDING/SUCCEEDED/UNCERTAIN/BUSINESS_FAILED` 状态、原 key 重试和显式放弃。
+6. 先写并运行轮询红测，再实现递归 timer、可见性恢复、单并发、stop/abort 和 triggerNow 协调。
+7. 先写并运行 `useMaterialsAgent` 红测，再实现 Conversation 分页、Timeline 全分页、服务端顺序、generation token、显式 Task history、补参目标和四类幂等写操作。
+8. 全量运行 `npm ci`、typecheck、Vitest 和 production build；扫描源码与 `dist`，运行 scope、SEM 与 Git 审计；全部通过后把状态更新为 `M10_A_COMPLETE_AWAITING_PROJECT_OWNER_REVIEW` 并停止。
 
-**完成证据：** 测试/build 输出、关键页面截图、Network 响应检查、重复点击资源计数、diff 检查。未来建议提交：`feat: add minimal chat frontend`。
+**M10-A 验收命令：**
+
+```powershell
+npm --prefix frontend ci
+npm --prefix frontend run typecheck
+npm --prefix frontend run test -- --run
+npm --prefix frontend run build
+powershell -ExecutionPolicy Bypass -File scripts/dev/check-scope.ps1 -Milestone M10
+powershell -ExecutionPolicy Bypass -File scripts/dev/check-sem-integrity.ps1
+git diff --check
+git diff --cached --check
+git status --short --branch
+git diff --stat
+git diff --name-only
+```
+
+预期：TypeScript 0 errors、Vitest 0 failed、production Vite build 成功、`SCOPE_OK M10`、`SEM_INTEGRITY_OK`、暂存区为空；无 Backend、五份设计基线、`SEM/`、M10-B 组件或内部配置 diff；`dist` 不含 Runtime/MinIO/object_key/Secret/绝对路径。
+
+**M10-A 人工验收：** 临时在 `127.0.0.1` 启动 Vite，只验证最小占位页可打开、Vue/CSS 正常、控制台无启动错误且页面无 Secret/内部地址；如 Backend 已运行，只允许通过代理做安全只读 GET。验收后停止 dev server，不留下后台进程。
+
+### M10-B：完整最小界面与交互
+
+**前置条件与范围门：** 只有项目负责人验收 M10-A 并明确批准 M10-B 后才能开始。开始前必须把 `check-scope.ps1` 的 M10 allowlist 从当前 M10-A 范围按本节精确扩展；本轮 M10-A 不提前开放这些路径。
+
+**M10-B 精确 allowlist：**
+
+- 实施管理：本计划、`docs/progress/phase-1-current-status.md`、`scripts/dev/check-scope.ps1`。
+- 已有页面入口：`frontend/src/App.vue`、`frontend/src/styles.css`。
+- 正式组件：`frontend/src/components/ConversationSidebar.vue`、`frontend/src/components/ConversationList.vue`、`frontend/src/components/TimelineList.vue`、`frontend/src/components/UserMessageItem.vue`、`frontend/src/components/AssistantMessageItem.vue`、`frontend/src/components/ToolTaskCard.vue`、`frontend/src/components/StructuredResult.vue`、`frontend/src/components/AssetGallery.vue`、`frontend/src/components/TaskHistory.vue`、`frontend/src/components/ChatComposer.vue`、`frontend/src/components/GlobalErrorNotice.vue`。
+- 组件测试：`frontend/tests/App.test.ts`、`frontend/tests/components/conversation-sidebar.test.ts`、`frontend/tests/components/timeline-list.test.ts`、`frontend/tests/components/tool-task-card.test.ts`、`frontend/tests/components/structured-result.test.ts`、`frontend/tests/components/asset-gallery.test.ts`、`frontend/tests/components/task-history.test.ts`、`frontend/tests/components/chat-composer.test.ts`、`frontend/tests/components/global-error-notice.test.ts`。
+
+M10-B 默认不新增依赖、不修改 M10-A API/composable 行为、不修改 Backend/CORS；如验收测试证明数据层存在实现缺陷，必须先停止并由项目负责人明确扩大精确路径。
+
+**M10-B 功能：** Conversation Sidebar/List、三类 TimelineItem、Tool Task 当前状态与折叠历史、NEEDS_INPUT 明确目标补充、结构化 Result、Asset inline/attachment、Explanation 与最新失败、Tool retry、Explanation retry、Chat Composer、全局安全错误和单轮询状态。不得在组件中重建 Timeline 事实、重排服务端数组、猜测 supplement target 或显示原始 JSON。
+
+**M10-B 验收命令：**
+
+```powershell
+npm --prefix frontend ci
+npm --prefix frontend run typecheck
+npm --prefix frontend run test -- --run
+npm --prefix frontend run build
+powershell -ExecutionPolicy Bypass -File scripts/dev/check-scope.ps1 -Milestone M10
+powershell -ExecutionPolicy Bypass -File scripts/dev/check-sem-integrity.ps1
+git diff --check
+git diff --cached --check
+```
+
+人工验收使用 Mock Backend 在浏览器完成知识问答、Tool、补参、两类重试、图片查看/下载和安全错误场景；确认重复点击/不确定网络结果复用同 key、旧 Tool 卡不移动、可用部分结果不丢失。M10-B 最终停在项目负责人验收点，未来建议提交：`feat: add minimal chat frontend`；未经批准不得 commit 或开始 M11。
+
+**失败时回退：** 前端保持上一可构建工作单元；Backend API/M9 时间线继续可用，禁止为前端临时绕过 API 所有权、幂等、排序或错误契约。
 
 ## M11：阶段 1A 完整 Mock 端到端验收
 
