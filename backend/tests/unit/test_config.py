@@ -294,3 +294,58 @@ def test_absent_runtime_configuration_keeps_adapter_disabled() -> None:
 
     assert parse_zta35g_runtime_config(settings) is None
     assert settings.m5_dev_routes_enabled is False
+
+
+def test_timeline_cursor_signing_key_is_optional_and_secret_safe() -> None:
+    from materialsagent.infrastructure.config import load_settings
+
+    absent = load_settings({})
+    secret = "timeline-signing-key-with-at-least-32-bytes"
+    configured = load_settings({"TIMELINE_CURSOR_SIGNING_KEY": secret})
+
+    assert absent.timeline_cursor_signing_key is None
+    assert configured.timeline_cursor_signing_key is not None
+    assert (
+        configured.timeline_cursor_signing_key.get_secret_value()
+        == secret
+    )
+    assert secret not in repr(configured)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "short",
+        " timeline-signing-key-with-at-least-32-bytes",
+        "timeline-signing-key-with-at-least-32-bytes ",
+        "timeline-signing-key-with-at-least-32-\nbytes",
+        "timeline-signing-key-with-at-least-32-\x00bytes",
+    ],
+)
+def test_invalid_timeline_cursor_signing_key_is_safely_rejected(
+    value: str,
+) -> None:
+    from materialsagent.infrastructure.config import (
+        ConfigurationError,
+        load_settings,
+    )
+
+    with pytest.raises(
+        ConfigurationError,
+        match=r"^Invalid application configuration\.$",
+    ) as exc_info:
+        load_settings({"TIMELINE_CURSOR_SIGNING_KEY": value})
+
+    if value:
+        assert value not in str(exc_info.value)
+
+
+def test_timeline_cursor_signing_key_length_is_measured_in_utf8_bytes() -> None:
+    from materialsagent.infrastructure.config import load_settings
+
+    value = "密钥" * 6
+    settings = load_settings({"TIMELINE_CURSOR_SIGNING_KEY": value})
+
+    assert settings.timeline_cursor_signing_key is not None
+    assert settings.timeline_cursor_signing_key.get_secret_value() == value

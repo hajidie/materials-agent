@@ -132,11 +132,26 @@ class APITestHarness:
         **app_overrides: Any,
     ) -> TestClient:
         from materialsagent.application.context import ActorContext
+        from materialsagent.application.tasks import TaskQueryService
+        from materialsagent.application.timeline import (
+            TimelineQueryService,
+        )
+        from materialsagent.application.timeline_cursor import (
+            TimelineCursorCodec,
+        )
+        from materialsagent.infrastructure.db.timeline_query import (
+            SQLAlchemyTimelineQueryRepository,
+        )
         from materialsagent.main import create_app
+        from pydantic import SecretStr
 
         raise_server_exceptions = bool(
             app_overrides.pop("raise_server_exceptions", False)
         )
+        configure_timeline = bool(
+            app_overrides.pop("configure_timeline", True)
+        )
+        query_repository = SQLAlchemyTimelineQueryRepository(self.engine)
         options: dict[str, Any] = {
             "settings": self.settings,
             "readiness_service": ReadinessService(
@@ -147,7 +162,17 @@ class APITestHarness:
             "actor_context": ActorContext(actor_id=actor_id, user_id=None),
             "clock": lambda: BASE_TIME.replace(hour=1),
             "m7_tool_chain_enabled": False,
+            "task_query_service": TaskQueryService(query_repository),
         }
+        if configure_timeline:
+            options["timeline_query_service"] = TimelineQueryService(
+                query_repository,
+                TimelineCursorCodec(
+                    SecretStr(
+                        "api-test-timeline-signing-key-at-least-32-bytes"
+                    )
+                ),
+            )
         options.update(app_overrides)
         return TestClient(
             create_app(**options),

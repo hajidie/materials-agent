@@ -16,6 +16,7 @@ from materialsagent.api.routes.conversations import (
 from materialsagent.api.routes.assets import router as assets_router
 from materialsagent.api.routes.health import router as health_router
 from materialsagent.api.routes.tasks import router as tasks_router
+from materialsagent.api.routes.timeline import router as timeline_router
 from materialsagent.api.routes.tools import router as tools_router
 from materialsagent.api.routes.tool_results import (
     router as tool_results_router,
@@ -48,6 +49,8 @@ from materialsagent.application.readiness import (
     build_readiness_service,
 )
 from materialsagent.application.tasks import TaskQueryService
+from materialsagent.application.timeline import TimelineQueryService
+from materialsagent.application.timeline_cursor import TimelineCursorCodec
 from materialsagent.application.retries import (
     ExplanationRetryService,
     ToolRetryService,
@@ -86,6 +89,9 @@ from materialsagent.infrastructure.db.session import (
     create_session_factory,
 )
 from materialsagent.infrastructure.db.unit_of_work import SQLAlchemyUnitOfWork
+from materialsagent.infrastructure.db.timeline_query import (
+    SQLAlchemyTimelineQueryRepository,
+)
 from materialsagent.infrastructure.logging import configure_logging
 from materialsagent.infrastructure.llm.mock import (
     MockChatOrchestrationAdapter,
@@ -292,6 +298,7 @@ def create_app(
     chat_orchestration_port: ChatOrchestrationPort | None = None,
     chat_orchestration_service: ChatOrchestrationService | None = None,
     task_query_service: TaskQueryService | None = None,
+    timeline_query_service: TimelineQueryService | None = None,
     tool_registry: StaticToolRegistry | None = None,
     tool_catalog_service: ToolCatalogService | None = None,
     tool_execution_service: ToolExecutionService | None = None,
@@ -330,6 +337,11 @@ def create_app(
             )
         except ConfigurationError:
             owned_engine = None
+    owned_query_repository = (
+        SQLAlchemyTimelineQueryRepository(owned_engine)
+        if owned_engine is not None
+        else None
+    )
 
     resolved_actor_context = actor_context
     if resolved_actor_context is None:
@@ -345,6 +357,7 @@ def create_app(
     resolved_message_submission_service = message_submission_service
     resolved_chat_orchestration_service = chat_orchestration_service
     resolved_task_query_service = task_query_service
+    resolved_timeline_query_service = timeline_query_service
     resolved_tool_registry = tool_registry
     runtime_config = parse_zta35g_runtime_config(resolved_settings)
     if resolved_tool_registry is None:
@@ -397,10 +410,6 @@ def create_app(
                 clock=clock,
                 id_factory=id_factory,
                 title_generator=title_generator,
-            )
-        if resolved_task_query_service is None:
-            resolved_task_query_service = TaskQueryService(
-                resolved_unit_of_work_factory
             )
         if resolved_tool_execution_service is None:
             resolved_tool_execution_service = ToolExecutionService(
@@ -494,6 +503,24 @@ def create_app(
                     enabled=tool_chain_activated,
                 )
             )
+    if (
+        resolved_task_query_service is None
+        and owned_query_repository is not None
+    ):
+        resolved_task_query_service = TaskQueryService(
+            owned_query_repository
+        )
+    if (
+        resolved_timeline_query_service is None
+        and owned_query_repository is not None
+        and resolved_settings.timeline_cursor_signing_key is not None
+    ):
+        resolved_timeline_query_service = TimelineQueryService(
+            owned_query_repository,
+            TimelineCursorCodec(
+                resolved_settings.timeline_cursor_signing_key
+            ),
+        )
 
     request_logger = configure_logging(resolved_settings.log_level)
     request_logger.disabled = False
@@ -519,6 +546,7 @@ def create_app(
     app.state.message_submission_service = resolved_message_submission_service
     app.state.chat_orchestration_service = resolved_chat_orchestration_service
     app.state.task_query_service = resolved_task_query_service
+    app.state.timeline_query_service = resolved_timeline_query_service
     app.state.tool_catalog_service = resolved_tool_catalog_service
     app.state.tool_execution_service = resolved_tool_execution_service
     app.state.tool_run_query_service = resolved_tool_run_query_service
@@ -563,6 +591,7 @@ def create_app(
     app.include_router(assets_router)
     app.include_router(conversations_router)
     app.include_router(tasks_router)
+    app.include_router(timeline_router)
     app.include_router(tools_router)
     app.include_router(tool_results_router)
     app.add_exception_handler(ApplicationError, _application_error_handler)

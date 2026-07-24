@@ -8,6 +8,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -124,6 +125,12 @@ class TaskRow(Base):
             "OR started_at IS NULL "
             "OR completed_at >= started_at",
             name="ck_task_completed_at_not_before_started_at",
+        ),
+        Index(
+            "ix_task_conversation_created",
+            "conversation_id",
+            "created_at",
+            "task_id",
         ),
     )
 
@@ -242,6 +249,12 @@ class MessageRow(Base):
             name="ck_message_template_source_role",
         ),
         UniqueConstraint("llm_call_id", name="uq_message_llm_call_id"),
+        Index(
+            "ix_message_conversation_created",
+            "conversation_id",
+            "created_at",
+            "message_id",
+        ),
     )
 
     message_id: Mapped[str] = mapped_column(Text, primary_key=True)

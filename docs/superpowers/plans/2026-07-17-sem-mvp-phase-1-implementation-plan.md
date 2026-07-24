@@ -581,36 +581,56 @@ selected_result_id = null
 
 ## M9：Conversation 统一时间线 API
 
-**目标：** 组装 USER_MESSAGE、ASSISTANT_MESSAGE、TOOL_TASK 判别联合，使用稳定锚点和游标分页。
+**状态与执行拆分：** 项目负责人已批准在同一 Codex 对话内依次完成 `M9-P → M9-A → 内部 gate → M9-B → 全量验证`；M9-P 只固化本节方案、scope allowlist 和动态状态，M9-A 完成查询基础，内部 gate 通过后才允许接入公共路由与扩展 Task GET。
 
-**用户价值：** 用户能在一条历史中看见知识问答和 Tool 卡，重试不会把旧卡移动或重复展示结果。
+**目标与用户价值：** 由 Backend 组装 `USER_MESSAGE`、`ASSISTANT_MESSAGE`、`TOOL_TASK` 判别联合。普通 `KNOWLEDGE_QA` 和 `task_type=NULL` Task 的消息作为顶层 Message；`TOOL_EXECUTION` Task 只形成一个 Tool Task 卡，其初始 UserMessage 不重复成为顶层项。用户能在一条历史中看见知识问答和 Tool 卡，重试不会把旧卡移动或重复展示结果。
 
-**前置条件：** M8 项目负责人检查点通过。
+**前置条件：** M8 项目负责人检查点已通过，实时基线为 `main@18005944982ca5191412e06154effc67465ca3a7`（`feat: add idempotent task retries`），工作区和暂存区为空。
 
-**允许修改的文件范围：** timeline query service/views、Conversation timeline route、查询 Repository、M9 tests。
+**允许修改的文件范围（精确 allowlist）：**
 
-**明确不做：** 不建 TimelineItem 表，不复制 Result/Explanation 到 Message，不实现 SSE，不让前端自行排序。
+- 计划、状态、scope 与安全配置示例：本计划、`docs/progress/phase-1-current-status.md`、`scripts/dev/check-scope.ps1`、`.env.example`。
+- 迁移：`backend/alembic/versions/0009_add_timeline_query_indexes.py`。
+- 生产代码：`backend/src/materialsagent/application/timeline.py`、`backend/src/materialsagent/application/timeline_cursor.py`、`backend/src/materialsagent/application/tasks.py`、`backend/src/materialsagent/domain/ports/timeline_query.py`、`backend/src/materialsagent/infrastructure/config.py`、`backend/src/materialsagent/infrastructure/db/conversation_task.py`、`backend/src/materialsagent/infrastructure/db/timeline_query.py`、`backend/src/materialsagent/api/dependencies.py`、`backend/src/materialsagent/api/routes/timeline.py`、`backend/src/materialsagent/api/routes/tasks.py`、`backend/src/materialsagent/main.py`。
+- 测试：`backend/tests/unit/test_config.py`、`backend/tests/unit/test_timeline_cursor.py`、`backend/tests/unit/test_timeline_sort.py`、`backend/tests/unit/test_task_query.py`、`backend/tests/contract/test_timeline_contract.py`、`backend/tests/integration/db/test_migrations.py`、`backend/tests/integration/db/test_timeline_query.py`、`backend/tests/api/conftest.py`、`backend/tests/api/test_timeline.py`、`backend/tests/api/test_tasks.py`。
+- 仅在建立必要共享夹具时允许：`backend/tests/conftest.py`、`backend/tests/integration/db/conftest.py`。
 
-**接口：** `anchor_at=initial UserMessage.created_at`，回退 Task.created_at；顶层 `(anchor_at,type_rank,item_id)`；Task 内部按来源稳定排序。
+**明确不做：** 不建 TimelineItem 表，不复制 Result/Explanation 到 Message，不实现 SSE/SSE 游标，不让前端自行排序；不修改五份设计基线、`0001`–`0008`、Tool/重试/写路径、`SEM/`、Mock Runtime 或前端；不引入 Redis、Worker、登录、多 Tool、真实模型或新的外部调用；不执行 `git add`、commit、push、amend，也不开始 M10。
 
-**实现步骤：**
+### M9-P：实施方案、scope 和动态状态
 
-1. 写同时间戳排序、分页边界、Task updated、Tool/Explanation retry、历史折叠和所有权测试。
-2. 实现查询投影和有签名/防篡改的不透明游标。
-3. 默认返回 selected run、attempt_count、has_history；完整历史由 Task GET。
-4. 限制 page size、Result data 与 input thread 大小。
+1. 将本节固化为完整 M9 方案；为 M9 增加精确 allowlist，保持 M0–M8 allowlist 不变；按实时 Git 更新动态状态。
+2. 运行 `check-scope.ps1 -Milestone M9`、`git diff --check`，确认 M9-A 尚未开始后进入测试先行。
 
-**自动化测试与四类场景：** 成功混合时间线；输入错误篡改游标=受控 400/422；依赖失败查询事务失败=安全 503/500；相同游标重放结果稳定，重试后旧 anchor/分页位置不变。
+### M9-A：配置、签名游标、排序与专用查询基础
 
-运行：`conda run -n materialsagent-backend python -m pytest backend/tests/unit/test_timeline_sort.py backend/tests/integration/db/test_timeline_query.py backend/tests/api/test_timeline.py -q`
+1. 先写失败测试，再实现 `TIMELINE_CURSOR_SIGNING_KEY`：配置字段为可选 `SecretStr`，缺失不影响其他 API；Timeline service 缺失时由依赖返回安全 503。有效 key 必须原样非空、无首尾空白/控制字符，UTF-8 至少 32 bytes；不提供默认或回退 secret，`.env.example` 只给安全占位说明。
+2. 游标固定为 canonical JSON（`sort_keys=True`、紧凑分隔、`allow_nan=False`）→ UTF-8 → HMAC-SHA256 → base64url，不透明 token；payload 精确包含 `version=1`、`conversation_id`、UTC RFC3339 `anchor_at`、`item_type_rank`、`item_id`。使用 `compare_digest`，最大 token 2048 字符、解码 JSON 最大 512 bytes；任何格式、签名、版本、跨 Conversation、非 UTC 或多余/缺失字段问题统一抛 `InvalidCursorError`，公共 422 文案为“分页游标无效。”。
+3. 稳定顶层 key 为 `(anchor_at, item_type_rank, item_id)`，rank 固定 USER=10、ASSISTANT=20、TOOL_TASK=30。Tool Task `anchor_at` 取该 Task 最早 USER Message 的 `created_at`，不存在才回退 `Task.created_at`；重试只改变卡片聚合内容，不移动 anchor。
+4. 审计实际索引；若缺失，新增唯一 head `0009_timeline_query_indexes`（`down_revision=0008_idempotency_record`），只为 Message `(conversation_id, created_at, message_id)` 与 Task `(conversation_id, created_at, task_id)` 建索引，并同步 ORM metadata；覆盖 `0008 → 0009 → 0008 → 0009` 往返与 Alembic check。
+5. 新建独立 domain Timeline Query Port 和 SQLAlchemy adapter。每次读取使用一个短 `REPEATABLE READ READ ONLY` 事务，不进入普通写 UoW、不加锁、不提交写入、不调用 Runtime/MinIO/LLM。
+6. 使用两阶段批量查询：第一阶段以 UNION/CTE 在数据库完成 keyset 排序、`limit+1` 和 cursor 边界；第二阶段按本页 ID 批量读取 Task、Message、Revision、全部 ToolRun、selected Result、ResultAssetLink/Asset、Explanation/LLMCall。`limit=1` 与 `limit=20` 的 SELECT 数相同或固定常数，目标不超过 10，禁止按卡片 N+1 和全量 Python 排序/切片。
+7. 应用服务组装安全投影：input thread 为初始消息加最新最多 50 条其余消息并恢复升序，同时返回 count/truncated；卡片只展开 selected run/selected result，保留 `attempt_count`/`has_history`；ToolRun diagnostics 仅允许固定安全字段；Result 只包含受控字段；Asset 仅返回同 selected Result link、同 selected run、`AVAILABLE` 的安全 URL，按 `(artifact_order, asset_id)` 排序；Explanation 复用 `select_explanation_attempts()`，只输出受控成功正文或安全失败摘要。
+8. 对 Conversation/Task/Message Actor 与 Conversation、selected Run/Result/output sets、ResultAssetLink/Asset/Run/Task、Explanation/LLMCall/Result/Task 来源做严格一致性校验。所有损坏视为内部数据完整性错误，安全 500；不得误报 422、不得泄漏内部路径、对象 key、model bundle、provider 原始信息或 traceback。
+9. M9-A gate 必须确认游标、排序、migration、数据库投影、只读事务、固定查询数、完整性矩阵和 scope 全绿；同时明确公共 timeline route 和 Task GET 扩展仍未开始。
 
-预期：0 failed；Tool初始 UserMessage不重复为顶层项；object_key/model_bundle 不出现。
+### M9-B：公共 Timeline API 与 Task GET 扩展
 
-**人工验收步骤：** 创建知识问答与 Tool Task，分页读取；重试 Tool/Explanation 后用旧 cursor 复查卡片位置。
+1. 先写 Timeline API 与 contract 失败测试。新增 `GET /api/v1/conversations/{conversation_id}/timeline`，`limit` 默认 20、范围 1–50，游标为上述签名 token；响应模型全部 `extra="forbid"`，使用 `item_type` 判别 USER_MESSAGE、ASSISTANT_MESSAGE、TOOL_TASK union；顶层 Message 与 Tool 初始 UserMessage 互斥。
+2. route 只调用 Timeline application service；依赖注入在有数据库 engine 和有效 signing key 时构造 service，缺少 key 仅让 Timeline 返回 503，不影响 health/Conversation/Task 等既有接口。非法/篡改/跨 Conversation cursor 为安全 422；其他 Actor 与不存在 Conversation 均为一致安全 404；数据库不可用为 503，数据损坏为 500。
+3. 扩展 `GET /api/v1/tasks/{task_id}`，保持既有字段并增加 `anchor_at`、`needs_input`、`tool_run_count`、按 `(created_at, attempt_no, tool_run_id)` 排序的全部 `tool_runs`、selected Result 安全摘要、Explanation 选择与最近失败摘要。整个 Task projection 通过专用 TaskDetailQueryPort，在单个短 REPEATABLE READ READ ONLY 查询事务中读取并组装 TaskDetailQuerySnapshot；不进入普通写 UoW，不加锁、不写数据库，也不调用任何外部 adapter。完整性损坏为安全 500，所有权隔离仍为 404。
+4. 回归 OpenAPI/contract，确保三个判别 item、严格 schema、UTC `Z` 时间、安全字段和旧 API 兼容性。
 
-**失败时回退：** 保留 Task/Result 详情 API，暂时关闭 timeline 路由；不改变底层事实。
+### 验证、人工验收与停止点
 
-**完成证据：** 排序夹具、分页前后快照、响应大小、API Schema、diff 检查。未来建议提交：`feat: add stable conversation timeline`。
+1. 聚焦运行 cursor/config/sort/task unit、Timeline DB、Timeline API/contract/Task API；再运行全部 contract、全部 Backend、Mock Runtime、`pip check`、`compileall`。
+2. 运行 Alembic heads/upgrade/current/check、`0009 → 0008 → 0009` 往返并确认两个索引；运行 M9 scope、SEM integrity 与完整 Git 审计。
+3. 使用受控 fixture/一次性数据库走真实 HTTP：混合知识问答/Tool 时间线、同时间戳顺序、分页、旧 cursor 在 Tool/Explanation retry 后 anchor 不变、Task 全历史、所有权/篡改/缺 key/数据损坏安全映射；不得为验收触发昂贵真实 Tool。
+4. 最终更新动态状态为 `M9 COMPLETE / PROJECT_OWNER_REVIEW AWAITING`，保留未暂存改动，停止在项目负责人验收点；不执行提交或 M10。
+
+**失败时回退：** 保留 Task/Result 详情 API，暂时关闭 timeline 路由；不改变底层事实。迁移失败时回到 `0008_idempotency_record` 并停止，不修改历史 migration。
+
+**完成证据：** 排序与分页夹具、批量查询计数与只读隔离级别、完整性损坏矩阵、API/OpenAPI schema、迁移往返、人工 HTTP 快照、全量测试、scope/SEM/Git diff。未来建议提交（仅供负责人后续批准）：`feat: add stable conversation timeline`。
 
 ## M10：最小 Vue 3 + Vite 前端
 

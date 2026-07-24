@@ -2,9 +2,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+import unicodedata
 from urllib.parse import urlparse
 
-from pydantic import Field, SecretStr, ValidationError
+from pydantic import Field, SecretStr, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -59,6 +60,28 @@ class AppSettings(BaseSettings):
     zta35g_runtime_token: SecretStr | None = None
     zta35g_runtime_timeout_seconds: float = Field(default=10.0, gt=0, le=300)
     m5_dev_routes_enabled: bool = False
+    timeline_cursor_signing_key: SecretStr | None = None
+
+    @field_validator("timeline_cursor_signing_key")
+    @classmethod
+    def validate_timeline_cursor_signing_key(
+        cls,
+        value: SecretStr | None,
+    ) -> SecretStr | None:
+        if value is None:
+            return None
+        secret = value.get_secret_value()
+        if (
+            not secret
+            or secret != secret.strip()
+            or len(secret.encode("utf-8")) < 32
+            or any(
+                unicodedata.category(character).startswith("C")
+                for character in secret
+            )
+        ):
+            raise ValueError("Invalid timeline cursor signing key.")
+        return value
 
 
 ENVIRONMENT_FIELDS = {
@@ -79,6 +102,7 @@ ENVIRONMENT_FIELDS = {
     "ZTA35G_RUNTIME_TOKEN": "zta35g_runtime_token",
     "ZTA35G_RUNTIME_TIMEOUT_SECONDS": "zta35g_runtime_timeout_seconds",
     "M5_DEV_ROUTES_ENABLED": "m5_dev_routes_enabled",
+    "TIMELINE_CURSOR_SIGNING_KEY": "timeline_cursor_signing_key",
 }
 
 

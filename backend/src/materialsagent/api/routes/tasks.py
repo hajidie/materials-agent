@@ -19,6 +19,15 @@ from materialsagent.application.retries import (
 )
 from materialsagent.application.errors import ApplicationValidationError
 from materialsagent.application.idempotency import validate_idempotency_key
+from materialsagent.api.routes.timeline import (
+    AssetSummaryView,
+    ExplanationSummaryView,
+    NeedsInputView,
+    ToolRunSummaryView,
+    _asset_view,
+    _explanation_view,
+    _tool_run_view,
+)
 
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["tasks"])
@@ -60,6 +69,7 @@ class TaskView(StrictModel):
         "PARTIALLY_SUCCEEDED",
         "FAILED",
     ]
+    anchor_at: str
     selected_tool_run_id: str | None
     selected_result_id: str | None
     created_at: str
@@ -68,7 +78,13 @@ class TaskView(StrictModel):
     completed_at: str | None
     error_code: str | None
     safe_error_message: str | None
+    needs_input: NeedsInputView | None
+    tool_run_count: int
+    tool_runs: list[ToolRunSummaryView]
     selected_result_summary: SelectedResultSummaryView | None
+    assets: list[AssetSummaryView]
+    explanation_summary: ExplanationSummaryView | None
+    latest_explanation_failure: ExplanationSummaryView | None
 
 
 class TaskResponse(StrictModel):
@@ -146,6 +162,7 @@ def get_task(
             conversation_id=task.conversation_id,
             task_type=task.task_type,
             status=task.current_status,
+            anchor_at=_utc_text(projection.anchor_at),
             selected_tool_run_id=task.selected_tool_run_id,
             selected_result_id=task.selected_result_id,
             created_at=_utc_text(task.created_at),
@@ -154,6 +171,26 @@ def get_task(
             completed_at=_utc_text(task.completed_at),
             error_code=task.error_code,
             safe_error_message=task.safe_error_message,
+            needs_input=(
+                None
+                if projection.needs_input is None
+                else NeedsInputView(
+                    missing_fields=list(
+                        projection.needs_input.missing_fields
+                    ),
+                    ambiguous_fields=list(
+                        projection.needs_input.ambiguous_fields
+                    ),
+                    normalized_input=(
+                        projection.needs_input.normalized_input
+                    ),
+                )
+            ),
+            tool_run_count=projection.tool_run_count,
+            tool_runs=[
+                _tool_run_view(run)
+                for run in projection.tool_runs
+            ],
             selected_result_summary=(
                 None
                 if result is None
@@ -164,6 +201,15 @@ def get_task(
                     completed_outputs=list(result.completed_outputs),
                     failed_outputs=list(result.failed_outputs),
                 )
+            ),
+            assets=[
+                _asset_view(asset) for asset in projection.assets
+            ],
+            explanation_summary=_explanation_view(
+                projection.explanation_summary
+            ),
+            latest_explanation_failure=_explanation_view(
+                projection.latest_explanation_failure
             ),
         ),
     )

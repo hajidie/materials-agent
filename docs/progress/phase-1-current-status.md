@@ -7,25 +7,25 @@
 | 字段 | 当前值 |
 |---|---|
 | 当前阶段 | 阶段 1A |
-| 当前里程碑 | M8：幂等、Tool retry、Explanation retry 与失败恢复 |
-| 当前工作单元 | M8 最终核心代码复审聚焦修订 |
-| 状态 | `FINAL_CORE_REVISION_COMPLETE_AWAITING_PROJECT_OWNER_REVIEW` |
-| 上一已验收工作单元 | Pre-M8 行为不变止损 |
+| 当前里程碑 | M9：Conversation 统一时间线 API |
+| 当前工作单元 | M9 第一轮统一代码审查修订已完成；等待项目负责人最终代码审查 |
+| 状态 | `M9_TASK_QUERY_REVISION_COMPLETE_AWAITING_PROJECT_OWNER_REVIEW` |
+| 上一已验收工作单元 | M8：幂等、Tool retry、Explanation retry 与失败恢复 |
 | Pre-M8 stop-loss commit | `891714dd58cf069073a7d4037be43ef66304d0ac` |
-| M8 | `FINAL_CORE_REVISION_COMPLETE_AWAITING_PROJECT_OWNER_REVIEW` |
-| M8 project-owner review | 最终核心复审的一个 Important 和一个 Minor 已修订；当前 `AWAITING` |
-| 实际 branch / HEAD | `main` / `891714dd58cf069073a7d4037be43ef66304d0ac` |
-| HEAD parent / subject | `09a9ba8ac7aea9d53f6ae2594cccc27a1f2e2b23` / `refactor: clarify pre-retry workflow boundaries` |
+| M8 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
+| M8 acceptance commit | `18005944982ca5191412e06154effc67465ca3a7` |
+| 实际 branch / HEAD | `main` / `18005944982ca5191412e06154effc67465ca3a7` |
+| HEAD parent / subject | `891714dd58cf069073a7d4037be43ef66304d0ac` / `feat: add idempotent task retries` |
 | 暂存区 | 空；未执行 `git add` |
-| 当前工作区 | 仅下列 M8 allowlist 内修改 |
+| 当前工作区 | 仅 M9 allowlist 内未暂存修改 |
 | 已确认设计基线 | 五份均未修改 |
-| 历史 migration | `0001`–`0007` 均未修改 |
+| 历史 migration | `0001`–`0008` 均未修改；当前唯一 head/current 为 `0009_timeline_query_indexes` |
 | `SEM/` | 未修改、未加载或运行真实模型；`SEM_INTEGRITY_OK` |
 | Mock Runtime | 实现和协议未修改 |
 | Git 外部动作 | 未 commit、未 push、未 amend、未 rebase、未 reset、未 stash |
-| M9 | `NOT STARTED` |
-| 是否处于项目负责人暂停点 | 是；下一步仅允许项目负责人代码审查 |
-| 更新时间 | `2026-07-24T11:01:21+08:00` |
+| M9 | `TASK QUERY REVISION COMPLETE / FINAL PROJECT_OWNER REVIEW AWAITING` |
+| 是否处于项目负责人暂停点 | 是；两个 Important 和 Session close Minor 已修复，停在最终代码审查点，未暂存、未提交、未开始 M10 |
+| 更新时间 | `2026-07-24T15:23:24+08:00` |
 
 ## M8 已实现内容
 
@@ -230,15 +230,66 @@ Runtime、MinIO 和 Explanation Provider 调用均不在数据库 UoW 内。Back
 - IdempotencyRecord 目前不设置自动过期或清理策略；阶段 1A 本地 MVP 会持续保存这些审计/回放锚点。引入清理必须作为后续明确设计，而不是在 M8 内隐式删除。
 - 回放返回“当前稳定业务投影”而不是逐字节重放历史 HTTP body，因此 task/explanation 的后续合法状态变化会反映在同 key 回放中；资源绑定 ID 保持不变。
 
+## M9 当前执行记录
+
+- M9-P 基线 gate：`main@18005944982ca5191412e06154effc67465ca3a7`，暂存区与工作区均为空，`git diff --check` 与 `git diff --cached --check` 通过。
+- Docker：PostgreSQL 与 MinIO 均为 healthy；命名 volumes 为 `materialsagent_postgresql_data` 与 `materialsagent_minio_data`，未删除。
+- M9-P 已把本次“同一对话连续完成 M9-P、M9-A、内部 gate、M9-B 与全量验证”的负责人例外、各段边界、验收命令和精确 allowlist 写入阶段 1 计划与 `check-scope.ps1`。
+- M9-A 新增版本 1 的 HMAC-SHA256 不透明 cursor、可选 `SecretStr` 签名密钥、Timeline Query Port/SQLAlchemy Adapter、数据库 keyset 与 `limit + 1`、固定批量查询及 `REPEATABLE READ READ ONLY` 快照。
+- cursor 使用规范 JSON、base64url 和常量时间签名比较，绑定 Conversation，并限制 token 最大 2048 个字符、解码后的 canonical JSON payload 最大 512 bytes；完整保留数据库 UTC 微秒精度。密钥缺失只使 Timeline 返回安全 503。
+- Alembic：新增 `0009_timeline_query_indexes`，`down_revision=0008_idempotency_record`；唯一 head/current 为 `0009_timeline_query_indexes`，`alembic check` 无待生成操作，`0009 → 0008 → 0009` 往返成功。
+- 索引为 `ix_message_conversation_created(conversation_id, created_at, message_id)` 与 `ix_task_conversation_created(conversation_id, created_at, task_id)`。
+- M9-A 内部 gate 在开始路由前通过：基线、allowlist、cursor/config/sort/query、固定 9 条 SELECT、只读可重复读、migration 往返、scope 与 diff checks 均满足。
+- M9-B 新增 `GET /api/v1/conversations/{conversation_id}/timeline`：顶层只有 `USER_MESSAGE`、`ASSISTANT_MESSAGE`、`TOOL_TASK`；Tool 初始用户消息折叠进卡片，不在顶层重复。
+- 顶层顺序固定为 `(anchor_at, item_type_rank, item_id)`，rank 为 10/20/30；Tool anchor 取最早用户消息，缺失时安全回退 Task.created_at。Timeline Tool 卡片只返回 `attempt_count`、`selected_tool_run`、`has_history`，并投影 selected Result/Assets/Explanation 和最多 50 条最近输入；完整 ToolRun 历史由 Task GET 返回。
+- Task GET 通过短 `REPEATABLE READ READ ONLY` 事务的一致快照投影稳定 anchor、输入、全部 ToolRun、selected Result/Assets/Explanation、needs-input 与安全失败；Timeline 与 Task GET 都执行 Actor 所有权和 selected 来源一致性校验，不调用 Chat、Runtime、MinIO 或 Explanation Provider。
+- 数据库 adapter 对 1 个和 20 个 Tool Task 均固定执行 9 条 SELECT，没有 N+1；并发插入测试证明一次响应保持单个可重复读快照，下次请求才看到新事实。
+- 五份确认设计基线、`SEM/`、Mock Runtime 均未修改；未加载或运行真实模型。
+
+## M9 第一轮统一代码审查修订证据
+
+- Task GET 已从普通 READ COMMITTED UoW 多次读取改为专用 `TaskDetailQuerySnapshot`：一次 Service 调用只进入一次 query port，并在单个短 `REPEATABLE READ READ ONLY` 事务中读取完整 Task detail。
+- Task、Messages、Revisions、ToolRuns、selected ToolResult、ResultAssetLink JOIN Asset、Explanation JOIN LLMCall 使用固定 7 条业务 SELECT 批量读取；1 attempt / 1 Asset / 1 Explanation 与 20 attempts / 8 Assets / 20 Explanations 均为 7 条业务 SELECT、10 条总语句，不随资源数量增长。
+- Tool retry 并发测试在第一批查询建立快照后，由另一连接提交新 ToolRun、Result、Asset 和 selected references：当前响应完整保持旧链，下一次查询才完整看到新链和两次 ToolRun 历史。
+- Explanation retry 并发测试在第一批查询建立快照后，由另一连接提交新 LLMCall、Explanation 和 Task 聚合状态：当前响应保持旧 Task/Explanation，下一次查询才同时看到新 Task 状态和成功 Explanation。
+- 查询 Session 使用上下文管理器显式关闭；transaction 在成功、未找到和异常路径均回滚结束，connection 在 `finally` 中关闭。Session close 回归测试覆盖成功、未找到和异常三条路径。
+- Task GET 公共字段、完整 ToolRun 历史、selected Result/Asset/Explanation、来源损坏安全 500、其他 Actor/缺失资源统一 404、数据库 unavailable 安全 503 均保持；缺少 Timeline signing key 时 Task GET 200、Timeline 503。
+- 第一轮审查结论：Original Critical 0；Original Important 1 FIXED；Original Important 2 FIXED；Session close Minor FIXED；Route coupling Minor DEFERRED。
+
+## M9 自动化验证
+
+- Task query 单元：`6 passed in 0.20s`。
+- Task detail/Timeline DB：`8 passed in 3.20s`。
+- Task API：`7 passed in 3.22s`。
+- M9 全部聚焦：`118 passed in 16.85s`。
+- 全部 contract：`87 passed in 1.49s`。
+- Backend 全量：`848 passed in 125.93s`，0 failed、0 skipped。
+- Mock Runtime：`11 passed in 1.13s`。
+- Backend `pip check`：`No broken requirements found.`；`compileall`：exit 0。
+- Alembic：唯一 head/current 为 `0009_timeline_query_indexes (head)`；check clean；`0009 → 0008 → 0009` 成功且最终回到 0009。
+- `check-scope.ps1 -Milestone M9`：`SCOPE_OK M9`。
+- `check-sem-integrity.ps1`：`SEM_INTEGRITY_OK`，57 files，`total_size_bytes=2043071133`，fingerprint `62bbb0878ed5d659490755e401fba0e3e09f1f36e3a67667ea04227927546b4a`。
+
+## 已知风险
+
+- Timeline cursor 签名密钥目前由本地环境配置提供；缺失时该单一路由按设计返回 503。部署或换机时必须用至少 32 UTF-8 bytes、无首尾空白和控制字符的 Secret 配置，不能提交真实值。
+- Timeline 是跨多表的稳定读取投影，但并不冻结两次 HTTP 请求之间的业务状态；单次请求由只读可重复读快照保证一致，后续请求可合法看到 retry 或 Explanation 新事实。
+- PostgreSQL 与 MinIO 之间既有非分布式事务边界仍然存在；M9 只读取已经持久化且通过来源一致性校验的 AVAILABLE Asset，没有扩大或掩盖该风险。
+
 ## 下一步
 
-仅等待项目负责人代码审查。未经明确批准，不暂存、不提交、不 push、不 amend，也不开始 M9。
+等待项目负责人最终代码审查。当前不得暂存、commit、push、amend，也不得开始 M10。
 
 ```text
-M8_FINAL_CORE_REVISION: COMPLETE
-M8_PROJECT_OWNER_REVIEW: AWAITING
+M9_TASK_QUERY_REVISION_COMPLETE_AWAITING_PROJECT_OWNER_REVIEW
+
+Original Critical: 0
+Original Important 1: FIXED
+Original Important 2: FIXED
+Session close Minor: FIXED
+Route coupling Minor: DEFERRED
 Commit: NO
 Push: NO
 Amend: NO
-M9: NOT STARTED
+M10: NOT STARTED
 ```

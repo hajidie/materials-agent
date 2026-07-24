@@ -65,7 +65,7 @@ $globalAllowedPaths = @(
     'docs/progress/phase-1-current-status.md'
 )
 
-# M0-M8 configured milestones/work units have reviewed exact allowlists.
+# M0-M9 configured milestones/work units have reviewed exact allowlists.
 # G0 and otherwise unconfigured recognized milestones are retained so
 # callers receive a stable configuration error until their exact plan allowlist
 # is reviewed and added; this deliberately avoids inventing future scope.
@@ -335,6 +335,35 @@ $milestoneAllowlists = @{
         'backend/tests/integration/db/test_result_commit.py'
         'backend/tests/unit/test_explanation_service.py'
         'backend/tests/unit/test_idempotency.py'
+    )
+    M9 = @(
+        'docs/superpowers/plans/2026-07-17-sem-mvp-phase-1-implementation-plan.md'
+        'scripts/dev/check-scope.ps1'
+        '.env.example'
+        'backend/alembic/versions/0009_add_timeline_query_indexes.py'
+        'backend/src/materialsagent/application/timeline.py'
+        'backend/src/materialsagent/application/timeline_cursor.py'
+        'backend/src/materialsagent/application/tasks.py'
+        'backend/src/materialsagent/domain/ports/timeline_query.py'
+        'backend/src/materialsagent/infrastructure/config.py'
+        'backend/src/materialsagent/infrastructure/db/conversation_task.py'
+        'backend/src/materialsagent/infrastructure/db/timeline_query.py'
+        'backend/src/materialsagent/api/dependencies.py'
+        'backend/src/materialsagent/api/routes/timeline.py'
+        'backend/src/materialsagent/api/routes/tasks.py'
+        'backend/src/materialsagent/main.py'
+        'backend/tests/unit/test_config.py'
+        'backend/tests/unit/test_timeline_cursor.py'
+        'backend/tests/unit/test_timeline_sort.py'
+        'backend/tests/unit/test_task_query.py'
+        'backend/tests/contract/test_timeline_contract.py'
+        'backend/tests/integration/db/test_migrations.py'
+        'backend/tests/integration/db/test_timeline_query.py'
+        'backend/tests/api/conftest.py'
+        'backend/tests/api/test_timeline.py'
+        'backend/tests/api/test_tasks.py'
+        'backend/tests/conftest.py'
+        'backend/tests/integration/db/conftest.py'
     )
 }
 

@@ -27,7 +27,8 @@ M3_REVISION = "0003_task_time_order"
 M4_REVISION = "0004_llm_call"
 M5_REVISION = "0005_tool_run"
 IMMEDIATE_PREVIOUS_REVISION = "0006_asset"
-EXPECTED_REVISION = "0008_idempotency_record"
+M8_REVISION = "0008_idempotency_record"
+EXPECTED_REVISION = "0009_timeline_query_indexes"
 ALEMBIC_INI = Path(__file__).resolve().parents[3] / "alembic.ini"
 NEW_TASK_TIME_CHECKS = {
     "ck_task_started_at_not_before_created_at",
@@ -1377,3 +1378,124 @@ def test_m8_idempotency_migration_downgrade_only_removes_m8_table(
             ) == 1
     finally:
         reupgraded.dispose()
+
+
+def test_m9_timeline_indexes_round_trip_without_changing_rows(
+    temporary_database: AppSettings,
+) -> None:
+    config = _make_alembic_config(temporary_database)
+    command.upgrade(config, M8_REVISION)
+    engine = create_engine_from_settings(temporary_database)
+    created_at = datetime(2026, 7, 24, 2, 0, tzinfo=timezone.utc)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO actor (actor_id, actor_origin, created_at) "
+                    "VALUES ('actor_m9_indexes', 'LOCAL_ANONYMOUS', "
+                    ":created_at)"
+                ),
+                {"created_at": created_at},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO conversation ("
+                    "conversation_id, actor_id, title, created_at, updated_at"
+                    ") VALUES ("
+                    "'conversation_m9_indexes', 'actor_m9_indexes', NULL, "
+                    ":created_at, :created_at)"
+                ),
+                {"created_at": created_at},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO task ("
+                    "task_id, conversation_id, actor_id, task_type, "
+                    "current_status, selected_tool_run_id, "
+                    "selected_result_id, created_at, started_at, updated_at, "
+                    "completed_at, error_code, safe_error_message"
+                    ") VALUES ("
+                    "'task_m9_indexes', 'conversation_m9_indexes', "
+                    "'actor_m9_indexes', NULL, 'PENDING', NULL, NULL, "
+                    ":created_at, NULL, :created_at, NULL, NULL, NULL)"
+                ),
+                {"created_at": created_at},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO message ("
+                    "message_id, conversation_id, task_id, actor_id, "
+                    "request_id, role, generation_source, content_text, "
+                    "structured_content, llm_call_id, created_at"
+                    ") VALUES ("
+                    "'message_m9_indexes', 'conversation_m9_indexes', "
+                    "'task_m9_indexes', 'actor_m9_indexes', "
+                    "'request_m9_indexes', 'USER', 'USER', 'index row', "
+                    "NULL, NULL, :created_at)"
+                ),
+                {"created_at": created_at},
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    upgraded = create_engine_from_settings(temporary_database)
+    try:
+        inspector = inspect(upgraded)
+        assert {
+            item["name"]: item["column_names"]
+            for item in inspector.get_indexes("message")
+            if item.get("duplicates_constraint") is None
+        } == {
+            "ix_message_conversation_created": [
+                "conversation_id",
+                "created_at",
+                "message_id",
+            ]
+        }
+        assert {
+            item["name"]: item["column_names"]
+            for item in inspector.get_indexes("task")
+            if item.get("duplicates_constraint") is None
+        } == {
+            "ix_task_conversation_created": [
+                "conversation_id",
+                "created_at",
+                "task_id",
+            ]
+        }
+        with upgraded.connect() as connection:
+            assert connection.scalar(
+                text(
+                    "SELECT count(*) FROM message "
+                    "WHERE message_id = 'message_m9_indexes'"
+                )
+            ) == 1
+    finally:
+        upgraded.dispose()
+    assert _current_revision(temporary_database) == EXPECTED_REVISION
+    command.check(config)
+
+    command.downgrade(config, M8_REVISION)
+    downgraded = create_engine_from_settings(temporary_database)
+    try:
+        inspector = inspect(downgraded)
+        assert "ix_message_conversation_created" not in {
+            item["name"] for item in inspector.get_indexes("message")
+        }
+        assert "ix_task_conversation_created" not in {
+            item["name"] for item in inspector.get_indexes("task")
+        }
+        with downgraded.connect() as connection:
+            assert connection.scalar(
+                text(
+                    "SELECT count(*) FROM task "
+                    "WHERE task_id = 'task_m9_indexes'"
+                )
+            ) == 1
+    finally:
+        downgraded.dispose()
+    assert _current_revision(temporary_database) == M8_REVISION
+
+    command.upgrade(config, "head")
+    assert _current_revision(temporary_database) == EXPECTED_REVISION
