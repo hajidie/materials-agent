@@ -7,30 +7,37 @@
 | 字段 | 当前值 |
 |---|---|
 | 当前阶段 | 阶段 1A |
-| 当前里程碑 | M10：最小 Vue 3 + Vite 前端 |
-| 当前工作单元 | M10-A：前端基础与可靠数据层 |
-| 状态 | `M10_A_PROJECT_OWNER_ACCEPTED_COMMIT_AUTHORIZED` |
-| 上一已验收工作单元 | M10-A：前端基础与可靠数据层 |
+| 当前里程碑 | M10 |
+| 当前工作单元 | M10-B 完整最小界面与交互 |
+| 状态 | `M10_B_PROJECT_OWNER_ACCEPTED_COMMIT_AUTHORIZED` |
+| 上一已验收工作单元 | M10-B：完整最小界面与交互 |
 | Pre-M8 stop-loss commit | `891714dd58cf069073a7d4037be43ef66304d0ac` |
 | M8 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M8 acceptance commit | `18005944982ca5191412e06154effc67465ca3a7` |
 | M9 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M9 acceptance commit | `d7dee06c1f1294b010f64f5c532f5cb276ca53fa` |
-| M10-A acceptance commit | `PENDING` |
-| 实际 branch / HEAD | `main` / `d7dee06c1f1294b010f64f5c532f5cb276ca53fa` |
-| HEAD parent / subject | `18005944982ca5191412e06154effc67465ca3a7` / `feat: add stable conversation timeline` |
-| 暂存区 | M10-A 精确 28 个批准路径 |
-| 当前工作区 | M10-A 已获项目负责人验收并授权 commit；批准内容已精确暂存，commit 尚未创建 |
+| M10-A acceptance commit | `c597a89340072217d07d734e6b2ab88b6236d009` |
+| M10-B acceptance commit | `THIS COMMIT` |
+| M10 overall acceptance commit | `THIS COMMIT` |
+| Expected subject | `feat: add minimal chat frontend` |
+| 实际 branch / HEAD | `main` / `c597a89340072217d07d734e6b2ab88b6236d009` |
+| HEAD parent / subject | `d7dee06c1f1294b010f64f5c532f5cb276ca53fa` / `feat: add reliable frontend foundation` |
+| 暂存区 | `EMPTY / AWAITING FINAL STAGING` |
+| 当前工作区 | M10-B 已由项目负责人验收并授权创建验收提交；尚未暂存或创建 commit |
 | 已确认设计基线 | 五份均未修改 |
 | 历史 migration | `0001`–`0008` 均未修改；当前唯一 head/current 为 `0009_timeline_query_indexes` |
 | `SEM/` | 未修改、未加载或运行真实模型；`SEM_INTEGRITY_OK` |
 | Mock Runtime | 实现和协议未修改 |
-| Git 外部动作 | Commit 已授权但尚未创建；未 push、未 amend、未 rebase、未 reset、未 stash |
+| Commit | `AUTHORIZED / NOT YET CREATED` |
+| Push | `NO` |
+| Amend | `NO` |
+| Git 外部动作 | 尚未暂存或创建授权 commit；未 push、amend、rebase、reset、stash |
 | M10-A | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
-| M10-B | `NOT STARTED` |
+| M10-B | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
+| M10 overall | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M11 | `NOT STARTED` |
-| 是否处于项目负责人暂停点 | 是；只允许后续创建已授权的 M10-A 本地验收 commit，不得 push、amend 或进入 M10-B |
-| 更新时间 | `2026-07-24` |
+| 是否处于项目负责人暂停点 | 是；M10-B 与 M10 overall 已验收，commit 已授权但尚未暂存或创建，M11 未开始 |
+| 更新时间 | `2026-07-26` |
 
 ## M8 已实现内容
 
@@ -333,31 +340,104 @@ Runtime、MinIO 和 Explanation Provider 调用均不在数据库 UoW 内。Back
 
 - 项目负责人已验收 M10-A：`COMPLETE / PROJECT_OWNER_ACCEPTED`。
 - M9 保持 `COMPLETE / PROJECT_OWNER_ACCEPTED`，acceptance commit 为 `d7dee06c1f1294b010f64f5c532f5cb276ca53fa`。
-- M10-A acceptance commit 当前为 `PENDING`；项目负责人已授权创建该本地 commit，但本轮尚未创建。
+- M10-A acceptance commit 已创建，为 `c597a89340072217d07d734e6b2ab88b6236d009`。
 - 暂存区精确包含 M10-A 的 28 个批准路径；没有 scope 外暂存路径。
 - M10-B 与 M11 均为 `NOT STARTED`；未执行 push 或 amend。
 
+## M10-B 当前执行记录
+
+- M10-B 开始基线为 `main@c597a89340072217d07d734e6b2ab88b6236d009`（`feat: add reliable frontend foundation`），parent 为 `d7dee06c1f1294b010f64f5c532f5cb276ca53fa`。
+- M10-A 为 `COMPLETE / PROJECT_OWNER_ACCEPTED`，acceptance commit 为 `c597a89340072217d07d734e6b2ab88b6236d009`。
+- 开始时工作区与暂存区为空；Node/npm 为 `v24.14.0` / `11.9.0`，Vue 为 `3.5.40`。
+- 已完成完整最小 Vue 界面：对话侧栏、Conversation/Timeline、三类顶层条目、Tool Task 状态卡、结构化 Result、Asset 预览与下载、ToolRun 历史、补充输入、Tool/Explanation 重试、全局安全错误和 `UNCERTAIN` 恢复入口；组件只消费 M10-A composable 与公共 `/api/v1` 投影。
+- TDD 红测分别证明 Timeline、Conversation Sidebar、Composer、完整 Tool 卡与 App 流程尚未满足；绿测为 5 个组件测试文件、`46 passed`。与 M10-A 既有 132 项合并后，全量为 9 files、`178 passed`、0 failed。
+- `npm --prefix frontend ci` 安装 166 packages，audit 为 0 vulnerabilities；保留既有 dev-only `glob@10.5.0` 上游弃用提示。`npm --prefix frontend run typecheck` 为 0 errors；Vite `8.1.5` production build 成功，39 modules，JS bundle 110.36 kB（gzip 38.67 kB）。
+- 浏览器 A–H 验收均通过：新建与切换多个 Conversation 不混用 Timeline；知识问答正确；`NEEDS_INPUT → 补充 → SUCCEEDED`；Result、Explanation、图片预览和真实下载事件可用；Mock Runtime 暂停后第 1 次 ToolRun `FAILED`，恢复后 UI 重试为第 2 次 `SUCCEEDED` 且历史保留；安全 Mock Explanation failure 产生 `PARTIALLY_SUCCEEDED`，恢复默认 adapter 后 UI 重试为 `SUCCEEDED`；MinIO 暂停时仅图片区显示“图片加载失败。结构化结果仍可查看”，恢复后图片重新加载；Backend 暂停时出现 `UNCERTAIN`，页面正文不含幂等标签或 UUID，恢复后“使用原请求重试”成功。
+- 浏览器最终 console warning/error 为 0；页面无横向溢出。Backend 访问日志中的浏览器业务请求均为公共 `/api/v1` Conversation、Timeline、Task retry、Explanation retry 与 Asset content 路径；前端源码和 production bundle 的敏感词/内部路径扫描无命中。
+- `check-scope.ps1 -Milestone M10` 为 `SCOPE_OK M10`；`SEM_INTEGRITY_OK` 为 57 files、`total_size_bytes=2043071133`、fingerprint `62bbb0878ed5d659490755e401fba0e3e09f1f36e3a67667ea04227927546b4a`；`git diff --check` 与 `git diff --cached --check` 均为 exit 0。
+- 五份确认设计基线、阶段 1 计划、Backend、CORS、数据库模型/migration、Mock Runtime、M10-A 数据层与 `SEM/` 均未修改；未加载或运行真实模型。
+- 未执行 `git add`、commit、push、amend、rebase、reset、stash、分支或 worktree 操作；M11 未开始。
+
+## M10-B 第一轮代码审查修订证据
+
+- 第一轮审查结论为 `M10_B_CODE_REVIEW: CHANGES_REQUESTED`；本轮只修改审查明确允许的既有页面、composable、组件、测试与本动态进度文件，没有创建新生产组件或测试文件。
+- `useMaterialsAgent` 已把用户明确写操作错误与后台读取错误拆成 `actionError` / `readError`，公开 `globalError` 固定投影 `actionError ?? readError`。Conversation list、Timeline 和 Task history 只清理/设置读取错误；HTTP 409、422、500、503、504、写操作不确定和写后 reconciliation 安全提示均不会被后台读取清除或覆盖。
+- Conversation 创建非 JSON/网络结果不确定时设置 `conversationCreationUncertain=true` 并保留安全 action error；此时再次创建被 composable 与 UI 双重阻止。新增 `refreshConversations()` 只执行 Conversation 首页 GET，成功后解除不确定并只清除对应创建提示，失败时保留不确定与创建提示；没有自动重试创建或生成 Idempotency-Key。
+- Sidebar 新增“刷新对话列表”只读入口；列表 loading 时禁用，创建不确定时仍可用，不改变 Backend 顺序。创建不确定解除前只禁用“新建对话”，已有幂等保护的其他写操作保持既有策略。
+- `ConversationView` 以 `selectedConversation.conversation_id` 作为 `ChatComposer` key。Conversation A 的普通或补参草稿切到 B 后随旧组件销毁；同一 Conversation 内取消补充不改变 key，草稿继续保留。
+- App 的 `writeBusy` 同时覆盖 Conversation create POST、幂等 mutation `SENDING` 与 `UNCERTAIN`；它统一禁用 Composer、补充、Tool retry、Explanation retry 和新建 Conversation，但不禁用 Conversation 选择、Timeline 刷新、Conversation 列表刷新或 Task history。
+- 单张图片失败后可点击“重新加载图片”：只清理该 Asset 的失败状态、恢复 loading 并递增 per-asset render generation，使同一公共 URL 的 `<img>` 重新挂载；不增加 query、不 fetch、不构造 Blob，非法 URL 没有重试入口，Result 与 Explanation 保持可见。
+- NEEDS_INPUT 的 `normalized_input` 现以安全 definition list 展示普通嵌套对象和标量数组；工艺参数的 `1000`、`°C`、`3`、`h` 可见。展开最大深度为 3，超深内容显示“嵌套内容未展开”，函数、特殊对象、原型内容和 getter 异常不展开；不使用 `v-html` 或 JSON dump。
+- 必修行为 RED 为 4 files、`13 failed / 79 passed`，每个失败均命中审查指出的缺失行为；逐项 GREEN 后为 4 files、`95 passed`。过程中 typecheck 暴露 1 个测试 fixture 的可迭代类型错误，修正 fixture 后为 0 errors。
+- `npm ci` 安装 166 packages、audit 0 vulnerabilities，保留既有 dev-only `glob@10.5.0` 上游弃用提示。最终前端全量为 9 files、`193 passed`、0 failed；typecheck 0 errors；Vite `8.1.5` build 成功、39 modules，JS 112.45 kB（gzip 39.15 kB）。
+- production source/bundle 的 Secret、数据库/Object Storage/Runtime 内部值、绝对路径与 `/internal/v1` 扫描无命中；组件无直接 fetch、Idempotency-Key 生成、`v-html`、`setInterval`、console 输出或显式 `any`。
+- `SCOPE_OK M10`；`SEM_INTEGRITY_OK` 为 57 files、`total_size_bytes=2043071133`、fingerprint `62bbb0878ed5d659490755e401fba0e3e09f1f36e3a67667ea04227927546b4a`；tracked、cached 和 16 个未跟踪文件 whitespace check 均通过。
+- 本轮未允许修改的 7 个既有 M10-B dirty 路径经 SHA-256 前后对比完全不变。Backend、CORS、数据库/migration、五份设计基线、`SEM/`、Mock Runtime、依赖/lockfile、Vite 配置和 M11 均未修改。
+- 暂存区为空；未执行 `git add`、commit、push、amend、rebase、reset、stash、分支或 worktree 操作。
+
+## M10-B 最终代码复审错误恢复修订证据
+
+- 最终复审结论为 `M10_B_FINAL_CODE_REVIEW: CHANGES_REQUESTED`；本轮只修改 `App.vue`、`useMaterialsAgent.ts`、`GlobalErrorNotice.vue`、两份指定测试和本动态进度文件，没有创建文件，也没有修改 Backend、CORS、数据库/migration、设计基线、`SEM/`、Mock Runtime、依赖/lockfile、Vite 配置或 M11。
+- `runMutation()` 与 `retryPendingMutation()` 只在捕获 `ApiResponseError` 后进入明确业务失败恢复：先保存原 `MUTATION` action error，再 best-effort 读取当前 Conversation 的完整 Timeline；`TASK_CREATE` / `TASK_INPUT_SUPPLEMENT` 还读取 Conversation 首页。GET 失败只写安全 read error；原 `ApiResponseError` 最后原样抛出。没有重发 POST、生成新 key、改变 `BUSINESS_FAILED` 或保留已按既有逻辑清除的 pending descriptor。网络 `UNCERTAIN` 不触发任何权威 GET。
+- action/read 通知现由独立槽位投影为 `globalErrors`，顺序为 Conversation 创建不确定、action、read，并按 `message/status/request_id` 去重；兼容的 `globalError` 保留。`GlobalErrorNotice` 可同时渲染安全业务错误与读取错误，不显示 raw body、stack、内部路径或幂等 key；pending mutation 恢复区保持原样。
+- Timeline 成功读取只在 `actionErrorSource === RECONCILIATION` 时清除写后刷新警告；手动刷新和既有 polling 共用该成功路径。失败保留警告；`MUTATION` 业务错误、Conversation 创建不确定、pending `UNCERTAIN` 均不会被清除。
+- Conversation 创建不确定由 `conversationCreationUncertain` 独立投影固定安全通知，不再占用 action 槽；后续 409、422 或 reconciliation error 不能隐藏它。只有显式 `refreshConversations()` 成功后才解除；失败时可与 Conversation 读取错误并存，新建按钮继续禁用且不自动重试创建。
+- TDD RED 为两文件 `15 failed / 67 passed`：5 个参数化 HTTP 409/422/500/503/504 用例均证明明确错误后 Timeline GET 缺失，其余失败分别命中多通知 API/UI、reconciliation 成功恢复、创建不确定独立性和安全过滤缺口。最小实现后同组为 `82 passed`；网络 `UNCERTAIN` 不刷新的保护用例在红、绿两阶段均通过。
+- `npm --prefix frontend ci` 安装 166 packages；npm registry 当前审计元数据报告 6 high severity vulnerabilities，并保留 `glob@10.5.0` 弃用提示。本轮禁止修改依赖版本与 lockfile，未执行会改依赖的 audit fix。最终 typecheck 为 0 errors；前端全量为 9 files、`204 passed`、0 failed；Vite `8.1.5` build 成功、39 modules，JS 113.20 kB（gzip 39.43 kB）。
+- production source/bundle 对 object key、MinIO、Runtime token、Timeline signing、数据库 URL、`/internal/v1`、模型路径、`SEM/`、用户绝对路径和内嵌凭据的 10 组有界扫描为 `PRODUCTION_SECURITY_SCAN_OK`；允许修改的生产/测试文件没有新增显式 `any`、`as unknown as`、`v-html`、`setInterval`、console 输出，组件没有直接 fetch。
+- `SCOPE_OK M10`；`SEM_INTEGRITY_OK` 为 57 files、`total_size_bytes=2043071133`、fingerprint `62bbb0878ed5d659490755e401fba0e3e09f1f36e3a67667ea04227927546b4a`。本轮禁止修改的 16 个既有 dirty 文件经 SHA-256 前后核对完全不变。
+- `git diff --check` 与 `git diff --cached --check` 均为 exit 0；本轮修改的两个未跟踪文件也通过独立 whitespace check。最终暂存区为空，Git dirty 文件仅为既有 M10-B 前端/测试、scope 脚本和当前进度文件；没有 zip、`node_modules`、`dist`、coverage、Backend、设计基线、`SEM/` 或 M11 dirty 路径。
+- 该修订轮未执行 `git add`、commit、push、amend、rebase、reset、stash、分支或 worktree 操作；当前项目负责人验收与提交授权见下节，M11 未开始。
+
+## M10-B 项目负责人验收与提交授权
+
+- 项目负责人已验收 M10-B：`COMPLETE / PROJECT_OWNER_ACCEPTED`；M10 overall 同步为 `COMPLETE / PROJECT_OWNER_ACCEPTED`。
+- M10-B 与 M10 overall 的 acceptance commit 均为 `THIS COMMIT`；授权提交 subject 为 `feat: add minimal chat frontend`。当前 commit 尚未创建。
+- 验收证据继续保留：前端全量 9 files、`204 passed`、0 failed；typecheck 0 errors；Vite `8.1.5` production build 成功、39 modules，JS 113.20 kB（gzip 39.43 kB）。
+- 浏览器 A–H 验收继续有效：Conversation、知识问答、Tool、补参、两类重试、图片查看/下载、安全错误、MinIO/Backend 故障与 `UNCERTAIN` 原 key 恢复均已覆盖，最终 console warning/error 为 0。
+- SEM 证据继续有效：`SEM_INTEGRITY_OK`，57 files、`total_size_bytes=2043071133`、fingerprint `62bbb0878ed5d659490755e401fba0e3e09f1f36e3a67667ea04227927546b4a`。
+- `npm ci` 的当前审计元数据报告 6 个 high severity vulnerabilities；它们仅来自开发依赖。提交前只读复核 `npm --prefix frontend audit --omit=dev` 为 `found 0 vulnerabilities`。既有 `glob@10.5.0` 弃用提示同样来自 dev-only 传递依赖；本轮未修改依赖或 lockfile。
+- 当前暂存区仍为 `EMPTY / AWAITING FINAL STAGING`；commit 为 `AUTHORIZED / NOT YET CREATED`；未 push、未 amend；M11 保持 `NOT STARTED`。
+
 ## 下一步
 
-下一步只允许创建已获授权的 M10-A 本地验收 commit；本轮尚不创建 commit，不 push、不 amend，也不进入 M10-B：
+仅完成提交前最终状态同步，等待下一步显式暂存/提交操作；不进入 M11：
 
 ```text
-M10_A_PROJECT_OWNER_ACCEPTED_COMMIT_AUTHORIZED
-
-M9:
-COMPLETE / PROJECT_OWNER_ACCEPTED
-Acceptance commit:
-d7dee06c1f1294b010f64f5c532f5cb276ca53fa
+当前里程碑：M10
+当前工作单元：M10-B 完整最小界面与交互
+状态：M10_B_PROJECT_OWNER_ACCEPTED_COMMIT_AUTHORIZED
 
 M10-A:
 COMPLETE / PROJECT_OWNER_ACCEPTED
-Acceptance commit:
-PENDING
+acceptance commit:
+c597a89340072217d07d734e6b2ab88b6236d009
 
-M10-B: NOT STARTED
-Staged paths: 28
-Commit: AUTHORIZED / NOT YET CREATED
-Push: NO
-Amend: NO
-M11: NOT STARTED
+M10-B:
+COMPLETE / PROJECT_OWNER_ACCEPTED
+acceptance commit:
+THIS COMMIT
+
+M10 overall:
+COMPLETE / PROJECT_OWNER_ACCEPTED
+acceptance commit:
+THIS COMMIT
+
+Expected subject:
+feat: add minimal chat frontend
+
+Staging:
+EMPTY / AWAITING FINAL STAGING
+
+Commit:
+AUTHORIZED / NOT YET CREATED
+
+Push:
+NO
+
+Amend:
+NO
+
+M11:
+NOT STARTED
 ```

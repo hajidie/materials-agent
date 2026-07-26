@@ -4,7 +4,9 @@ import { effectScope } from "vue";
 import type { MaterialsAgentApi } from "../../src/api/client";
 import {
   ApiResponseError,
+  ConversationCreationUncertaintyError,
   NetworkUncertaintyError,
+  ReadNetworkError,
 } from "../../src/api/errors";
 import type {
   ApiSuccessEnvelope,
@@ -205,6 +207,25 @@ function messageResponse(
   };
 }
 
+function apiResponseError(
+  status: number,
+  message = `写操作失败 ${status}`,
+): ApiResponseError {
+  return new ApiResponseError(
+    status,
+    `request-action-${status}`,
+    "ACTION_REJECTED",
+    message,
+    [],
+    {
+      conversation_id: "conversation-1",
+      task_id: null,
+      tool_run_id: null,
+      result_id: null,
+    },
+  );
+}
+
 function fakeApi(): MaterialsAgentApi {
   return {
     createConversation: vi.fn<
@@ -391,6 +412,384 @@ describe("useMaterialsAgent", () => {
       50,
       undefined,
       expect.any(AbortSignal),
+    );
+  });
+
+  it("keeps Conversation creation uncertainty visible through Timeline polling", async () => {
+    const { agent, api } = createSubject();
+    await agent.selectConversation("conversation-1");
+    vi.mocked(api.createConversation).mockRejectedValueOnce(
+      new ConversationCreationUncertaintyError(),
+    );
+
+    await expect(agent.createConversation()).rejects.toBeInstanceOf(
+      ConversationCreationUncertaintyError,
+    );
+    expect(agent.conversationCreationUncertain.value).toBe(true);
+    expect(agent.globalError.value?.message).toContain(
+      "无法确认 Conversation 是否已创建",
+    );
+
+    vi.useFakeTimers();
+    agent.startPolling();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(api.getTimelinePage).toHaveBeenCalled();
+    expect(agent.globalError.value?.message).toContain(
+      "无法确认 Conversation 是否已创建",
+    );
+    agent.stopPolling();
+  });
+
+  it.each([409, 422, 500, 503, 504])(
+    "refreshes authoritative facts after an explicit HTTP %s without replacing its action error",
+    async (status) => {
+      const { agent, api } = createSubject();
+      await agent.selectConversation("conversation-1");
+      vi.mocked(api.getTimelinePage).mockClear();
+      vi.mocked(api.listConversations).mockClear();
+      vi.mocked(api.submitMessage).mockClear();
+      vi.mocked(api.getTimelinePage).mockResolvedValueOnce(
+        envelope(
+          timelinePage("conversation-1", [
+            toolTask("authoritative-task", "FAILED"),
+          ]),
+          `request-timeline-${status}`,
+        ),
+      );
+      const actionError = apiResponseError(status);
+      vi.mocked(api.submitMessage).mockRejectedValueOnce(actionError);
+
+      await expect(agent.submitNewTask("generate")).rejects.toBe(
+        actionError,
+      );
+      expect(api.submitMessage).toHaveBeenCalledOnce();
+      expect(api.getTimelinePage).toHaveBeenCalledOnce();
+      expect(api.listConversations).toHaveBeenCalledOnce();
+      expect(agent.timeline.value.map((item) => item.task_id)).toEqual([
+        "authoritative-task",
+      ]);
+      expect(agent.globalErrors.value).toContainEqual({
+        message: `写操作失败 ${status}`,
+        status,
+        request_id: `request-action-${status}`,
+        details: [],
+      });
+      expect(agent.globalError.value).toMatchObject({
+        message: `写操作失败 ${status}`,
+        status,
+        request_id: `request-action-${status}`,
+      });
+      expect(agent.mutationStatus.value).toBe("BUSINESS_FAILED");
+      expect(agent.pendingMutation.value).toBeNull();
+    },
+  );
+
+  it("keeps a 409 action error beside a failed authoritative Timeline read", async () => {
+    const { agent, api } = createSubject();
+    await agent.selectConversation("conversation-1");
+    vi.mocked(api.getTimelinePage).mockClear();
+    vi.mocked(api.listConversations).mockClear();
+    const actionError = apiResponseError(409, "任务状态已变化");
+    vi.mocked(api.submitMessage).mockRejectedValueOnce(actionError);
+    vi.mocked(api.getTimelinePage).mockRejectedValueOnce(
+      new ReadNetworkError(),
+    );
+
+    await expect(agent.submitNewTask("generate")).rejects.toBe(
+      actionError,
+    );
+
+    expect(api.getTimelinePage).toHaveBeenCalledOnce();
+    expect(agent.globalErrors.value).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          message: "任务状态已变化",
+          status: 409,
+        }),
+        { message: "读取失败，请检查网络后重试。" },
+      ]),
+    );
+  });
+
+  it("refreshes Timeline and Conversation facts after a 422 supplement failure", async () => {
+    const { agent, api } = createSubject();
+    await agent.selectConversation("conversation-1");
+    agent.setSupplementTarget({
+      conversationId: "conversation-1",
+      taskId: "task-needs-input",
+      summary: "missing input",
+    });
+    vi.mocked(api.getTimelinePage).mockClear();
+    vi.mocked(api.listConversations).mockClear();
+    const actionError = apiResponseError(422, "补充内容无效");
+    vi.mocked(api.submitMessage).mockRejectedValueOnce(actionError);
+
+    await expect(agent.submitSupplement("details")).rejects.toBe(
+      actionError,
+    );
+
+    expect(api.getTimelinePage).toHaveBeenCalledOnce();
+    expect(api.listConversations).toHaveBeenCalledOnce();
+    expect(agent.supplementTarget.value).not.toBeNull();
+  });
+
+  it("refreshes authoritative facts after a pending retry gets a definite HTTP error", async () => {
+    const { agent, api } = createSubject();
+    await agent.selectConversation("conversation-1");
+    vi.mocked(api.submitMessage)
+      .mockRejectedValueOnce(new NetworkUncertaintyError())
+      .mockRejectedValueOnce(apiResponseError(409, "重放请求被拒绝"));
+    await expect(
+      agent.submitNewTask("generate"),
+    ).rejects.toBeInstanceOf(NetworkUncertaintyError);
+    vi.mocked(api.getTimelinePage).mockClear();
+    vi.mocked(api.listConversations).mockClear();
+
+    await expect(agent.retryPendingMutation()).rejects.toMatchObject({
+      status: 409,
+      message: "重放请求被拒绝",
+    });
+
+    expect(api.submitMessage).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(api.submitMessage).mock.calls[0]?.[2]).toBe(
+      vi.mocked(api.submitMessage).mock.calls[1]?.[2],
+    );
+    expect(api.getTimelinePage).toHaveBeenCalledOnce();
+    expect(api.listConversations).toHaveBeenCalledOnce();
+    expect(agent.mutationStatus.value).toBe("BUSINESS_FAILED");
+    expect(agent.pendingMutation.value).toBeNull();
+    expect(agent.globalErrors.value).toContainEqual(
+      expect.objectContaining({
+        message: "重放请求被拒绝",
+        status: 409,
+      }),
+    );
+  });
+
+  it("does not refresh authoritative facts for an UNCERTAIN network result", async () => {
+    const { agent, api } = createSubject();
+    await agent.selectConversation("conversation-1");
+    vi.mocked(api.getTimelinePage).mockClear();
+    vi.mocked(api.listConversations).mockClear();
+    vi.mocked(api.submitMessage).mockRejectedValueOnce(
+      new NetworkUncertaintyError(),
+    );
+
+    await expect(
+      agent.submitNewTask("generate"),
+    ).rejects.toBeInstanceOf(NetworkUncertaintyError);
+
+    expect(api.getTimelinePage).not.toHaveBeenCalled();
+    expect(api.listConversations).not.toHaveBeenCalled();
+    expect(agent.mutationStatus.value).toBe("UNCERTAIN");
+  });
+
+  it("clears a reconciliation warning after a successful Timeline refresh", async () => {
+    const { agent, api } = createSubject();
+    await agent.selectConversation("conversation-1");
+    vi.mocked(api.getTimelinePage).mockRejectedValueOnce(
+      new ReadNetworkError(),
+    );
+    await agent.submitNewTask("generate");
+    expect(agent.globalError.value?.message).toContain(
+      "操作已成功，但界面刷新失败",
+    );
+
+    await agent.refreshTimeline();
+
+    expect(agent.globalErrors.value).not.toContainEqual(
+      expect.objectContaining({
+        message:
+          "操作已成功，但界面刷新失败。请手动刷新以查看最新状态。",
+      }),
+    );
+    expect(agent.globalError.value).toBeNull();
+  });
+
+  it("retains a reconciliation warning when Timeline refresh still fails", async () => {
+    const { agent, api } = createSubject();
+    await agent.selectConversation("conversation-1");
+    vi.mocked(api.getTimelinePage)
+      .mockRejectedValueOnce(new ReadNetworkError())
+      .mockRejectedValueOnce(new ReadNetworkError());
+    await agent.submitNewTask("generate");
+
+    await expect(agent.refreshTimeline()).rejects.toBeInstanceOf(
+      ReadNetworkError,
+    );
+
+    expect(agent.globalErrors.value).toEqual(
+      expect.arrayContaining([
+        {
+          message:
+            "操作已成功，但界面刷新失败。请手动刷新以查看最新状态。",
+        },
+        { message: "读取失败，请检查网络后重试。" },
+      ]),
+    );
+  });
+
+  it("keeps Conversation creation uncertainty visible beside a later 409", async () => {
+    const { agent, api } = createSubject();
+    await agent.selectConversation("conversation-1");
+    vi.mocked(api.createConversation).mockRejectedValueOnce(
+      new ConversationCreationUncertaintyError(),
+    );
+    await expect(agent.createConversation()).rejects.toBeInstanceOf(
+      ConversationCreationUncertaintyError,
+    );
+    const actionError = apiResponseError(409, "Tool 当前不可重试");
+    vi.mocked(api.retryTool).mockRejectedValueOnce(actionError);
+
+    await expect(agent.retryTool("task-1")).rejects.toBe(actionError);
+
+    expect(agent.conversationCreationUncertain.value).toBe(true);
+    expect(agent.globalErrors.value).toEqual(
+      expect.arrayContaining([
+        {
+          message:
+            "无法确认 Conversation 是否已创建，请先刷新 Conversation 列表，避免重复创建。",
+        },
+        expect.objectContaining({
+          message: "Tool 当前不可重试",
+          status: 409,
+        }),
+      ]),
+    );
+  });
+
+  it("shows Conversation creation uncertainty beside a failed list refresh", async () => {
+    const { agent, api } = createSubject();
+    vi.mocked(api.createConversation).mockRejectedValueOnce(
+      new ConversationCreationUncertaintyError(),
+    );
+    await expect(agent.createConversation()).rejects.toBeInstanceOf(
+      ConversationCreationUncertaintyError,
+    );
+    vi.mocked(api.listConversations).mockRejectedValueOnce(
+      new ReadNetworkError(),
+    );
+
+    await expect(agent.refreshConversations()).rejects.toBeInstanceOf(
+      ReadNetworkError,
+    );
+
+    expect(agent.globalErrors.value).toEqual([
+      {
+        message:
+          "无法确认 Conversation 是否已创建，请先刷新 Conversation 列表，避免重复创建。",
+      },
+      { message: "读取失败，请检查网络后重试。" },
+    ]);
+  });
+
+  it("successful list refresh removes only creation uncertainty and its read error", async () => {
+    const { agent, api } = createSubject();
+    await agent.selectConversation("conversation-1");
+    vi.mocked(api.createConversation).mockRejectedValueOnce(
+      new ConversationCreationUncertaintyError(),
+    );
+    await expect(agent.createConversation()).rejects.toBeInstanceOf(
+      ConversationCreationUncertaintyError,
+    );
+    vi.mocked(api.listConversations).mockRejectedValueOnce(
+      new ReadNetworkError(),
+    );
+    await expect(agent.refreshConversations()).rejects.toBeInstanceOf(
+      ReadNetworkError,
+    );
+    const actionError = apiResponseError(409, "后续业务冲突");
+    vi.mocked(api.retryTool).mockRejectedValueOnce(actionError);
+    await expect(agent.retryTool("task-1")).rejects.toBe(actionError);
+    expect(agent.globalErrors.value).toHaveLength(3);
+
+    await agent.refreshConversations();
+
+    expect(agent.conversationCreationUncertain.value).toBe(false);
+    expect(agent.globalErrors.value).toEqual([
+      {
+        message: "后续业务冲突",
+        status: 409,
+        request_id: "request-action-409",
+        details: [],
+      },
+    ]);
+  });
+
+  it("does not expose raw bodies or stacks through multiple notices", async () => {
+    const { agent, api } = createSubject();
+    await agent.selectConversation("conversation-1");
+    vi.mocked(api.submitMessage).mockRejectedValueOnce(
+      apiResponseError(409, "安全业务错误"),
+    );
+    vi.mocked(api.getTimelinePage).mockRejectedValueOnce(
+      new Error(
+        "raw body password=secret\n    at C:\\private\\internal.ts:1",
+      ),
+    );
+
+    await expect(agent.submitNewTask("generate")).rejects.toMatchObject({
+      status: 409,
+    });
+
+    const visible = JSON.stringify(agent.globalErrors.value);
+    expect(visible).toContain("安全业务错误");
+    expect(visible).toContain("请求处理失败。");
+    expect(visible).not.toContain("raw body");
+    expect(visible).not.toContain("secret");
+    expect(visible).not.toContain("private");
+    expect(visible).not.toContain("stack");
+  });
+
+  it("clears Conversation creation uncertainty only after an explicit list refresh succeeds", async () => {
+    const { agent, api } = createSubject();
+    vi.mocked(api.createConversation).mockRejectedValueOnce(
+      new ConversationCreationUncertaintyError(),
+    );
+    await expect(agent.createConversation()).rejects.toBeInstanceOf(
+      ConversationCreationUncertaintyError,
+    );
+
+    vi.mocked(api.listConversations).mockResolvedValueOnce(
+      envelope(
+        conversationPage([conversation("conversation-created")]),
+        "request-refresh-conversations",
+      ),
+    );
+    await agent.refreshConversations();
+
+    expect(api.listConversations).toHaveBeenLastCalledWith(
+      20,
+      undefined,
+      expect.any(AbortSignal),
+    );
+    expect(agent.conversationCreationUncertain.value).toBe(false);
+    expect(agent.globalError.value).toBeNull();
+    expect(agent.conversations.value.map((item) => item.conversation_id))
+      .toEqual(["conversation-created"]);
+  });
+
+  it("retains Conversation creation uncertainty when the explicit list refresh fails", async () => {
+    const { agent, api } = createSubject();
+    vi.mocked(api.createConversation).mockRejectedValueOnce(
+      new ConversationCreationUncertaintyError(),
+    );
+    await expect(agent.createConversation()).rejects.toBeInstanceOf(
+      ConversationCreationUncertaintyError,
+    );
+    vi.mocked(api.listConversations).mockRejectedValueOnce(
+      new ReadNetworkError(),
+    );
+
+    await expect(agent.refreshConversations()).rejects.toBeInstanceOf(
+      ReadNetworkError,
+    );
+
+    expect(agent.conversationCreationUncertain.value).toBe(true);
+    expect(agent.globalError.value?.message).toContain(
+      "无法确认 Conversation 是否已创建",
     );
   });
 

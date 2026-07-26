@@ -1,4 +1,5 @@
 import {
+  computed,
   getCurrentScope,
   onScopeDispose,
   readonly,
@@ -12,6 +13,8 @@ import {
   type MaterialsAgentApi,
 } from "../api/client";
 import {
+  ApiResponseError,
+  ConversationCreationUncertaintyError,
   RequestAbortedError,
   toUserVisibleError,
   type UserVisibleError,
@@ -72,10 +75,13 @@ export interface MaterialsAgentState {
   supplementTarget: DeepReadonly<Ref<SupplementTarget | null>>;
   pendingMutation: DeepReadonly<Ref<PendingMutationV1 | null>>;
   mutationStatus: Readonly<Ref<MutationStatus>>;
+  conversationCreationUncertain: Readonly<Ref<boolean>>;
   globalError: DeepReadonly<Ref<UserVisibleError | null>>;
+  globalErrors: DeepReadonly<Ref<UserVisibleError[]>>;
   lastRequestId: Readonly<Ref<string | null>>;
   initialize(): Promise<void>;
   loadConversations(reset?: boolean): Promise<void>;
+  refreshConversations(): Promise<void>;
   loadMoreConversations(): Promise<void>;
   createConversation(title?: string): Promise<Conversation>;
   selectConversation(conversationId: string): Promise<void>;
@@ -143,9 +149,60 @@ export function useMaterialsAgent(
   const taskDetailsById = ref<Record<string, TaskDetail>>({});
   const taskDetailsLoadingById = ref<Record<string, boolean>>({});
   const supplementTarget = ref<SupplementTarget | null>(null);
-  const globalError = ref<UserVisibleError | null>(null);
+  const actionError = ref<UserVisibleError | null>(null);
+  const readError = ref<UserVisibleError | null>(null);
+  const conversationCreationUncertain = ref(false);
+  const conversationCreationUncertaintyError =
+    computed<UserVisibleError | null>(() =>
+      conversationCreationUncertain.value
+        ? toUserVisibleError(
+            new ConversationCreationUncertaintyError(),
+          )
+        : null,
+    );
+  const globalErrors = computed<UserVisibleError[]>(() => {
+    const candidates = [
+      conversationCreationUncertaintyError.value,
+      actionError.value,
+      readError.value,
+    ];
+    const seen = new Set<string>();
+    const errors: UserVisibleError[] = [];
+    for (const candidate of candidates) {
+      if (candidate === null) {
+        continue;
+      }
+      const key = JSON.stringify([
+        candidate.message,
+        candidate.status ?? null,
+        candidate.request_id ?? null,
+      ]);
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      errors.push(candidate);
+    }
+    return errors;
+  });
+  const globalError = computed(
+    () =>
+      actionError.value ??
+      conversationCreationUncertaintyError.value ??
+      readError.value,
+  );
   const lastRequestId = ref<string | null>(null);
 
+  type ActionErrorSource =
+    | "CONVERSATION_CREATE"
+    | "MUTATION"
+    | "RECONCILIATION";
+  type ReadErrorSource =
+    | "CONVERSATIONS"
+    | "TIMELINE"
+    | "TASK_HISTORY";
+  let actionErrorSource: ActionErrorSource | null = null;
+  let readErrorSource: ReadErrorSource | null = null;
   let conversationGeneration = 0;
   let timelineGeneration = 0;
   let disposed = false;
@@ -187,24 +244,40 @@ export function useMaterialsAgent(
   };
   const mutation = useIdempotentRequest(mutationOptions);
 
-  function setError(error: unknown): void {
-    globalError.value = toUserVisibleError(error);
+  function setActionVisibleError(
+    error: UserVisibleError,
+    source: ActionErrorSource,
+  ): void {
+    actionError.value = error;
+    actionErrorSource = source;
   }
 
-  function clearError(): void {
-    globalError.value = null;
+  function setActionError(
+    error: unknown,
+    source: ActionErrorSource,
+  ): void {
+    setActionVisibleError(toUserVisibleError(error), source);
   }
 
-  function clearReadError(): void {
-    if (mutation.status.value !== "UNCERTAIN") {
-      clearError();
+  function clearActionError(): void {
+    actionError.value = null;
+    actionErrorSource = null;
+  }
+
+  function clearReadError(source: ReadErrorSource): void {
+    if (readErrorSource !== source) {
+      return;
     }
+    readError.value = null;
+    readErrorSource = null;
   }
 
-  function setReadError(error: unknown): void {
-    if (mutation.status.value !== "UNCERTAIN") {
-      setError(error);
-    }
+  function setReadError(
+    error: unknown,
+    source: ReadErrorSource,
+  ): void {
+    readError.value = toUserVisibleError(error);
+    readErrorSource = source;
   }
 
   async function loadConversations(reset = false): Promise<void> {
@@ -216,7 +289,7 @@ export function useMaterialsAgent(
     conversationController = controller;
     const generation = ++conversationGeneration;
     conversationListLoading.value = true;
-    clearReadError();
+    clearReadError("CONVERSATIONS");
     try {
       const cursor = reset
         ? undefined
@@ -263,7 +336,7 @@ export function useMaterialsAgent(
       ) {
         return;
       }
-      setReadError(error);
+      setReadError(error, "CONVERSATIONS");
       throw error;
     } finally {
       if (generation === conversationGeneration) {
@@ -294,7 +367,7 @@ export function useMaterialsAgent(
     }
     const generation = ++timelineGeneration;
     timelineLoading.value = true;
-    clearReadError();
+    clearReadError("TIMELINE");
     try {
       const complete = await loadCompleteTimeline(
         api,
@@ -310,6 +383,9 @@ export function useMaterialsAgent(
       }
       timeline.value = complete.items;
       lastRequestId.value = complete.lastRequestId;
+      if (actionErrorSource === "RECONCILIATION") {
+        clearActionError();
+      }
     } catch (error) {
       if (
         disposed ||
@@ -318,7 +394,7 @@ export function useMaterialsAgent(
       ) {
         return;
       }
-      setReadError(error);
+      setReadError(error, "TIMELINE");
       throw error;
     } finally {
       if (generation === timelineGeneration) {
@@ -389,16 +465,31 @@ export function useMaterialsAgent(
     await loadConversations(true);
   }
 
+  async function refreshConversations(): Promise<void> {
+    await loadConversations(true);
+    if (disposed) {
+      return;
+    }
+    conversationCreationUncertain.value = false;
+  }
+
   async function createConversation(
     title?: string,
   ): Promise<Conversation> {
-    clearError();
+    if (conversationCreationUncertain.value) {
+      throw new ConversationCreationUncertaintyError();
+    }
+    clearActionError();
     let response: ApiSuccessEnvelope<Conversation>;
     try {
       response = await api.createConversation(title);
     } catch (error) {
       if (!disposed) {
-        setError(error);
+        if (error instanceof ConversationCreationUncertaintyError) {
+          conversationCreationUncertain.value = true;
+        } else {
+          setActionError(error, "CONVERSATION_CREATE");
+        }
       }
       throw error;
     }
@@ -406,6 +497,7 @@ export function useMaterialsAgent(
     if (disposed) {
       return response.data;
     }
+    conversationCreationUncertain.value = false;
     lastRequestId.value = response.request_id;
     let reconciliationFailed = false;
     try {
@@ -426,9 +518,10 @@ export function useMaterialsAgent(
     }
     lastRequestId.value = response.request_id;
     if (reconciliationFailed) {
-      globalError.value = {
-        message: REFRESH_AFTER_WRITE_MESSAGE,
-      };
+      setActionVisibleError(
+        { message: REFRESH_AFTER_WRITE_MESSAGE },
+        "RECONCILIATION",
+      );
     }
     return response.data;
   }
@@ -477,7 +570,7 @@ export function useMaterialsAgent(
       ...taskDetailsLoadingById.value,
       [taskId]: true,
     };
-    clearReadError();
+    clearReadError("TASK_HISTORY");
     try {
       const response = await api.getTask(taskId, controller.signal);
       if (
@@ -498,7 +591,7 @@ export function useMaterialsAgent(
         taskHistoryGenerations.get(taskId) === generation &&
         !(error instanceof RequestAbortedError)
       ) {
-        setReadError(error);
+        setReadError(error, "TASK_HISTORY");
       }
       throw error;
     } finally {
@@ -613,9 +706,38 @@ export function useMaterialsAgent(
       return;
     }
     if (failed) {
-      globalError.value = {
-        message: REFRESH_AFTER_WRITE_MESSAGE,
-      };
+      setActionVisibleError(
+        { message: REFRESH_AFTER_WRITE_MESSAGE },
+        "RECONCILIATION",
+      );
+    }
+  }
+
+  async function refreshAfterBusinessFailure(
+    descriptor: Pick<
+      PendingMutationV1,
+      "operation" | "resourceId"
+    >,
+  ): Promise<void> {
+    if (disposed) {
+      return;
+    }
+    try {
+      await refreshTimeline();
+    } catch {
+      // The read path owns its safe readError projection.
+    }
+    if (
+      disposed ||
+      (descriptor.operation !== "TASK_CREATE" &&
+        descriptor.operation !== "TASK_INPUT_SUPPLEMENT")
+    ) {
+      return;
+    }
+    try {
+      await loadConversations(true);
+    } catch {
+      // The read path owns its safe readError projection.
     }
   }
 
@@ -624,7 +746,7 @@ export function useMaterialsAgent(
     resourceId: string,
     body: MutationRequestBody,
   ): Promise<void> {
-    clearError();
+    clearActionError();
     let response: ApiSuccessEnvelope<unknown>;
     try {
       response = await mutation.start<ApiSuccessEnvelope<unknown>>(
@@ -634,7 +756,13 @@ export function useMaterialsAgent(
       );
     } catch (error) {
       if (!disposed) {
-        setError(error);
+        setActionError(error, "MUTATION");
+      }
+      if (error instanceof ApiResponseError) {
+        await refreshAfterBusinessFailure({
+          operation,
+          resourceId,
+        });
       }
       throw error;
     }
@@ -707,14 +835,17 @@ export function useMaterialsAgent(
     if (descriptor === null) {
       throw new Error("没有可重试的待确认写操作。");
     }
-    clearError();
+    clearActionError();
     let response: ApiSuccessEnvelope<unknown>;
     try {
       response =
         await mutation.retryPending<ApiSuccessEnvelope<unknown>>();
     } catch (error) {
       if (!disposed) {
-        setError(error);
+        setActionError(error, "MUTATION");
+      }
+      if (error instanceof ApiResponseError) {
+        await refreshAfterBusinessFailure(descriptor);
       }
       throw error;
     }
@@ -730,7 +861,7 @@ export function useMaterialsAgent(
   function discardPendingMutation(): { discarded: boolean } {
     const result = mutation.discardPending();
     if (result.discarded) {
-      clearError();
+      clearActionError();
     }
     return result;
   }
@@ -753,10 +884,15 @@ export function useMaterialsAgent(
     supplementTarget: readonly(supplementTarget),
     pendingMutation: mutation.pending,
     mutationStatus: mutation.status,
-    globalError: readonly(globalError),
+    conversationCreationUncertain: readonly(
+      conversationCreationUncertain,
+    ),
+    globalError,
+    globalErrors,
     lastRequestId: readonly(lastRequestId),
     initialize,
     loadConversations,
+    refreshConversations,
     loadMoreConversations,
     createConversation,
     selectConversation,
