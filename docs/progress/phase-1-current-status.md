@@ -7,9 +7,9 @@
 | 字段 | 当前值 |
 |---|---|
 | 当前阶段 | 阶段 1A |
-| 当前里程碑 | M10 |
-| 当前工作单元 | M10-B 完整最小界面与交互 |
-| 状态 | `M10_B_PROJECT_OWNER_ACCEPTED_COMMIT_AUTHORIZED` |
+| 当前里程碑 | M11 |
+| 当前工作单元 | M11-A：Mock 栈安全启动/停止与基础端到端旅程 |
+| 状态 | `M11A_PROJECT_OWNER_ACCEPTED_STAGING_AUTHORIZED` |
 | 上一已验收工作单元 | M10-B：完整最小界面与交互 |
 | Pre-M8 stop-loss commit | `891714dd58cf069073a7d4037be43ef66304d0ac` |
 | M8 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
@@ -17,27 +17,31 @@
 | M9 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M9 acceptance commit | `d7dee06c1f1294b010f64f5c532f5cb276ca53fa` |
 | M10-A acceptance commit | `c597a89340072217d07d734e6b2ab88b6236d009` |
-| M10-B acceptance commit | `THIS COMMIT` |
-| M10 overall acceptance commit | `THIS COMMIT` |
+| M10-B acceptance commit | `f426e6f23703002a648991e5bb436929df19e8e2` |
+| M10 overall acceptance commit | `f426e6f23703002a648991e5bb436929df19e8e2` |
 | Expected subject | `feat: add minimal chat frontend` |
-| 实际 branch / HEAD | `main` / `c597a89340072217d07d734e6b2ab88b6236d009` |
-| HEAD parent / subject | `d7dee06c1f1294b010f64f5c532f5cb276ca53fa` / `feat: add reliable frontend foundation` |
-| 暂存区 | `EMPTY / AWAITING FINAL STAGING` |
-| 当前工作区 | M10-B 已由项目负责人验收并授权创建验收提交；尚未暂存或创建 commit |
+| 实际 branch / HEAD | `main` / `f426e6f23703002a648991e5bb436929df19e8e2` |
+| HEAD parent / subject | `c597a89340072217d07d734e6b2ab88b6236d009` / `feat: add minimal chat frontend` |
+| 暂存区 | M11-A 七个 allowlist 路径已精确暂存，等待 staged diff 审计和 commit 授权 |
+| 当前工作区 | M11-A 七个 allowlist 路径已通过代码审查和项目负责人浏览器人工验收；授权精确暂存，等待 staged diff 审计和 commit 授权 |
 | 已确认设计基线 | 五份均未修改 |
 | 历史 migration | `0001`–`0008` 均未修改；当前唯一 head/current 为 `0009_timeline_query_indexes` |
 | `SEM/` | 未修改、未加载或运行真实模型；`SEM_INTEGRITY_OK` |
 | Mock Runtime | 实现和协议未修改 |
-| Commit | `AUTHORIZED / NOT YET CREATED` |
+| Commit | `NO / NOT AUTHORIZED` |
 | Push | `NO` |
 | Amend | `NO` |
-| Git 外部动作 | 尚未暂存或创建授权 commit；未 push、amend、rebase、reset、stash |
+| Git 外部动作 | 本轮仅授权精确暂存七个 M11-A allowlist 路径；commit、push、amend、rebase、reset、stash、创建分支或 worktree 均未授权 |
 | M10-A | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M10-B | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M10 overall | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
-| M11 | `NOT STARTED` |
-| 是否处于项目负责人暂停点 | 是；M10-B 与 M10 overall 已验收，commit 已授权但尚未暂存或创建，M11 未开始 |
-| 更新时间 | `2026-07-26` |
+| M11 | `IN PROGRESS` |
+| M11-A | `PROJECT_OWNER_ACCEPTED_STAGING_AUTHORIZED` |
+| M11-B | `NOT STARTED` |
+| M12 | `NOT STARTED` |
+| M11 start baseline | `main@f426e6f23703002a648991e5bb436929df19e8e2` |
+| 是否处于项目负责人暂停点 | 是；M11-A 已通过项目负责人验收并授权暂存，等待 staged diff 审计和 commit 授权；未开始 M11-B 或 M12 |
+| 更新时间 | `2026-07-27` |
 
 ## M8 已实现内容
 
@@ -392,21 +396,52 @@ Runtime、MinIO 和 Explanation Provider 调用均不在数据库 UoW 内。Back
 ## M10-B 项目负责人验收与提交授权
 
 - 项目负责人已验收 M10-B：`COMPLETE / PROJECT_OWNER_ACCEPTED`；M10 overall 同步为 `COMPLETE / PROJECT_OWNER_ACCEPTED`。
-- M10-B 与 M10 overall 的 acceptance commit 均为 `THIS COMMIT`；授权提交 subject 为 `feat: add minimal chat frontend`。当前 commit 尚未创建。
+- M10-B 与 M10 overall 的 acceptance commit 均已创建，为 `f426e6f23703002a648991e5bb436929df19e8e2`；subject 为 `feat: add minimal chat frontend`。
 - 验收证据继续保留：前端全量 9 files、`204 passed`、0 failed；typecheck 0 errors；Vite `8.1.5` production build 成功、39 modules，JS 113.20 kB（gzip 39.43 kB）。
 - 浏览器 A–H 验收继续有效：Conversation、知识问答、Tool、补参、两类重试、图片查看/下载、安全错误、MinIO/Backend 故障与 `UNCERTAIN` 原 key 恢复均已覆盖，最终 console warning/error 为 0。
 - SEM 证据继续有效：`SEM_INTEGRITY_OK`，57 files、`total_size_bytes=2043071133`、fingerprint `62bbb0878ed5d659490755e401fba0e3e09f1f36e3a67667ea04227927546b4a`。
 - `npm ci` 的当前审计元数据报告 6 个 high severity vulnerabilities；它们仅来自开发依赖。提交前只读复核 `npm --prefix frontend audit --omit=dev` 为 `found 0 vulnerabilities`。既有 `glob@10.5.0` 弃用提示同样来自 dev-only 传递依赖；本轮未修改依赖或 lockfile。
-- 当前暂存区仍为 `EMPTY / AWAITING FINAL STAGING`；commit 为 `AUTHORIZED / NOT YET CREATED`；未 push、未 amend；M11 保持 `NOT STARTED`。
+- M10 验收提交后的 M11-A 实现见下节；M10-B 提交后未 push、未 amend。
+
+## M11-A 当前执行记录
+
+- 唯一开始基线已实时核对为 `main@f426e6f23703002a648991e5bb436929df19e8e2`，subject `feat: add minimal chat frontend`，parent `c597a89340072217d07d734e6b2ab88b6236d009`；开始时工作区和暂存区均为空，未创建分支、worktree 或临时 commit。
+- 阶段 1 计划中的 M11 已拆为 M11-A 与 M11-B；`check-scope.ps1` 已分别配置 `M11A`、`M11B` 和二者并集 `M11`。本次限定修订确认 M11-B allowlist 已预配置，开始 M11-B 时只需重新核对而不是扩展；`check-scope.ps1` 内容与修订前 SHA-256 一致。本轮仍只实现 M11-A 的七个精确 allowlist 路径，没有创建 M11-B 验收矩阵、统一入口或报告。
+- `start-mock-stack.ps1` 现在把 `APP_ENV`、`LOG_LEVEL`、Actor、PostgreSQL、MinIO、Runtime、M5 开关和 Timeline key 共 20 个字段纳入同一受控环境；`APP_ENV=local`、`LOG_LEVEL=INFO`、PostgreSQL 端口、Runtime timeout 和 `M5_DEV_ROUTES_ENABLED=false` 使用与 `.env.example`/`AppSettings` 一致的安全默认，其余资源身份或凭据字段必须由 `.env` 提供。完整字段先经现有 `load_settings()`、PostgreSQL URL、MinIO 和 Runtime 解析校验，再覆盖 Compose、Alembic、bucket bootstrap、失败清理和三个子进程创建；所有 return/catch 路径最后逐项恢复调用者环境。
+- PowerShell 环境备份/恢复继续使用进程级 .NET API；三个隐藏 WMI wrapper 改为通过 `New-RoleSpecificChildEnvironment` 接收 role-specific 环境，而不是完整受控环境。函数探针确认 Backend 含全部 20 个已验证配置键；Runtime 的 M11-A 业务键精确为 `ZTA35G_RUNTIME_TOKEN` 和固定 `ZTA35G_RUNTIME_PORT`，不含 PostgreSQL、MinIO、Actor、Timeline 或 M5 字段；Frontend 不含任何受控字段，因此五个 Backend Secret 均缺席。通用 PATH、SystemRoot、TEMP、USERPROFILE 和既有 Conda 运行环境仍保留；实际值不进入命令行、state、日志或测试输出。
+- 所有 Compose `ps/up/stop` 固定 `materialsagent` project 和仓库 `docker-compose.yml`，并在首次 Compose 查询前解析实际有效 Docker context/endpoint/engine ID。只接受 `npipe:////./pipe/<local-name>`；`DOCKER_HOST=tcp://...` 的完整 start 探针在 `docker_validation` 阶段、任何 Compose 副作用前以不含 endpoint 详情的固定错误拒绝。正常 state 和 recovery state 均记录非空 `docker_engine_id/docker_context`。真实篡改 engine ID 后，stop 仍安全停止三种 App 进程，但输出 `DOCKER_OWNERSHIP_NOT_VERIFIED`、保留 state、两个 Compose 服务继续运行；恢复可信 identity 后才停止本轮服务并删除 state。
+- 本轮再次在两个服务均非 preexisting 时真实执行 `compose up`，随后注入 ownership reconciliation 查询失败并让首次 cleanup 受控失败；输出 `MOCK_STACK_START_CLEANUP_INCOMPLETE`，recovery state 为 `process=[]`、两个合法 Docker record 和同一 engine/context、无 Secret。独立 stop 随后只停止本轮 `postgresql/minio` 并删除 state；未执行 `down`、`down -v` 或删除 volume。
+- start/stop 的 state 结构校验现在同时支持脚本内 `[ordered]` state 与 JSON `PSCustomObject`，但显式要求非空 `run_id/created_at/python_executable` 以及存在、非 null、集合语义明确的 `process/docker`。函数矩阵确认空数组 recovery 合法，null、缺失集合、字符串、普通对象和缺失 metadata 均非法；真实 `process=null`、`docker=null`、缺失 process、缺失 docker 四项 stop 均 exit 2，损坏 state 原样保留、三个可信 PID 和两个 Compose 服务保持运行，恢复可信 state 后才正常停止。
+- 三个应用进程仍使用固定 role/marker/port、Windows `SystemDirectory\cmd.exe`、PID/start time、实际命令行 repo root 交叉验证。WMI 返回 PID 后现在立即建立 provisional record 并登记到外层 ownership list，再进行完整 CIM metadata 验证。真实故障探针让 metadata 失败、首次精确 PID rollback 和外层第二次 rollback 均受控失败；recovery state 保留一条完整 runtime provisional record、Docker 已清理，随后独立 stop 在实际 metadata 可验证后终止该精确 PID 并删除 state。未知/重复 role/service、marker、wrapper 或 ownership 仍 fail-closed。
+- 两轮最终启停均成功：第一轮 start 后正常 state 为 3 process/2 Docker 且 local engine identity 与实时值一致，重复 start 返回 `MOCK_STACK_ALREADY_RUNNING` 且 run_id/PID 集合不变；identity mismatch 探针恢复可信 state 后正常 stop，再次 stop 返回 `MOCK_STACK_NOT_RUNNING`。第二轮 start 后四项 null/missing state 均拒绝且 3 process/2 Docker 不变，恢复可信 state 后 E2E 与正常 stop 成功。额外全量验证栈也正常 start/stop；最终 3000/8000/8100 listener、state 和 Compose running service 均为 0，未删除 volume。
+- TDD RED：三条 E2E 均被收集，fixture 实现前精确为 `3 errors`，原因均为 `fixture 'e2e_harness' not found`；没有语法、导入或生产代码失败。
+- GREEN E2E 使用真实临时 PostgreSQL 数据库、真实临时 MinIO bucket、真实 `127.0.0.1:8100` Mock Runtime HTTP、进程内 Mock Chat/Explanation 和公共 API。fixture 以同一个受控 MinIO client 先检查同名 bucket 不存在，再创建并设置 `bucket_created=true`；只有本轮成功创建才允许清理，清理函数再次验证 bucket 名。新增 fake-client 回归证明预存同名 bucket 立即拒绝且 sentinel object/bucket 不被创建、枚举或删除；两轮 E2E 均为 `4 passed`（`1.78s` / `1.64s`）。
+- 完整 Tool 旅程的统一 PNG 安全断言继续验证精确 `image/png`、受控 filename、PNG magic bytes 和所有响应头；本轮还直接读取真实 `AssetRow.object_key` 并确认其实际值未出现在任何 header。测试未暴露生产 Asset API 缺陷，未修改生产代码。
+- E2E session cleanup 后只读审计为 `E2E_DATABASE_LEFTOVERS=0`、`E2E_BUCKET_LEFTOVERS=0`；正式数据库和正式 bucket 均仍存在。最终 `state.json` 不存在，3000/8000/8100 listener 均为 0，Compose running service 为 0；日志保留。
+- 本轮 Backend E2E 为 `4 passed in 1.86s`；直接使用既有 Backend Python 的最终全量为 `852 passed in 112.16s`。Mock Runtime 为 `11 passed in 1.08s`；`pip check` 为 `No broken requirements found.`，`compileall` exit 0。
+- Frontend Vitest 为 9 files、`204 passed`；typecheck 0 errors；Vite `8.1.5` production build成功、39 modules，JS 113.20 kB（gzip 39.43 kB）。
+- Alembic 唯一 head/current 为 `0009_timeline_query_indexes (head)`，`upgrade head` 成功，`alembic check` 为 `No new upgrade operations detected.`。
+- `SCOPE_OK M11A` 与 `SCOPE_OK M11`；`SEM_INTEGRITY_OK` 为 57 files、`total_size_bytes=2043071133`、fingerprint `62bbb0878ed5d659490755e401fba0e3e09f1f36e3a67667ea04227927546b4a`；未修改、加载或运行 `SEM/`。
+- 根 `.env` 在远程 endpoint、engine mismatch、provisional、Compose recovery、null/missing state、两轮启停和全量验证后均恢复到修订前 SHA-256 `EEA078F8072D4D3C57B4AA046736B4B15E09B182675C33C9A5234A06C79C4EAB`；受控 Timeline 测试 key 未保留。最终只读审计为 `E2E_DATABASE_LEFTOVERS=0`、`E2E_BUCKET_LEFTOVERS=0`，正式数据库和正式 bucket 均仍存在；没有调用真实 LLM、真实 `materialsagent-zta35g`、GPU 环境或模型权重。
+- 当前未提交路径精确为：本计划、当前进度文件、`scripts/dev/check-scope.ps1`、`scripts/dev/start-mock-stack.ps1`、`scripts/dev/stop-mock-stack.ps1`、`backend/tests/e2e/conftest.py`、`backend/tests/e2e/test_mock_journey.py`。本轮已授权精确暂存这七个 M11-A allowlist 路径；未执行 commit、push 或 amend。
+- M11-A code review: `APPROVED`。M11-A project-owner manual acceptance: `PASSED`，manual acceptance date: `2026-07-27`。稳定人工验收摘要：`start-mock-stack.ps1` 输出 `MOCK_STACK_STARTED`；Frontend 页面正常访问；Conversation 创建正常；知识问答正常；刷新后 Conversation 和 Timeline 可恢复；Frontend 代理 Backend health 正常；`stop-mock-stack.ps1` 输出 `MOCK_STACK_STOPPED`；三个受控应用进程均由 stop 脚本精确停止。
+
+## 已知风险
+
+- 启停脚本是 Windows 本地开发工具，依赖 PowerShell 5.1、CIM/WMI、Docker Compose 和一个可发现的 `materialsagent-backend` Conda 环境；它不是生产守护进程或跨平台服务管理器。
+- 当前根 `.env` 已按要求恢复到修订前状态，其中尚未配置 Timeline signing key；因此后续常规 start 会有意在任何本地依赖副作用前安全失败，需由项目负责人先提供满足现有 AppSettings 校验的本地 Secret，且不得提交该值。
+- M11-A 只覆盖基础成功旅程和 NEEDS_INPUT 补参；完整故障矩阵、同 key 重放、两类显式重试、浏览器统一验收与阶段 1A 报告仍属于 M11-B，当前未开始。
+- start/stop 以严格所有权验证优先；state 陈旧、结构非法、PID 被复用、固定 marker/wrapper 不一致时会安全拒绝接管，需要项目负责人按日志和进程事实人工处理。若启动失败清理留下 recovery state，必须先运行 stop 完成已记录资源清理，不得覆盖 state 或宽泛杀进程。
+- Docker context、endpoint 或 engine ID 在栈运行期间发生变化时，stop 会继续处理可验证 App PID，但有意拒绝 Compose stop 并保留 state；必须恢复到 state 记录的同一本地 engine 后再完成 Docker 清理。
 
 ## 下一步
 
-仅完成提交前最终状态同步，等待下一步显式暂存/提交操作；不进入 M11：
+停在 M11-A staged diff 审计和 commit 授权点；不提交、不开始 M11-B 或 M12：
 
 ```text
-当前里程碑：M10
-当前工作单元：M10-B 完整最小界面与交互
-状态：M10_B_PROJECT_OWNER_ACCEPTED_COMMIT_AUTHORIZED
+当前里程碑：M11
+当前工作单元：M11-A Mock 栈安全启动/停止与基础端到端旅程
+状态：M11A_PROJECT_OWNER_ACCEPTED_STAGING_AUTHORIZED
 
 M10-A:
 COMPLETE / PROJECT_OWNER_ACCEPTED
@@ -416,21 +451,21 @@ c597a89340072217d07d734e6b2ab88b6236d009
 M10-B:
 COMPLETE / PROJECT_OWNER_ACCEPTED
 acceptance commit:
-THIS COMMIT
+f426e6f23703002a648991e5bb436929df19e8e2
 
 M10 overall:
 COMPLETE / PROJECT_OWNER_ACCEPTED
 acceptance commit:
-THIS COMMIT
+f426e6f23703002a648991e5bb436929df19e8e2
 
 Expected subject:
 feat: add minimal chat frontend
 
 Staging:
-EMPTY / AWAITING FINAL STAGING
+M11-A seven allowlist paths staged for audit
 
 Commit:
-AUTHORIZED / NOT YET CREATED
+NO / NOT AUTHORIZED
 
 Push:
 NO
@@ -439,5 +474,26 @@ Amend:
 NO
 
 M11:
+IN PROGRESS
+
+M11-A:
+PROJECT_OWNER_ACCEPTED_STAGING_AUTHORIZED
+
+M11-B:
 NOT STARTED
+
+M12:
+NOT STARTED
+
+M11 start baseline:
+main@f426e6f23703002a648991e5bb436929df19e8e2
+
+M11-A code review:
+APPROVED
+
+M11-A project-owner manual acceptance:
+PASSED
+
+Manual acceptance date:
+2026-07-27
 ```

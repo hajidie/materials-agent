@@ -736,34 +736,90 @@ git diff --cached --check
 
 ## M11：阶段 1A 完整 Mock 端到端验收
 
-**目标：** 固化一键启动/停止开发依赖、Mock E2E 测试和阶段 1A 验收记录，不新增产品能力。
+**总目标：** 在不加载真实模型、不增加产品能力的前提下，把已验收的 PostgreSQL、MinIO、Mock Runtime、Backend 和 Frontend 串成可重复验收的阶段 1A Mock 闭环。M11 拆成两个独立工作单元：M11-A 只负责安全启停与基础旅程；M11-B 才负责故障注入、重放/重试、浏览器验收和正式阶段 1A 报告。M11-A 验收前不得开始 M11-B，M11 整体验收前不得开始 M12。
 
-**用户价值：** 在完全不运行真实模型时，平台已经能稳定演示最终用户旅程，后续模型问题不会遮蔽平台问题。
+### M11-A：Mock 栈安全启动/停止与基础端到端旅程
 
-**前置条件：** M10 通过。
+**前置条件：** M10 已由项目负责人验收；开始时 Git 必须位于已验收 M10 commit，暂存区和工作区均为空。实现仍使用 Backend Python 3.11 环境、现有 Mock LLM/Mock Explanation、现有 Mock Runtime、PostgreSQL、MinIO 和 Vite，不安装或升级依赖。
 
-**允许修改的文件范围：** `scripts/dev/{start,stop}-mock-stack.ps1`、`scripts/acceptance/run-phase-1a.ps1`、E2E tests、`docs/acceptance/phase-1a-report.md`。
+**精确 allowlist：**
 
-**明确不做：** 不接真实模型、不改公共 Schema、不顺便扩展 UI/数据库。
+- 实施管理：本计划、`docs/progress/phase-1-current-status.md`、`scripts/dev/check-scope.ps1`。
+- 开发脚本：`scripts/dev/start-mock-stack.ps1`、`scripts/dev/stop-mock-stack.ps1`。
+- 基础 E2E：`backend/tests/e2e/conftest.py`、`backend/tests/e2e/test_mock_journey.py`。
 
-**实现步骤：**
+除上述七个路径外不得修改或新增文件；运行时日志和 state 只能写入已忽略的 `tmp/m11-mock-stack/`。不得修改 `.gitignore`、生产 Backend/Frontend/Runtime 代码、migration、五份设计基线、`SEM/`、依赖或正式 PostgreSQL/MinIO 数据。
 
-1. 编排 PostgreSQL/MinIO、Mock Runtime、Backend、Frontend 的显式开发启动；进程失败可清理，不作为生产守护。
-2. E2E 覆盖用户消息→编排→Mock Tool→PNG→Result→Explanation→timeline/UI。
-3. 故障注入覆盖 DB、MinIO、Runtime、Explanation 和客户端重放。
-4. 生成不含 secret/图片 payload 的验收报告。
+**安全启动接口与所有权：**
 
-**自动化测试与四类场景：** 成功完整双输出；输入错误缺参/越界；依赖失败 Runtime/MinIO/Explanation；同 key 重放和两类显式重试。
+1. `start-mock-stack.ps1` 必须可从任意当前目录运行，依据脚本位置解析仓库根目录；通过可选 `-PythonExecutable` 或本机 Conda 环境发现 Backend Python 的绝对路径，随后所有 Python 子进程都直接使用该解释器，禁止在跟踪文件中硬编码个人绝对路径。
+2. 脚本按顺序检查 Python 版本/依赖、根 `.env` 的必需白名单键、本地依赖边界、Docker/Compose、端口 `3000/8000/8100` 和既有 state；只解析已知 `KEY=VALUE`，不执行 `.env`，不输出 Secret。在启动 Docker、执行 Alembic 或 bootstrap bucket 前，必须通过现有 `load_settings()`、`build_postgres_url()`、`parse_minio_config()` 和 `parse_zta35g_runtime_config()` 验证 `POSTGRES_HOST=127.0.0.1`、`POSTGRES_PORT=5432`、`MINIO_ENDPOINT=http://127.0.0.1:9000`、`MINIO_API_PORT=9000`、`MINIO_CONSOLE_PORT=9001`、`MINIO_SECURE=false`、`ZTA35G_RUNTIME_URL=http://127.0.0.1:8100`、非空 `LOCAL_ACTOR_ID` 和有效 `TIMELINE_CURSOR_SIGNING_KEY`；错误只命名配置项，不输出值。
+   M11-A 的受控环境不仅用于预检，还必须覆盖 Compose、Alembic、bucket bootstrap 和所有子进程创建，避免调用者 shell 环境覆盖 `.env`。
+   Backend、Runtime 和 Frontend 必须使用 role-specific child environment：Backend 接收全部已验证 AppSettings；Runtime 只增加自身 token 和固定 port；Frontend 不接收任何 M11-A Backend 受控字段。Runtime/Frontend 不得继承 PostgreSQL、MinIO、Actor、Timeline 或其他 Backend Secret。
+3. Docker Compose 只启动 `postgresql` 和 `minio`，并记录每个服务启动前是否已经运行；只允许停止本轮从未运行变为运行的服务，禁止 `down`、`down -v`、删除 volume、清空正式数据库或 bucket。首次 Compose 查询前必须确认有效 endpoint 是 Windows 本机 named pipe，并记录有效 Docker context 与 engine ID；Docker ownership 由固定 project/file 与本地 engine ID 共同确认，远程 endpoint 或 identity 不一致时不得执行 Compose stop。
+4. PostgreSQL/MinIO healthy 后，执行 Alembic 单 head 检查、`upgrade head`、`current` 和 `check`，并用现有 Storage bootstrap 确保配置的正式 bucket 存在；不得清空既有对象。
+5. 依次启动 Mock Runtime `127.0.0.1:8100`、Backend `127.0.0.1:8000`、Frontend `127.0.0.1:3000`，分别使用独立 stdout/stderr 日志；成功前必须用有界轮询验证 Runtime live/ready 的 token、contract/tool/bundle 身份，Backend live/ready 的 PostgreSQL/MinIO 状态，以及 Frontend 根页和 `/api/v1/health/live` 代理。
+6. `state.json` 采用先临时文件再原子替换，只保存 `schema_version`、`run_id`、repo root、创建时间、Python 路径、Docker engine ID/context、每个进程的 role/PID/start time/executable/command marker/port/log 路径，以及 Compose 服务的 preexisting/owned 标记；不得保存 endpoint、token、密码或完整环境。
+7. 已有正常 state 只有在三种固定 process role/marker/port、两个固定 Docker service、ownership 布尔类型、repo root、Docker engine ID/context、PID、start time、固定 wrapper executable、实际命令行和健康状态全部吻合时才返回 `MOCK_STACK_ALREADY_RUNNING`；不得信任 state 自报 marker 或 executable。任何未知/重复 role 或 service、非法布尔值、Docker identity 不一致、陈旧或不完整正常 state 都返回 `STALE_OR_INVALID_MOCK_STACK_STATE`，不得覆盖或接管。无 state 但目标端口被占用时返回 `PORT_ALREADY_IN_USE`，不得杀死未知进程。
+8. 任一步失败必须按反向顺序尝试清理本轮已确认拥有的所有进程，并只停止本轮启动的 Compose 服务；每个 native 命令按 exit code 判断，某项失败不阻止其余清理。清理完整时不得遗留 state；清理不完整时必须原子写入只含仍可能需处理资源的部分 recovery state，输出 `MOCK_STACK_START_CLEANUP_INCOMPLETE` 和相对 state 路径，再返回非零。WMI 返回 PID 后必须先建立包含固定 role/marker/port、PID、start time、预期 wrapper 和日志路径的 provisional record，再进行完整 CIM metadata 验证；首次精确 PID 回滚失败时外层 cleanup 必须保留并再次处理该 record，仍不能安全停止时将其写入 recovery state，不得形成无记录孤儿或宽泛杀进程。
 
-运行：`powershell -ExecutionPolicy Bypass -File scripts/acceptance/run-phase-1a.ps1`
+**安全停止接口与所有权：**
 
-预期：脚本最后输出 `PHASE_1A_ACCEPTANCE_PASSED`，列出每类场景数量与 0 failed；不加载任何 `SEM/` 权重。
+1. `stop-mock-stack.ps1` 只能读取 `tmp/m11-mock-stack/state.json` 中的精确记录，不得按名称或端口扫描并终止进程。
+2. 终止每个进程前按 role 使用脚本固定 marker 和固定 wrapper executable，重新核对 record marker、repo root、PID、start time、port、实际 executable 和实际命令行；未知/重复 role、未知/重复 Docker service 或非法 ownership 布尔值在任何终止动作前整体拒绝。无法证明所有权时输出 `PROCESS_OWNERSHIP_NOT_VERIFIED`，继续执行其余已通过结构校验记录的安全检查，保留 state 并返回非零。
+3. 只停止 state 中 `started_by_this_run=true` 的 Compose 服务，且在任何 Compose stop 前重新确认当前 endpoint 仍为本机 named pipe、当前 context/engine ID 与 state 一致；identity 不一致时输出 `DOCKER_OWNERSHIP_NOT_VERIFIED`、保留 state，并继续独立处理可验证的 App 进程。绝不停止启动前已运行的服务；禁止删除 volume 或数据。
+4. recovery state 中每种合法 process role 和 Docker service 都允许零或一条记录；stop 必须处理所有实际记录，不要求尚未启动的 role 存在。全部安全停止后删除正常或 recovery state、保留日志并输出 `MOCK_STACK_STOPPED`。无 state 且三个目标端口均空闲时输出 `MOCK_STACK_NOT_RUNNING` 并返回 0；无 state 但任一端口占用时返回非零。
 
-**人工验收步骤：** 项目负责人按报告中的浏览器步骤走完一次；核对五份设计的关键状态、时间线位置和错误安全性。
+**基础 E2E RED/GREEN：**
 
-**失败时回退：** 停止 Mock stack，修复失败所在里程碑；不进入 M12，不改变已验收数据模型来迁就测试。
+1. 先创建 `test_mock_journey.py` 的三条真实 HTTP/数据库/MinIO 旅程，在 session fixture 尚不存在时运行并确认恰因缺少 fixture 失败；不得以导入、语法或生产代码错误充当 RED。
+2. 再在 `conftest.py` 实现 session 级本地依赖边界断言、Runtime 身份探针、唯一临时数据库、Alembic upgrade、唯一临时 MinIO bucket、显式 test settings 和 `TestClient`。本地边界断言必须在创建数据库或 bucket 前完成，禁止对远程或非预期 PostgreSQL/MinIO 创建或删除资源。所有清理必须在 `finally` 中关闭 client/engine/pool，删除临时 bucket 中全部对象并删除 bucket，终止临时数据库连接后删除数据库。
+3. 知识问答旅程：创建 Conversation，提交普通问题，断言 Task `SUCCEEDED/KNOWLEDGE_QA`、有 AssistantMessage、无 ToolRun/ToolResult/Asset，timeline 只有对应 USER/ASSISTANT 顶层项。
+4. 完整 Tool 旅程：提交含现有 Mock 触发词“完整合法 Tool 请求”的消息，断言唯一 ToolRun/ToolResult、`completed_outputs=["sem_image","mechanical_properties"]`、AVAILABLE PNG Asset/ResultAssetLink、Explanation、受控图片内容 PNG magic、Task 与 timeline 只有一个 `TOOL_TASK`、稳定初始消息 anchor；数据库中的 `model_bundle_id` 必须精确为 `mock-zta35g-bundle`，Asset producer 必须是该 Result 的 ToolRun。
+5. NEEDS_INPUT 补参旅程：先提交缺 `aging_temperature` 的请求，断言同一 Task 为 NEEDS_INPUT 且无运行/结果/资产；再用新 Idempotency-Key、`SUPPLEMENT_TASK`、原 `target_task_id` 和包含“补充 aging_temperature = 730 °C”的现有 Mock 合法触发文本提交，断言同一 Task 成功、仅创建一个 ToolRun、新旧 Message/Revision 均保留、timeline 仍只有一张 Tool 卡且 anchor 不变。
+6. 三条旅程都必须检查公共 JSON/headers 不泄露 `object_key`、bucket、token、完整 traceback、宿主机绝对路径、权重路径或 Runtime 内部载荷。PNG 内容响应还必须断言 `Content-Type=image/png`、`Content-Disposition` 使用不含斜杠、反斜杠、盘符或 repo root 的受控文件名，并保留 PNG magic bytes 检查。
 
-**完成证据：** 完整命令日志、E2E 报告、界面截图、资源计数、`git diff --check`。到此必须暂停，等待项目负责人通过 M11 检查点并确认阶段 1A 完成。未来建议提交：`test: add phase 1a mock acceptance`。
+**M11-A 验收命令：**
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/dev/start-mock-stack.ps1
+<backend-python> -m pytest backend/tests/e2e -q
+powershell -ExecutionPolicy Bypass -File scripts/dev/start-mock-stack.ps1
+powershell -ExecutionPolicy Bypass -File scripts/dev/stop-mock-stack.ps1
+powershell -ExecutionPolicy Bypass -File scripts/dev/stop-mock-stack.ps1
+powershell -ExecutionPolicy Bypass -File scripts/dev/start-mock-stack.ps1
+<backend-python> -m pytest backend/tests/e2e -q
+powershell -ExecutionPolicy Bypass -File scripts/dev/stop-mock-stack.ps1
+<backend-python> -m pip check
+<backend-python> -m pytest backend/tests -q
+<backend-python> -m pytest mock-runtime/tests -q
+<backend-python> -m compileall -q backend/src mock-runtime/src
+npm --prefix frontend run test -- --run
+npm --prefix frontend run typecheck
+npm --prefix frontend run build
+powershell -ExecutionPolicy Bypass -File scripts/dev/check-scope.ps1 -Milestone M11A
+powershell -ExecutionPolicy Bypass -File scripts/dev/check-sem-integrity.ps1
+git diff --check
+git diff --cached --check
+```
+
+预期：首轮启动成功；重复启动输出 `MOCK_STACK_ALREADY_RUNNING` 且不产生第二组进程；停止输出 `MOCK_STACK_STOPPED`，重复停止输出 `MOCK_STACK_NOT_RUNNING`；第二轮启动和三条 E2E 再次成功；最终目标端口无监听、state 已删除、日志保留。全部回归 0 failed，输出 `SCOPE_OK M11A` 和 `SEM_INTEGRITY_OK`，暂存区为空，diff 仅包含七个 allowlist 路径。
+
+**M11-A 人工验收：** 启动后打开 `http://127.0.0.1:3000`，确认页面可加载且前端代理健康；可选只读查看 Runtime/Backend ready 的安全摘要。不得在浏览器直接执行真实模型或把 Runtime 暴露为公共接口。验收后必须安全停止栈。
+
+**M11-A 暂停点：** 更新进度文件时只记录本轮真实命令、测试数量、运行时清理状态和未提交 allowlist diff，并统一标记 `M11A_IMPLEMENTED_AWAITING_PROJECT_OWNER_REVIEW`。未经项目负责人明确验收不得 commit、不得开始 M11-B 或 M12。
+
+### M11-B：故障注入、重放/重试与阶段 1A 正式验收
+
+**前置条件与范围门：** 只有项目负责人验收 M11-A 并明确批准 M11-B 后才能开始；`check-scope.ps1` 的 M11-B allowlist 已按本节预配置，开始 M11-B 时只需对照 Git 实际状态和本节重新核对，不是再次扩展。
+
+**预配置 allowlist：** `docs/progress/phase-1-current-status.md`、`scripts/dev/check-scope.ps1`、`scripts/dev/start-mock-stack.ps1`、`scripts/dev/stop-mock-stack.ps1`、`scripts/acceptance/run-phase-1a.ps1`、`backend/tests/e2e/conftest.py`、`backend/tests/e2e/test_mock_journey.py`、`backend/tests/e2e/test_mock_acceptance_matrix.py`、`docs/acceptance/phase-1a-report.md`。本轮 M11-A 不创建 M11-B 专用脚本、测试或报告。
+
+**功能与验收：** 在复用 M11-A 安全启停和临时资源隔离的前提下，覆盖 DB、MinIO、Runtime、Explanation 故障，同 key 重放、Tool retry、Explanation retry、部分成功、浏览器完整旅程和不含 Secret/图片 payload 的正式阶段 1A 报告。验收脚本最后输出 `PHASE_1A_ACCEPTANCE_PASSED` 并列出每类场景数量与 0 failed。
+
+**失败时回退：** 停止 Mock stack，修复失败所在既有里程碑；不改变已验收数据模型或公共契约来迁就测试，不加载真实权重，不进入 M12。
+
+**M11 完成证据：** M11-A/M11-B 完整命令日志、E2E 和浏览器验收报告、资源计数、scope/SEM/Git 审计。到此必须暂停，等待项目负责人通过 M11 检查点并确认阶段 1A 完成。未来建议提交：`test: add phase 1a mock acceptance`。
 
 ## M12：真实 LangChain 与 LLM Provider 接入
 

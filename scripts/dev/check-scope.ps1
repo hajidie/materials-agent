@@ -56,7 +56,7 @@ function ConvertTo-RepoPath {
 }
 
 $normalizedMilestone = $Milestone.Trim().ToUpperInvariant()
-$recognizedMilestones = @('G0', 'M0', 'M4A', 'M4B', 'M4PLAN') + @(1..16 | ForEach-Object { "M$_" })
+$recognizedMilestones = @('G0', 'M0', 'M4A', 'M4B', 'M4PLAN', 'M11A', 'M11B') + @(1..16 | ForEach-Object { "M$_" })
 if ($recognizedMilestones -notcontains $normalizedMilestone) {
     Complete-ScopeCheck -Code 'UNKNOWN_MILESTONE' -Summary $normalizedMilestone
 }
@@ -65,7 +65,7 @@ $globalAllowedPaths = @(
     'docs/progress/phase-1-current-status.md'
 )
 
-# M0-M10 configured milestones/work units have reviewed exact allowlists.
+# M0-M11 configured milestones/work units have reviewed exact allowlists.
 # G0 and otherwise unconfigured recognized milestones are retained so
 # callers receive a stable configuration error until their exact plan allowlist
 # is reviewed and added; this deliberately avoids inventing future scope.
@@ -410,6 +410,38 @@ $milestoneAllowlists = @{
         'frontend/tests/components/tool-task-card.test.ts'
         'frontend/tests/components/chat-composer.test.ts'
         'frontend/tests/components/app-flow.test.ts'
+    )
+    M11A = @(
+        'docs/superpowers/plans/2026-07-17-sem-mvp-phase-1-implementation-plan.md'
+        'docs/progress/phase-1-current-status.md'
+        'scripts/dev/check-scope.ps1'
+        'scripts/dev/start-mock-stack.ps1'
+        'scripts/dev/stop-mock-stack.ps1'
+        'backend/tests/e2e/conftest.py'
+        'backend/tests/e2e/test_mock_journey.py'
+    )
+    M11B = @(
+        'docs/progress/phase-1-current-status.md'
+        'scripts/dev/check-scope.ps1'
+        'scripts/dev/start-mock-stack.ps1'
+        'scripts/dev/stop-mock-stack.ps1'
+        'scripts/acceptance/run-phase-1a.ps1'
+        'backend/tests/e2e/conftest.py'
+        'backend/tests/e2e/test_mock_journey.py'
+        'backend/tests/e2e/test_mock_acceptance_matrix.py'
+        'docs/acceptance/phase-1a-report.md'
+    )
+    M11 = @(
+        'docs/superpowers/plans/2026-07-17-sem-mvp-phase-1-implementation-plan.md'
+        'docs/progress/phase-1-current-status.md'
+        'scripts/dev/check-scope.ps1'
+        'scripts/dev/start-mock-stack.ps1'
+        'scripts/dev/stop-mock-stack.ps1'
+        'scripts/acceptance/run-phase-1a.ps1'
+        'backend/tests/e2e/conftest.py'
+        'backend/tests/e2e/test_mock_journey.py'
+        'backend/tests/e2e/test_mock_acceptance_matrix.py'
+        'docs/acceptance/phase-1a-report.md'
     )
 }
 
