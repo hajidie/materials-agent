@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+import re
 from typing import Final
 
 from materialsagent.domain.ports.chat_orchestration import (
@@ -26,6 +27,10 @@ PARAMETER_FIELDS: Final = (
     "aging_temperature",
     "aging_time",
 )
+_AGING_TEMPERATURE_SUPPLEMENT_PATTERN: Final = re.compile(
+    r"(?:aging_temperature\s*=\s*|时效温度\s+)?730\s*°\s*C",
+    re.IGNORECASE,
+)
 
 
 Responder = Callable[[ChatOrchestrationInput], Mapping[str, object]]
@@ -48,6 +53,13 @@ def _default_tool_payload() -> dict[str, object]:
         "candidate_parameters": _default_parameters(),
         "requested_outputs": ["sem_image", "mechanical_properties"],
     }
+
+
+def _is_aging_temperature_supplement(content: str) -> bool:
+    return (
+        _AGING_TEMPERATURE_SUPPLEMENT_PATTERN.fullmatch(content.strip())
+        is not None
+    )
 
 
 def default_mock_responder(
@@ -79,6 +91,12 @@ def default_mock_responder(
             "follow_up_suggestion": "请补充时效温度。",
             "requested_outputs": ["sem_image", "mechanical_properties"],
         }
+    if _is_aging_temperature_supplement(content):
+        payload = _default_tool_payload()
+        parameters = _default_parameters()
+        parameters["aging_temperature"] = {"value": 730, "unit": "°C"}
+        payload["candidate_parameters"] = parameters
+        return payload
     if "歧义" in content:
         parameters = _default_parameters()
         parameters["solution_time"] = {

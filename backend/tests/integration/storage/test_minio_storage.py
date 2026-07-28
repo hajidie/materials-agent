@@ -3,8 +3,10 @@ from __future__ import annotations
 from hashlib import sha256
 
 import pytest
+from minio.error import S3Error
 
 from materialsagent.application.bootstrap import ensure_object_storage_bucket
+from materialsagent.domain.ports import storage as storage_port
 from materialsagent.domain.ports.storage import (
     StorageConflictError,
     StorageUnavailableError,
@@ -14,6 +16,78 @@ from materialsagent.infrastructure.storage.minio import (
     MinioStorageService,
     create_minio_storage,
 )
+
+
+def test_put_preflight_head_failure_is_definitely_pre_write() -> None:
+    class FailingPreflightClient:
+        def __init__(self) -> None:
+            self.put_calls = 0
+
+        def stat_object(self, _bucket: str, _object_key: str):
+            raise ConnectionError("sensitive endpoint")
+
+        def put_object(self, *_args, **_kwargs):
+            self.put_calls += 1
+            raise AssertionError("put_object must not be called")
+
+    client = FailingPreflightClient()
+    storage = MinioStorageService(client=client, bucket="test-bucket")
+    outcome_unknown_type = getattr(
+        storage_port,
+        "StorageWriteOutcomeUnknownError",
+        (),
+    )
+
+    with pytest.raises(StorageUnavailableError) as exc_info:
+        storage.put(
+            "assets/test/preflight.png",
+            b"payload",
+            "image/png",
+        )
+
+    assert not isinstance(exc_info.value, outcome_unknown_type)
+    assert str(exc_info.value) == "Object storage unavailable."
+    assert client.put_calls == 0
+
+
+def test_put_failure_after_write_starts_has_unknown_outcome() -> None:
+    class FailingWriteClient:
+        def __init__(self) -> None:
+            self.put_calls = 0
+
+        def stat_object(self, _bucket: str, _object_key: str):
+            raise S3Error(
+                None,
+                "NoSuchKey",
+                "not found",
+                None,
+                None,
+                None,
+            )
+
+        def put_object(self, *_args, **_kwargs):
+            self.put_calls += 1
+            raise TimeoutError("sensitive endpoint")
+
+    outcome_unknown_type = getattr(
+        storage_port,
+        "StorageWriteOutcomeUnknownError",
+        None,
+    )
+    assert outcome_unknown_type is not None
+    client = FailingWriteClient()
+    storage = MinioStorageService(client=client, bucket="test-bucket")
+
+    with pytest.raises(outcome_unknown_type) as exc_info:
+        storage.put(
+            "assets/test/outcome-unknown.png",
+            b"payload",
+            "image/png",
+        )
+
+    assert str(exc_info.value) == "Object storage unavailable."
+    assert "sensitive endpoint" not in str(exc_info.value)
+    assert client.put_calls == 1
 
 
 def test_configured_bucket_bootstrap_is_repeatable(

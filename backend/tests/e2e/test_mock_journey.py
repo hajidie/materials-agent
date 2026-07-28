@@ -345,9 +345,7 @@ def test_needs_input_supplement_keeps_task_history_and_anchor(
         e2e_harness,
         conversation_id,
         key="m11a-needs-input-supplement",
-        content=(
-            "完整合法 Tool 请求；补充 aging_temperature = 730 °C"
-        ),
+        content="730 °C",
         mode="SUPPLEMENT_TASK",
         target_task_id=task_id,
     )

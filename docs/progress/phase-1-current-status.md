@@ -8,9 +8,9 @@
 |---|---|
 | 当前阶段 | 阶段 1A |
 | 当前里程碑 | M11 |
-| 当前工作单元 | M11-A：Mock 栈安全启动/停止与基础端到端旅程 |
-| 状态 | `M11A_PROJECT_OWNER_ACCEPTED_STAGING_AUTHORIZED` |
-| 上一已验收工作单元 | M10-B：完整最小界面与交互 |
+| 当前工作单元 | M11-B：完整 Mock 故障矩阵、阶段 1A 统一验收入口与正式验收报告 |
+| 状态 | `M11B_PROJECT_OWNER_ACCEPTED_STAGING_AUTHORIZED` |
+| 上一已验收工作单元 | M11-A：Mock 栈安全启动/停止与基础端到端旅程 |
 | Pre-M8 stop-loss commit | `891714dd58cf069073a7d4037be43ef66304d0ac` |
 | M8 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M8 acceptance commit | `18005944982ca5191412e06154effc67465ca3a7` |
@@ -19,11 +19,12 @@
 | M10-A acceptance commit | `c597a89340072217d07d734e6b2ab88b6236d009` |
 | M10-B acceptance commit | `f426e6f23703002a648991e5bb436929df19e8e2` |
 | M10 overall acceptance commit | `f426e6f23703002a648991e5bb436929df19e8e2` |
-| Expected subject | `feat: add minimal chat frontend` |
-| 实际 branch / HEAD | `main` / `f426e6f23703002a648991e5bb436929df19e8e2` |
-| HEAD parent / subject | `c597a89340072217d07d734e6b2ab88b6236d009` / `feat: add minimal chat frontend` |
-| 暂存区 | M11-A 七个 allowlist 路径已精确暂存，等待 staged diff 审计和 commit 授权 |
-| 当前工作区 | M11-A 七个 allowlist 路径已通过代码审查和项目负责人浏览器人工验收；授权精确暂存，等待 staged diff 审计和 commit 授权 |
+| M11-A acceptance commit | `4ed740222238433541fb31c993dd75610634d157` |
+| Expected subject | M11-B 尚未授权 commit，不预设主题 |
+| 实际 branch / HEAD | `main` / `4ed740222238433541fb31c993dd75610634d157` |
+| HEAD parent / subject | `f426e6f23703002a648991e5bb436929df19e8e2` / `feat: add reliable mock stack acceptance` |
+| 暂存区 | 本轮已授权精确暂存 15 个 M11-B 变更路径；commit 尚未授权 |
+| 当前工作区 | M11-B 当前 15 个 allowlist 路径已精确暂存，等待 staged diff 审计与后续 commit 授权；最终代码审查、浏览器验收和阶段 1A 权威验收均已通过 |
 | 已确认设计基线 | 五份均未修改 |
 | 历史 migration | `0001`–`0008` 均未修改；当前唯一 head/current 为 `0009_timeline_query_indexes` |
 | `SEM/` | 未修改、未加载或运行真实模型；`SEM_INTEGRITY_OK` |
@@ -31,17 +32,19 @@
 | Commit | `NO / NOT AUTHORIZED` |
 | Push | `NO` |
 | Amend | `NO` |
-| Git 外部动作 | 本轮仅授权精确暂存七个 M11-A allowlist 路径；commit、push、amend、rebase、reset、stash、创建分支或 worktree 均未授权 |
+| Git 外部动作 | 仅授权精确暂存 15 个 M11-B 路径；未授权 commit、push、amend、rebase、reset、stash、创建分支或 worktree |
 | M10-A | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M10-B | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M10 overall | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
-| M11 | `IN PROGRESS` |
-| M11-A | `PROJECT_OWNER_ACCEPTED_STAGING_AUTHORIZED` |
-| M11-B | `NOT STARTED` |
-| M12 | `NOT STARTED` |
+| M11 | `IN PROGRESS — awaiting M11-B acceptance commit` |
+| M11-A | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
+| M11-B | `PROJECT_OWNER_ACCEPTED_STAGING_AUTHORIZED` |
+| Phase 1A | `PROJECT_OWNER_ACCEPTED — awaiting M11-B acceptance commit` |
+| M12 | `NOT STARTED / NOT AUTHORIZED` |
 | M11 start baseline | `main@f426e6f23703002a648991e5bb436929df19e8e2` |
-| 是否处于项目负责人暂停点 | 是；M11-A 已通过项目负责人验收并授权暂存，等待 staged diff 审计和 commit 授权；未开始 M11-B 或 M12 |
-| 更新时间 | `2026-07-27` |
+| M11-B start baseline | `main@4ed740222238433541fb31c993dd75610634d157` |
+| 是否处于项目负责人暂停点 | 是；M11-B 已验收，仅授权精确暂存并等待 staged diff 审计与后续 commit 授权；M12 未开始 |
+| 更新时间 | `2026-07-28` |
 
 ## M8 已实现内容
 
@@ -426,43 +429,154 @@ Runtime、MinIO 和 Explanation Provider 调用均不在数据库 UoW 内。Back
 - 当前未提交路径精确为：本计划、当前进度文件、`scripts/dev/check-scope.ps1`、`scripts/dev/start-mock-stack.ps1`、`scripts/dev/stop-mock-stack.ps1`、`backend/tests/e2e/conftest.py`、`backend/tests/e2e/test_mock_journey.py`。本轮已授权精确暂存这七个 M11-A allowlist 路径；未执行 commit、push 或 amend。
 - M11-A code review: `APPROVED`。M11-A project-owner manual acceptance: `PASSED`，manual acceptance date: `2026-07-27`。稳定人工验收摘要：`start-mock-stack.ps1` 输出 `MOCK_STACK_STARTED`；Frontend 页面正常访问；Conversation 创建正常；知识问答正常；刷新后 Conversation 和 Timeline 可恢复；Frontend 代理 Backend health 正常；`stop-mock-stack.ps1` 输出 `MOCK_STACK_STOPPED`；三个受控应用进程均由 stop 脚本精确停止。
 
+## M11-B 当前执行记录
+
+- M11-B start baseline 为
+  `main@4ed740222238433541fb31c993dd75610634d157`，主题
+  `feat: add reliable mock stack acceptance`，父提交为
+  `f426e6f23703002a648991e5bb436929df19e8e2`；开始前工作区和暂存区均为空。
+- 已完整读取 M11-B 指令、AGENTS、当前进度、阶段 1 计划对应范围、直接相关
+  生产调用链和回归测试。生产修复严格限制为 storage port、MinIO adapter 与
+  AssetService；migration、依赖、设计基线、ToolWorkflow/API、M11-A journey
+  和 start/stop 均未修改。
+- M11-B1 TDD RED 先落四类代表测试，精确为 `4 errors`，唯一原因是
+  `fixture 'e2e_app_factory' not found`；不是语法、导入或生产代码失败。实现
+  test-only factory/HTTP harness 后，首次 GREEN 暴露测试错误地期待失败响应含
+  `data`，实际安全 502 使用 `resource.task_id`；只修正测试断言，未改生产代码。
+- `conftest.py` 现提供共享真实临时 PostgreSQL/MinIO 的 `E2EAppFactory`，
+  以及动态 loopback 端口、随机 test token、后台 uvicorn thread、启动探针、
+  `execution_count`、有界 event、join 和端口重新 bind 的 test-only Runtime HTTP
+  harness。支持 success、partial success、fail-once、timeout、busy 和 unavailable；
+  test token 不写日志。
+- M11-B fault matrix 精确收集 20 cases：success 1、input error 5、dependency
+  failure 7、idempotency 5、retry 2、asset/security 2。修正 MinIO 断言前的
+  历史 M11-A + M11-B 聚焦 E2E 为 `24 passed`；JUnit 名称统计由统一入口
+  读取，不解析 pytest 人类文本。
+- Tool retry E2E 证明同一 Task 保留失败 attempt 1、新增成功 attempt 2、
+  seed 不同、selected Run/Result 指向 attempt 2、唯一 Result/Asset 属于新
+  Run、Timeline item/anchor 稳定；Runtime 总调用 2 次，同 key replay 不产生第
+  3 次调用或资源增量。
+- Explanation retry E2E 证明同一 Result 下保留 FAILED/SUCCEEDED 两次
+  Explanation 和两条 LLMCall；Runtime、ToolRun、Result、Asset、link、MinIO
+  object 和 Timeline anchor 不变；同 key replay 零增量。
+- `run-phase-1a.ps1` 可从任意当前目录定位仓库根，只调用现有 start/stop；
+  每次写独立 `tmp/phase-1a-acceptance/<run-id>/`，`commands.json` 仅含命令名、
+  起止时间、退出码和相对日志路径。Runner 现于 start 前验证 branch=`main`、
+  staging empty 及 M11-A acceptance commit 为 HEAD 祖先，并在 summary
+  记录当前 branch/HEAD/subject/parent；错误分支、detached HEAD 或基线缺失
+  均非零退出、仍写 summary 且不启动 Mock Stack。
+- Runner 将 `python --version`、`node --version`、`npm --version`、
+  `docker compose version`、`docker compose config --services` 和
+  `docker compose config --images` 分别记录为独立 command；安全解析结果进入
+  summary。受控证据探针为 Python `3.11.15`、Node `24.14.0`、npm `11.9.0`、
+  Compose `5.3.0`、services 精确为 `minio, postgresql`，images 与当前 Compose
+  固定 digest 完全一致。
+- Runner 安全扫描已与扩展后的精确 17 路径 M11-B allowlist 对齐；原 15
+  路径继续保留，并新增默认 Mock responder 生产文件和 Chat orchestration
+  contract test。覆盖探针为
+  `ACCEPTANCE_SCAN_COVERAGE_OK count=17`，并在启动 Mock Stack 前退出。
+  动态扫描继续覆盖 logs、`commands.json`、`summary.json` 和 JUnit XML。
+- Runner 自身受控失败探针均通过：复用既有栈时 exit 1、
+  `summary.json` 存在、`failed=1`、state 哈希和三个 listener 不变；无既有栈时
+  `started_by_runner=true`，exit 1 后 state、3000/8000/8100 listener 和 Compose
+  running service 均为 0。函数级 marker 探针为
+  `MANUAL_MARKER_LOGIC_OK`；最终权威验收在项目负责人完成 11 项人工清单后
+  记录 `browser_manual_scenarios=11`。
+- MinIO 修复 TDD RED 精确为 78 项收集、`72 passed / 6 failed`；失败仅来自
+  outcome-unknown 类型/映射缺失、pre-write Asset 实际 `PENDING` 而预期
+  `FAILED`，以及失败事实 commit 未进入持久化分支，无语法、导入、fixture
+  或路径错误。其后聚焦集合为 `78 passed`，Backend E2E 为 `24 passed`。
+- 生产链现为：`AssetService._create_pending()` 独立短事务提交 PENDING；
+  `MinioStorageService.put()` 在前置 HEAD 失败时抛普通
+  `StorageUnavailableError`，在进入 `put_object()` 后的不可确认异常抛
+  `StorageWriteOutcomeUnknownError`；AssetService 对前者提交 FAILED，对后者
+  保留 PENDING。失败事实 update/commit 失败时回滚并传播持久化错误，不伪造
+  FAILED。ToolWorkflow 仍只负责独立终结 Task/ToolRun。
+- 阶段 1A 权威验收 run id 为 `20260728T075704Z-c0e323e1c2bf`：
+  `PHASE_1A_ACCEPTANCE_PASSED`、`failed=0`、`browser_manual_scenarios=11`；
+  success 1、input error 5、dependency failure 7、idempotency 5、retry 2、
+  asset/security 2。M11 E2E 为 `24 passed`、Backend 全量为 `882 passed`、
+  Mock Runtime 为 `11 passed`、Frontend 为 9 files / `204 passed`；
+  typecheck/build 为 PASS；Alembic head/current 均为
+  `0009_timeline_query_indexes`，check 为 PASS。
+- 正式静态报告位于 `docs/acceptance/phase-1a-report.md`，状态已统一为
+  `PHASE_1A_PROJECT_OWNER_ACCEPTED_STAGING_AUTHORIZED`；M11-B 已验收但尚无
+  acceptance commit hash。
+- 实际最小生产 allowlist 为
+  `backend/src/materialsagent/domain/ports/storage.py`、
+  `backend/src/materialsagent/infrastructure/storage/minio.py` 和
+  `backend/src/materialsagent/application/asset_service.py`；
+  migration=`NO`，public API change=`NO`。
+  三类写入/持久化结果已由回归测试分别锁定。
+- 浏览器第 5 项首次使用真实补参 `730 °C` 时稳定返回 HTTP 502；临时魔法词
+  验证成功，确认默认 Mock 把短补参误路由为 KnowledgeAnswer。缺陷已通过
+  TDD 修复，contract 只接受受控时效温度表达；M11-A journey 和 M11-B
+  supplement replay 均改用 `730 °C`。聚焦 RED 为 42 项中的
+  `35 passed / 7 failed`，五种合同表达均误路由为 KnowledgeAnswer，journey
+  与 replay 均得到安全 HTTP 502；最小实现后同组为 `42 passed`。
+- 项目负责人于 2026-07-28 使用全新 `NEEDS_INPUT` Task 复测第 5 项，只输入
+  `730 °C`；未出现 HTTP 502，同一 Task 最终 `SUCCEEDED`，结构化 Result 与
+  Explanation 正常，Timeline 卡片位置不移动。Frontend、Conversation、知识
+  问答、完整 Tool、图片预览/下载、刷新恢复和 Timeline 稳定均为 `PASSED`。
+  Tool retry 与 Explanation retry 由 M10 人工验收和 M11-B E2E 覆盖；本轮正式
+  数据库无可操作失败卡片，未人为制造故障。
+- 稳定门禁证据为 `SCOPE_OK M11B`、`SCOPE_OK M11`、
+  `SEM_INTEGRITY_OK`；SEM 为 57 files，fingerprint
+  `62bbb0878ed5d659490755e401fba0e3e09f1f36e3a67667ea04227927546b4a`。
+- 本工作单元当前共 15 个 dirty 路径，全部属于扩展后的精确 17 路径 M11-B
+  allowlist；其余已审查生产修复和测试保持冻结。
+
 ## 已知风险
 
-- 启停脚本是 Windows 本地开发工具，依赖 PowerShell 5.1、CIM/WMI、Docker Compose 和一个可发现的 `materialsagent-backend` Conda 环境；它不是生产守护进程或跨平台服务管理器。
-- 当前根 `.env` 已按要求恢复到修订前状态，其中尚未配置 Timeline signing key；因此后续常规 start 会有意在任何本地依赖副作用前安全失败，需由项目负责人先提供满足现有 AppSettings 校验的本地 Secret，且不得提交该值。
-- M11-A 只覆盖基础成功旅程和 NEEDS_INPUT 补参；完整故障矩阵、同 key 重放、两类显式重试、浏览器统一验收与阶段 1A 报告仍属于 M11-B，当前未开始。
-- start/stop 以严格所有权验证优先；state 陈旧、结构非法、PID 被复用、固定 marker/wrapper 不一致时会安全拒绝接管，需要项目负责人按日志和进程事实人工处理。若启动失败清理留下 recovery state，必须先运行 stop 完成已记录资源清理，不得覆盖 state 或宽泛杀进程。
-- Docker context、endpoint 或 engine ID 在栈运行期间发生变化时，stop 会继续处理可验证 App PID，但有意拒绝 Compose stop 并保留 state；必须恢复到 state 记录的同一本地 engine 后再完成 Docker 清理。
+- 统一入口和启停脚本依赖 Windows PowerShell 5.1、CIM/WMI、Docker Desktop/
+  Compose 和可发现的 Backend Python；不是生产守护进程或跨平台进程管理器。
+- 生产 blocker 和默认 Mock 补参缺陷已按 TDD 修复，M11-B 已通过最终代码
+  审查、浏览器验收和阶段 1A 权威验收；acceptance commit 尚未创建，因此
+  M11 与阶段 1A 尚不标记 `COMPLETE`。
+- M12 为 `NOT STARTED / NOT AUTHORIZED`。
+- start/stop 以严格 ownership 为先；state、PID、Docker context/engine 不可信
+  时会安全拒绝接管，需要按日志和实时资源事实处理，不得宽泛杀进程或删 volume。
+- M12 真实 LLM 和阶段 1B 真实模型均未开始。
 
 ## 下一步
 
-停在 M11-A staged diff 审计和 commit 授权点；不提交、不开始 M11-B 或 M12：
+停在 M11-B 精确暂存与 staged diff 审计点；不提交、不开始 M12：
 
 ```text
 当前里程碑：M11
-当前工作单元：M11-A Mock 栈安全启动/停止与基础端到端旅程
-状态：M11A_PROJECT_OWNER_ACCEPTED_STAGING_AUTHORIZED
+当前工作单元：M11-B 完整 Mock 故障矩阵、阶段 1A 统一验收入口与正式验收报告
+状态：M11B_PROJECT_OWNER_ACCEPTED_STAGING_AUTHORIZED
 
-M10-A:
-COMPLETE / PROJECT_OWNER_ACCEPTED
-acceptance commit:
-c597a89340072217d07d734e6b2ab88b6236d009
-
-M10-B:
+M10:
 COMPLETE / PROJECT_OWNER_ACCEPTED
 acceptance commit:
 f426e6f23703002a648991e5bb436929df19e8e2
 
-M10 overall:
+M11-A:
 COMPLETE / PROJECT_OWNER_ACCEPTED
 acceptance commit:
-f426e6f23703002a648991e5bb436929df19e8e2
+4ed740222238433541fb31c993dd75610634d157
 
-Expected subject:
-feat: add minimal chat frontend
+M11-B:
+PROJECT_OWNER_ACCEPTED_STAGING_AUTHORIZED
+
+Production fix:
+IMPLEMENTED / PROJECT-OWNER ACCEPTED
+
+M11:
+IN PROGRESS — awaiting M11-B acceptance commit
+
+Phase 1A:
+PROJECT_OWNER_ACCEPTED — awaiting M11-B acceptance commit
+
+M12:
+NOT STARTED / NOT AUTHORIZED
+
+M11-B start baseline:
+main@4ed740222238433541fb31c993dd75610634d157
 
 Staging:
-M11-A seven allowlist paths staged for audit
+AUTHORIZED FOR EXACT 15-PATH STAGING
 
 Commit:
 NO / NOT AUTHORIZED
@@ -473,27 +587,6 @@ NO
 Amend:
 NO
 
-M11:
-IN PROGRESS
-
-M11-A:
-PROJECT_OWNER_ACCEPTED_STAGING_AUTHORIZED
-
-M11-B:
-NOT STARTED
-
-M12:
-NOT STARTED
-
-M11 start baseline:
-main@f426e6f23703002a648991e5bb436929df19e8e2
-
-M11-A code review:
-APPROVED
-
-M11-A project-owner manual acceptance:
-PASSED
-
-Manual acceptance date:
-2026-07-27
+M11-B project-owner browser acceptance:
+PASSED / 2026-07-28
 ```

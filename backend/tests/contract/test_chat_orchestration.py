@@ -361,6 +361,7 @@ def test_mock_is_deterministic_and_has_no_external_side_effects(
     ("content_text", "expected_route"),
     [
         ("什么是 ZTA35G？", "KNOWLEDGE_ANSWER"),
+        ("谢谢", "KNOWLEDGE_ANSWER"),
         ("缺 aging_temperature", "NEEDS_INPUT"),
         ("明确歧义参数", "NEEDS_INPUT"),
         ("solution_time = 180 min", "TOOL_EXECUTION"),
@@ -390,6 +391,57 @@ def test_default_mock_responder_has_controlled_acceptance_scenarios(
 
     assert first == second
     assert first.route == expected_route
+
+
+@pytest.mark.parametrize(
+    "content_text",
+    [
+        "730 °C",
+        "730°C",
+        "aging_temperature = 730 °C",
+        "aging_temperature=730°C",
+        "时效温度 730 °C",
+    ],
+)
+def test_default_mock_responder_accepts_controlled_aging_temperature_supplement(
+    content_text: str,
+) -> None:
+    from materialsagent.infrastructure.llm.mock import default_mock_responder
+
+    types = _types()
+    request = types["ChatOrchestrationInput"](
+        task_id="task_contract",
+        conversation_id="conversation_contract",
+        request_id="request_contract",
+        content_text=content_text,
+    )
+    result = types["MockChatOrchestrationAdapter"](
+        default_mock_responder
+    ).orchestrate(request)
+
+    assert isinstance(result, types["ToolCandidate"])
+    assert result.route == "TOOL_EXECUTION"
+    assert result.requested_outputs == (
+        "sem_image",
+        "mechanical_properties",
+    )
+    parameters = result.candidate_parameters
+    assert (
+        parameters.solution_temperature.value,
+        parameters.solution_temperature.unit,
+    ) == (1000, "°C")
+    assert (
+        parameters.solution_time.value,
+        parameters.solution_time.unit,
+    ) == (3, "h")
+    assert (
+        parameters.aging_temperature.value,
+        parameters.aging_temperature.unit,
+    ) == (730, "°C")
+    assert (
+        parameters.aging_time.value,
+        parameters.aging_time.unit,
+    ) == (3, "h")
 
 
 def test_default_mock_responder_exposes_only_controlled_safe_failures() -> None:

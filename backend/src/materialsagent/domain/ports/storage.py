@@ -17,6 +17,10 @@ class StorageUnavailableError(StorageError):
     """The configured object storage dependency is unavailable."""
 
 
+class StorageWriteOutcomeUnknownError(StorageUnavailableError):
+    """The write may have reached storage, so its final outcome is unknown."""
+
+
 class StorageIntegrityError(StorageError):
     """A stored object's bytes or metadata fail integrity validation."""
 

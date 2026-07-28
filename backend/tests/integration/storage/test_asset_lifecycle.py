@@ -27,6 +27,7 @@ from materialsagent.application.tool_execution import (
 )
 from materialsagent.domain.models.asset import Asset
 from materialsagent.domain.models.tool_run import ToolRun
+from materialsagent.domain.ports import storage as storage_port
 from materialsagent.domain.ports.storage import (
     StorageConflictError,
     StoredObjectMetadata,
@@ -429,7 +430,7 @@ def test_png_failure_is_persisted_failed_without_put() -> None:
     assert storage.put_calls == 0
 
 
-def test_storage_unavailable_returns_503_and_keeps_pending_fact() -> None:
+def test_pre_write_storage_unavailable_persists_failed_then_returns_503() -> None:
     service, store, storage = _service()
     storage.put_error = StorageUnavailableError("Object storage unavailable.")
 
@@ -437,7 +438,29 @@ def test_storage_unavailable_returns_503_and_keeps_pending_fact() -> None:
         _create(service)
 
     assert raised.value.status_code == 503
+    assert store.assets["asset_1"].current_status == "FAILED"
+    assert store.assets["asset_1"].error_code is not None
+    assert store.assets["asset_1"].safe_error_message is not None
+    assert storage.delete_calls == 0
+
+
+def test_write_outcome_unknown_returns_503_and_keeps_pending_fact() -> None:
+    outcome_unknown_type = getattr(
+        storage_port,
+        "StorageWriteOutcomeUnknownError",
+        None,
+    )
+    assert outcome_unknown_type is not None
+    service, store, storage = _service()
+    storage.put_error = outcome_unknown_type("Object storage unavailable.")
+
+    with pytest.raises(DependencyUnavailableError) as raised:
+        _create(service)
+
+    assert raised.value.status_code == 503
     assert store.assets["asset_1"].current_status == "PENDING"
+    assert store.assets["asset_1"].error_code is None
+    assert store.assets["asset_1"].safe_error_message is None
     assert storage.delete_calls == 0
 
 
@@ -575,10 +598,9 @@ def test_cross_task_actor_or_unrecorded_image_source_is_rejected_before_tx1() ->
         )
 
 
-def test_failure_fact_commit_failure_returns_internal_and_keeps_pending() -> None:
+def test_pre_write_failure_fact_commit_failure_keeps_pending() -> None:
     service, store, storage = _service(fail_commits={2})
-    storage.put_error = StorageConflictError("Object storage conflict.")
-    storage.head_override = None
+    storage.put_error = StorageUnavailableError("Object storage unavailable.")
 
     with pytest.raises(ApplicationInternalError):
         _create(service)

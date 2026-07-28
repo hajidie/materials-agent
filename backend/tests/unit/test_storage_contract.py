@@ -26,6 +26,28 @@ INVALID_OBJECT_KEYS = [
 EXPECTED_STORAGE_GET_HARD_LIMIT = 1024 * 1024
 
 
+def test_write_outcome_unknown_is_a_distinct_storage_error() -> None:
+    from materialsagent.domain.ports import storage as storage_port
+    from materialsagent.domain.ports.storage import (
+        StorageError,
+        StorageUnavailableError,
+    )
+
+    outcome_unknown_type = getattr(
+        storage_port,
+        "StorageWriteOutcomeUnknownError",
+        None,
+    )
+
+    assert outcome_unknown_type is not None
+    outcome_unknown = outcome_unknown_type("Object storage unavailable.")
+    ordinary_unavailable = StorageUnavailableError(
+        "Object storage unavailable."
+    )
+    assert isinstance(outcome_unknown, StorageError)
+    assert not isinstance(ordinary_unavailable, outcome_unknown_type)
+
+
 class MemoryStorageService:
     def __init__(self) -> None:
         self._objects: dict[str, tuple[bytes, object]] = {}

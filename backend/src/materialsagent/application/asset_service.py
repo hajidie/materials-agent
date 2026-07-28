@@ -42,6 +42,7 @@ from materialsagent.domain.ports.storage import (
     StoredObjectMetadata,
     StorageService,
     StorageUnavailableError,
+    StorageWriteOutcomeUnknownError,
 )
 from materialsagent.domain.ports.tool_execution import (
     ToolExecutionOutput,
@@ -272,8 +273,19 @@ class AssetService:
                 encoded.media_type,
                 custom_metadata,
             )
-        except StorageUnavailableError:
+        except StorageWriteOutcomeUnknownError:
             raise DependencyUnavailableError(task_id=asset.task_id) from None
+        except StorageUnavailableError:
+            try:
+                self._persist_failed(
+                    asset,
+                    code=DependencyUnavailableError.default_code,
+                    message=DependencyUnavailableError.default_message,
+                )
+            except AssetLifecycleOutcomeError:
+                raise DependencyUnavailableError(
+                    task_id=asset.task_id
+                ) from None
         except StorageIntegrityError:
             self._persist_orphaned(
                 asset,

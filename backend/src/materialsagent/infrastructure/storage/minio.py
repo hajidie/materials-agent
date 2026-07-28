@@ -18,6 +18,7 @@ from materialsagent.domain.ports.storage import (
     StorageObjectNotFoundError,
     StoredObjectMetadata,
     StorageUnavailableError,
+    StorageWriteOutcomeUnknownError,
     validate_object_key,
 )
 from materialsagent.infrastructure.config import AppSettings, parse_minio_config
@@ -95,10 +96,14 @@ class MinioStorageService:
                     "size-bytes": str(len(payload)),
                 },
             )
+        except StorageUnavailableError:
+            raise StorageWriteOutcomeUnknownError(
+                "Object storage unavailable."
+            ) from None
         except StorageError:
             raise
         except Exception:
-            raise StorageUnavailableError(
+            raise StorageWriteOutcomeUnknownError(
                 "Object storage unavailable."
             ) from None
         return expected
