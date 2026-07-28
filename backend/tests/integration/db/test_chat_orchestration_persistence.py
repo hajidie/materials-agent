@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 from typing import Any
 
 import pytest
@@ -18,6 +19,8 @@ from materialsagent.domain.models.task import Task
 from materialsagent.domain.models.task_input_revision import TaskInputRevision
 from materialsagent.domain.ports.chat_orchestration import (
     ChatOrchestrationProviderError,
+    ChatOrchestrationOutcome,
+    ChatOrchestrationRequestMetadata,
     ChatOrchestrationTimeoutError,
     KnowledgeAnswer,
 )
@@ -215,6 +218,75 @@ def test_knowledge_path_persists_owned_message_call_and_task_atomically(
         assert connection.scalar(
             select(func.count()).select_from(TaskInputRevisionRow)
         ) == 0
+
+
+def test_provider_metadata_usage_and_request_id_persist_without_raw_payload(
+    migrated_database_engine: Engine,
+) -> None:
+    actor, submission = _persist_submission(migrated_database_engine)
+    factory = _Factory(migrated_database_engine)
+
+    class ProviderPort:
+        provider = "deepseek"
+        model_name = "deepseek-v4-flash"
+
+        def request_metadata(
+            self,
+            orchestration_input: object,
+        ) -> ChatOrchestrationRequestMetadata:
+            content = getattr(orchestration_input, "content_text")
+            return ChatOrchestrationRequestMetadata(
+                provider=self.provider,
+                model_name=self.model_name,
+                prompt_template_id="chat-orchestration",
+                prompt_template_version="2",
+                prompt_digest=sha256(content.encode("utf-8")).hexdigest(),
+                generation_parameters={
+                    "temperature": 0,
+                    "max_tokens": 1024,
+                    "thinking_mode": "disabled",
+                    "response_format": "json_object",
+                    "streaming": False,
+                },
+            )
+
+        def orchestrate(
+            self,
+            _orchestration_input: object,
+        ) -> ChatOrchestrationOutcome:
+            assert factory.active == 0
+            return ChatOrchestrationOutcome(
+                result=KnowledgeAnswer("受控持久化答案。"),
+                usage={"input_tokens": 17, "output_tokens": 5},
+                provider_request_id="provider-request-db-1",
+            )
+
+    service = ChatOrchestrationService(
+        factory,
+        ProviderPort(),
+        clock=_Clock(),
+        id_factory=_id_factory,
+    )
+
+    service.orchestrate_submission(actor, submission)
+
+    with migrated_database_engine.connect() as connection:
+        row = connection.execute(
+            select(
+                LLMCallRow.provider,
+                LLMCallRow.prompt_template_version,
+                LLMCallRow.generation_parameters,
+                LLMCallRow.usage,
+                LLMCallRow.provider_request_id,
+                LLMCallRow.structured_output_summary,
+            )
+        ).one()
+        assert row.provider == "deepseek"
+        assert row.prompt_template_version == "2"
+        assert row.generation_parameters["thinking_mode"] == "disabled"
+        assert row.usage == {"input_tokens": 17, "output_tokens": 5}
+        assert row.provider_request_id == "provider-request-db-1"
+        assert row.structured_output_summary["route"] == "KNOWLEDGE_ANSWER"
 
 
 def test_needs_input_and_tool_outcomes_persist_formal_revision_and_no_tool_table(

@@ -3,8 +3,6 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from hashlib import sha256
-import json
 from uuid import uuid4
 
 from materialsagent.application.context import ActorContext
@@ -149,47 +147,6 @@ def select_explanation_attempts(
         primary=primary,
         latest_failed=latest_failed,
     )
-
-
-def _plain_json(value: object) -> object:
-    if isinstance(value, Mapping):
-        return {key: _plain_json(item) for key, item in value.items()}
-    if isinstance(value, tuple):
-        return [_plain_json(item) for item in value]
-    return value
-
-
-def _prompt_digest(projection: ExplanationInput) -> str:
-    safe_value = {
-        "result_id": projection.result_id,
-        "status": projection.status,
-        "requested_outputs": list(projection.requested_outputs),
-        "completed_outputs": list(projection.completed_outputs),
-        "failed_outputs": list(projection.failed_outputs),
-        "data": _plain_json(projection.data),
-        "artifacts": [
-            {
-                "asset_id": item.asset_id,
-                "role": item.role,
-                "asset_type": item.asset_type,
-            }
-            for item in projection.artifacts
-        ],
-        "warnings": _plain_json(projection.warnings),
-        "error": _plain_json(projection.error),
-        "process_parameters": _plain_json(projection.process_parameters),
-        "tool_id": projection.tool_id,
-        "tool_version": projection.tool_version,
-        "schema_version": projection.schema_version,
-    }
-    encoded = json.dumps(
-        safe_value,
-        ensure_ascii=False,
-        allow_nan=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return sha256(encoded).hexdigest()
 
 
 class ExplanationService:
@@ -527,6 +484,7 @@ class ExplanationService:
                 ):
                     raise ExplanationNotRetryableError(task_id=task_id)
                 projection = self._projection(unit_of_work, result)
+                metadata = self._port.request_metadata(projection)
                 attempt_no = max(item.attempt_no for item in attempts) + 1
                 call = LLMCall(
                     llm_call_id=llm_call_id,
@@ -535,15 +493,12 @@ class ExplanationService:
                     request_id=request_id,
                     purpose="TOOL_RESULT_EXPLANATION",
                     input_result_id=result.result_id,
-                    provider=self._port.provider,
-                    model_name=self._port.model_name,
-                    prompt_template_id=self._port.prompt_template_id,
-                    prompt_template_version=self._port.prompt_template_version,
-                    prompt_digest=_prompt_digest(projection),
-                    generation_parameters={
-                        "temperature": 0,
-                        "max_tokens": 512,
-                    },
+                    provider=metadata.provider,
+                    model_name=metadata.model_name,
+                    prompt_template_id=metadata.prompt_template_id,
+                    prompt_template_version=metadata.prompt_template_version,
+                    prompt_digest=metadata.prompt_digest,
+                    generation_parameters=metadata.generation_parameters,
                     structured_output_summary=None,
                     usage=None,
                     provider_request_id=None,
@@ -918,6 +873,7 @@ class ExplanationService:
         attempt_no: int,
         created_at: datetime,
     ) -> tuple[LLMCall, NaturalLanguageExplanation]:
+        metadata = self._port.request_metadata(sources.projection)
         call = LLMCall(
             llm_call_id=llm_call_id,
             task_id=sources.task.task_id,
@@ -925,12 +881,12 @@ class ExplanationService:
             request_id=sources.tool_run.request_id,
             purpose="TOOL_RESULT_EXPLANATION",
             input_result_id=sources.result.result_id,
-            provider=self._port.provider,
-            model_name=self._port.model_name,
-            prompt_template_id=self._port.prompt_template_id,
-            prompt_template_version=self._port.prompt_template_version,
-            prompt_digest=_prompt_digest(sources.projection),
-            generation_parameters={"temperature": 0, "max_tokens": 512},
+            provider=metadata.provider,
+            model_name=metadata.model_name,
+            prompt_template_id=metadata.prompt_template_id,
+            prompt_template_version=metadata.prompt_template_version,
+            prompt_digest=metadata.prompt_digest,
+            generation_parameters=metadata.generation_parameters,
             structured_output_summary=None,
             usage=None,
             provider_request_id=None,
@@ -1157,6 +1113,12 @@ class ExplanationService:
         expected_status = (
             "SUCCEEDED" if outcome.text is not None else "FAILED"
         )
+        expected_call_error_code = (
+            outcome.llm_error_code or outcome.error_code
+        )
+        expected_call_safe_error_message = (
+            outcome.llm_safe_error_message or outcome.safe_error_message
+        )
         return (
             call.status == expected_status
             and explanation.status == expected_status
@@ -1164,8 +1126,9 @@ class ExplanationService:
             and explanation.error_code == outcome.error_code
             and explanation.safe_error_message
             == outcome.safe_error_message
-            and call.error_code == outcome.error_code
-            and call.safe_error_message == outcome.safe_error_message
+            and call.error_code == expected_call_error_code
+            and call.safe_error_message
+            == expected_call_safe_error_message
             and call.provider_request_id == outcome.provider_request_id
             and call.usage == outcome.usage
         )
@@ -1322,6 +1285,10 @@ class ExplanationService:
                 * 1000
             ),
         )
+        call_error_code = outcome.llm_error_code or outcome.error_code
+        call_safe_error_message = (
+            outcome.llm_safe_error_message or outcome.safe_error_message
+        )
         return _TerminalExplanationFacts(
             status=status,
             call=replace(
@@ -1331,8 +1298,8 @@ class ExplanationService:
                 status=status,
                 completed_at=completed_at,
                 duration_ms=call_duration,
-                error_code=outcome.error_code,
-                safe_error_message=outcome.safe_error_message,
+                error_code=call_error_code,
+                safe_error_message=call_safe_error_message,
             ),
             explanation=replace(
                 explanation,

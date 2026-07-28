@@ -283,6 +283,162 @@ def test_llm_json_fields_accept_only_controlled_business_schemas(
         _call(**{field: unsafe_value})
 
 
+@pytest.mark.parametrize(
+    (
+        "purpose",
+        "input_result_id",
+        "structured_output_summary",
+        "generation_parameters",
+    ),
+    [
+        (
+            "CHAT_ORCHESTRATION",
+            None,
+            {"route": "KNOWLEDGE_ANSWER"},
+            {
+                "temperature": 0,
+                "max_tokens": 1024,
+                "thinking_mode": "disabled",
+                "response_format": "json_object",
+                "streaming": False,
+            },
+        ),
+        (
+            "TOOL_RESULT_EXPLANATION",
+            "result_domain",
+            None,
+            {
+                "temperature": 0,
+                "max_tokens": 768,
+                "thinking_mode": "disabled",
+                "response_format": "text",
+                "streaming": False,
+            },
+        ),
+    ],
+)
+def test_deepseek_generation_parameter_shapes_are_accepted_and_frozen(
+    purpose: str,
+    input_result_id: str | None,
+    structured_output_summary: dict[str, object] | None,
+    generation_parameters: dict[str, object],
+) -> None:
+    call = _call(
+        purpose=purpose,
+        input_result_id=input_result_id,
+        structured_output_summary=structured_output_summary,
+        generation_parameters=generation_parameters,
+    )
+
+    assert call.generation_parameters == generation_parameters
+    with pytest.raises(TypeError):
+        call.generation_parameters["max_tokens"] = 1
+
+
+@pytest.mark.parametrize(
+    (
+        "purpose",
+        "input_result_id",
+        "structured_output_summary",
+        "generation_parameters",
+    ),
+    [
+        (
+            "CHAT_ORCHESTRATION",
+            None,
+            {"route": "KNOWLEDGE_ANSWER"},
+            {
+                "temperature": 0,
+                "max_tokens": 768,
+                "thinking_mode": "disabled",
+                "response_format": "text",
+                "streaming": False,
+            },
+        ),
+        (
+            "TOOL_RESULT_EXPLANATION",
+            "result_domain",
+            None,
+            {
+                "temperature": 0,
+                "max_tokens": 1024,
+                "thinking_mode": "disabled",
+                "response_format": "json_object",
+                "streaming": False,
+            },
+        ),
+    ],
+)
+def test_deepseek_generation_parameters_are_bound_to_purpose(
+    purpose: str,
+    input_result_id: str | None,
+    structured_output_summary: dict[str, object] | None,
+    generation_parameters: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError, match="generation_parameters"):
+        _call(
+            purpose=purpose,
+            input_result_id=input_result_id,
+            structured_output_summary=structured_output_summary,
+            generation_parameters=generation_parameters,
+        )
+
+
+@pytest.mark.parametrize(
+    "generation_parameters",
+    [
+        {
+            "temperature": 1,
+            "max_tokens": 1024,
+            "thinking_mode": "disabled",
+            "response_format": "json_object",
+            "streaming": False,
+        },
+        {
+            "temperature": 0,
+            "max_tokens": 768,
+            "thinking_mode": "disabled",
+            "response_format": "json_object",
+            "streaming": False,
+        },
+        {
+            "temperature": 0,
+            "max_tokens": 1024,
+            "thinking_mode": "enabled",
+            "response_format": "json_object",
+            "streaming": False,
+        },
+        {
+            "temperature": 0,
+            "max_tokens": 1024,
+            "thinking_mode": "disabled",
+            "response_format": "json",
+            "streaming": False,
+        },
+        {
+            "temperature": 0,
+            "max_tokens": 1024,
+            "thinking_mode": "disabled",
+            "response_format": "json_object",
+            "streaming": True,
+        },
+        {
+            "temperature": 0,
+            "max_tokens": 1024,
+            "thinking_mode": "disabled",
+            "response_format": "json_object",
+            "streaming": False,
+            "extra": "forbidden",
+        },
+    ],
+)
+def test_deepseek_generation_parameter_shapes_are_exact(
+    generation_parameters: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError, match="generation_parameters"):
+        _call(generation_parameters=generation_parameters)
+
+
 def test_explanation_call_does_not_store_chat_structured_summary() -> None:
     with pytest.raises(ValueError, match="structured_output_summary"):
         _call(

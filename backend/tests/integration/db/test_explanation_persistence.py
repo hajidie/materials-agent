@@ -4,7 +4,7 @@ from dataclasses import replace
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.engine import Engine
 
 from backend.tests.integration.db.test_result_commit import (
@@ -22,8 +22,12 @@ from materialsagent.application.result_service import ResultService
 from materialsagent.domain.models.conversation import Conversation
 from materialsagent.domain.ports.unit_of_work import PersistenceError
 from materialsagent.infrastructure.db.session import create_session_factory
+from materialsagent.infrastructure.db.llm_call import LLMCallRow
 from materialsagent.infrastructure.db.unit_of_work import SQLAlchemyUnitOfWork
-from materialsagent.domain.ports.explanation import ExplanationOutcome
+from materialsagent.domain.ports.explanation import (
+    ExplanationOutcome,
+    ExplanationRequestMetadata,
+)
 from materialsagent.infrastructure.llm.mock_explanation import (
     MockExplanationAdapter,
 )
@@ -60,6 +64,159 @@ def _service(
         explanation_id_factory=lambda: "explanation_1",
         llm_call_id_factory=lambda: "llm_explanation_1",
     )
+
+
+class _ProviderMetadataExplanationAdapter(MockExplanationAdapter):
+    provider = "deepseek"
+    model_name = "deepseek-v4-flash"
+    prompt_template_version = "2"
+
+    def request_metadata(self, value) -> ExplanationRequestMetadata:
+        legacy = super().request_metadata(value)
+        return ExplanationRequestMetadata(
+            provider=self.provider,
+            model_name=self.model_name,
+            prompt_template_id=self.prompt_template_id,
+            prompt_template_version=self.prompt_template_version,
+            prompt_digest=legacy.prompt_digest,
+            generation_parameters={
+                "temperature": 0,
+                "max_tokens": 768,
+                "thinking_mode": "disabled",
+                "response_format": "text",
+                "streaming": False,
+            },
+        )
+
+    def explain(self, value) -> ExplanationOutcome:
+        self.call_count += 1
+        return ExplanationOutcome(
+            text="受控结果说明。",
+            usage={"input_tokens": 21, "output_tokens": 4},
+            provider_request_id="explanation-provider-request-1",
+            error_code=None,
+            safe_error_message=None,
+        )
+
+
+class _DetailedFailureExplanationAdapter(
+    _ProviderMetadataExplanationAdapter
+):
+    def __init__(
+        self,
+        *,
+        llm_error_code: str,
+        llm_safe_error_message: str,
+        error_code: str,
+        safe_error_message: str,
+    ) -> None:
+        super().__init__(mode="success")
+        self._llm_error_code = llm_error_code
+        self._llm_safe_error_message = llm_safe_error_message
+        self._error_code = error_code
+        self._safe_error_message = safe_error_message
+
+    def explain(self, value) -> ExplanationOutcome:
+        self.call_count += 1
+        return ExplanationOutcome(
+            text=None,
+            usage=None,
+            provider_request_id="explanation-provider-request-failed",
+            error_code=self._error_code,
+            safe_error_message=self._safe_error_message,
+            llm_error_code=self._llm_error_code,
+            llm_safe_error_message=self._llm_safe_error_message,
+        )
+
+
+def test_provider_metadata_usage_and_request_id_are_persisted(
+    migrated_database_engine: Engine,
+) -> None:
+    _committed_result(migrated_database_engine)
+    adapter = _ProviderMetadataExplanationAdapter(mode="success")
+    service = _service(migrated_database_engine, adapter)
+
+    explanation = service.explain(ACTOR, result_id="result_1")
+
+    assert explanation.status == "SUCCEEDED"
+    session_factory = create_session_factory(migrated_database_engine)
+    with session_factory() as session:
+        row = session.scalar(
+            select(LLMCallRow).where(
+                LLMCallRow.purpose == "TOOL_RESULT_EXPLANATION"
+            )
+        )
+    assert row is not None
+    assert row.provider == "deepseek"
+    assert row.model_name == "deepseek-v4-flash"
+    assert row.prompt_template_version == "2"
+    assert row.generation_parameters["max_tokens"] == 768
+    assert row.usage == {"input_tokens": 21, "output_tokens": 4}
+    assert (
+        row.provider_request_id
+        == "explanation-provider-request-1"
+    )
+
+
+@pytest.mark.parametrize(
+    ("llm_error_code", "llm_safe_error_message", "public_error_code"),
+    [
+        (
+            "LLM_AUTHENTICATION_FAILED",
+            "LLM provider authentication failed.",
+            "EXPLANATION_PROVIDER_UNAVAILABLE",
+        ),
+        (
+            "LLM_BALANCE_EXHAUSTED",
+            "LLM provider balance is insufficient.",
+            "EXPLANATION_PROVIDER_UNAVAILABLE",
+        ),
+        (
+            "LLM_RATE_LIMITED",
+            "LLM provider rate limit exceeded.",
+            "EXPLANATION_PROVIDER_UNAVAILABLE",
+        ),
+        (
+            "LLM_EMPTY_RESPONSE",
+            "LLM provider returned an empty response.",
+            "EXPLANATION_PROTOCOL_ERROR",
+        ),
+    ],
+)
+def test_detailed_llm_failure_is_only_persisted_on_llm_call(
+    migrated_database_engine: Engine,
+    llm_error_code: str,
+    llm_safe_error_message: str,
+    public_error_code: str,
+) -> None:
+    _committed_result(migrated_database_engine)
+    public_message = (
+        "Explanation provider returned an invalid response."
+        if public_error_code == "EXPLANATION_PROTOCOL_ERROR"
+        else "Explanation provider is unavailable."
+    )
+    adapter = _DetailedFailureExplanationAdapter(
+        llm_error_code=llm_error_code,
+        llm_safe_error_message=llm_safe_error_message,
+        error_code=public_error_code,
+        safe_error_message=public_message,
+    )
+
+    explanation = _service(
+        migrated_database_engine,
+        adapter,
+    ).explain(ACTOR, result_id="result_1")
+
+    with _factory(migrated_database_engine)() as unit_of_work:
+        call = unit_of_work.llm_calls.get("llm_explanation_1")
+        task = unit_of_work.tasks.get("task_1")
+    assert adapter.call_count == 1
+    assert call.error_code == llm_error_code
+    assert call.safe_error_message == llm_safe_error_message
+    assert explanation.error_code == public_error_code
+    assert explanation.safe_error_message == public_message
+    assert task.error_code == public_error_code
+    assert task.safe_error_message == public_message
 
 
 def test_prepare_commits_pending_facts_then_reloads_safe_projection(
@@ -218,6 +375,19 @@ class _UnexpectedExplanationAdapter:
     def __init__(self, behavior: str) -> None:
         self.behavior = behavior
         self.call_count = 0
+
+    def request_metadata(self, value) -> ExplanationRequestMetadata:
+        metadata = MockExplanationAdapter(
+            mode="success"
+        ).request_metadata(value)
+        return ExplanationRequestMetadata(
+            provider=self.provider,
+            model_name=self.model_name,
+            prompt_template_id=self.prompt_template_id,
+            prompt_template_version=self.prompt_template_version,
+            prompt_digest=metadata.prompt_digest,
+            generation_parameters=metadata.generation_parameters,
+        )
 
     def explain(self, _value):
         self.call_count += 1

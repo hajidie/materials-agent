@@ -349,3 +349,152 @@ def test_timeline_cursor_signing_key_length_is_measured_in_utf8_bytes() -> None:
 
     assert settings.timeline_cursor_signing_key is not None
     assert settings.timeline_cursor_signing_key.get_secret_value() == value
+
+
+def test_llm_defaults_keep_mock_enabled_without_provider_secret() -> None:
+    from materialsagent.infrastructure.config import (
+        load_settings,
+        parse_deepseek_config,
+    )
+
+    settings = load_settings({})
+
+    assert settings.llm_adapter == "mock"
+    assert settings.deepseek_api_key is None
+    assert settings.deepseek_model == "deepseek-v4-flash"
+    assert settings.deepseek_base_url == "https://api.deepseek.com"
+    assert settings.deepseek_timeout_seconds == 60.0
+    assert parse_deepseek_config(settings) is None
+
+
+def test_blank_deepseek_secret_is_normalized_to_none_in_mock_mode() -> None:
+    from materialsagent.infrastructure.config import load_settings
+
+    settings = load_settings(
+        {
+            "LLM_ADAPTER": "mock",
+            "DEEPSEEK_API_KEY": "   ",
+        }
+    )
+
+    assert settings.deepseek_api_key is None
+
+
+def test_complete_deepseek_configuration_is_exact_and_secret_safe() -> None:
+    from pydantic import SecretStr
+
+    from materialsagent.infrastructure.config import (
+        load_settings,
+        parse_deepseek_config,
+    )
+
+    secret = "test-only-deepseek-secret"
+    settings = load_settings(
+        {
+            "LLM_ADAPTER": "deepseek",
+            "DEEPSEEK_API_KEY": secret,
+            "DEEPSEEK_MODEL": "deepseek-v4-flash",
+            "DEEPSEEK_BASE_URL": "https://api.deepseek.com",
+            "DEEPSEEK_TIMEOUT_SECONDS": "60",
+        }
+    )
+
+    parsed = parse_deepseek_config(settings)
+
+    assert parsed is not None
+    assert parsed.model_name == "deepseek-v4-flash"
+    assert parsed.base_url == "https://api.deepseek.com"
+    assert parsed.timeout_seconds == 60.0
+    assert isinstance(parsed.api_key, SecretStr)
+    assert parsed.api_key.get_secret_value() == secret
+    assert secret not in repr(settings)
+    assert secret not in repr(parsed)
+
+
+def test_deepseek_mode_without_nonblank_secret_fails_closed() -> None:
+    from materialsagent.infrastructure.config import (
+        ConfigurationError,
+        load_settings,
+        parse_deepseek_config,
+    )
+
+    settings = load_settings({"LLM_ADAPTER": "deepseek"})
+
+    with pytest.raises(
+        ConfigurationError,
+        match=r"^Invalid DeepSeek configuration\.$",
+    ):
+        parse_deepseek_config(settings)
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"LLM_ADAPTER": "unknown"},
+        {
+            "LLM_ADAPTER": "deepseek",
+            "DEEPSEEK_API_KEY": " test-only-secret",
+        },
+        {
+            "LLM_ADAPTER": "deepseek",
+            "DEEPSEEK_API_KEY": "test-only-secret ",
+        },
+        {
+            "LLM_ADAPTER": "deepseek",
+            "DEEPSEEK_API_KEY": "test-only-secret",
+            "DEEPSEEK_MODEL": "deepseek-chat",
+        },
+        {
+            "LLM_ADAPTER": "deepseek",
+            "DEEPSEEK_API_KEY": "test-only-secret",
+            "DEEPSEEK_BASE_URL": "https://api.deepseek.com/v1",
+        },
+        {
+            "LLM_ADAPTER": "deepseek",
+            "DEEPSEEK_API_KEY": "test-only-secret",
+            "DEEPSEEK_BASE_URL": "http://api.deepseek.com",
+        },
+        {
+            "LLM_ADAPTER": "deepseek",
+            "DEEPSEEK_API_KEY": "test-only-secret",
+            "DEEPSEEK_BASE_URL": "https://user:password@api.deepseek.com",
+        },
+        {
+            "LLM_ADAPTER": "deepseek",
+            "DEEPSEEK_API_KEY": "test-only-secret",
+            "DEEPSEEK_BASE_URL": "https://api.deepseek.com?query=value",
+        },
+        {
+            "LLM_ADAPTER": "deepseek",
+            "DEEPSEEK_API_KEY": "test-only-secret",
+            "DEEPSEEK_BASE_URL": "https://api.deepseek.com#fragment",
+        },
+        {
+            "LLM_ADAPTER": "deepseek",
+            "DEEPSEEK_API_KEY": "test-only-secret",
+            "DEEPSEEK_TIMEOUT_SECONDS": "0",
+        },
+        {
+            "LLM_ADAPTER": "deepseek",
+            "DEEPSEEK_API_KEY": "test-only-secret",
+            "DEEPSEEK_TIMEOUT_SECONDS": "-1",
+        },
+    ],
+)
+def test_invalid_deepseek_configuration_is_sanitized(
+    values: dict[str, str],
+) -> None:
+    from materialsagent.infrastructure.config import (
+        ConfigurationError,
+        load_settings,
+    )
+
+    with pytest.raises(
+        ConfigurationError,
+        match=r"^Invalid application configuration\.$",
+    ) as exc_info:
+        load_settings(values)
+
+    message = str(exc_info.value)
+    assert "test-only-secret" not in message
+    assert all(actual not in message for actual in values.values())

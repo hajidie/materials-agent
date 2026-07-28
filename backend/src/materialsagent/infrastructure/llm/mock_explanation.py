@@ -1,12 +1,58 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+from hashlib import sha256
+import json
+
 from materialsagent.domain.ports.explanation import (
     ExplanationInput,
     ExplanationOutcome,
+    ExplanationRequestMetadata,
     ExplanationProtocolError,
     ExplanationProviderUnavailableError,
     ExplanationTimeoutError,
 )
+
+
+def _plain_json(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {key: _plain_json(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_plain_json(item) for item in value]
+    return value
+
+
+def _prompt_digest(value: ExplanationInput) -> str:
+    safe_value = {
+        "result_id": value.result_id,
+        "status": value.status,
+        "requested_outputs": list(value.requested_outputs),
+        "completed_outputs": list(value.completed_outputs),
+        "failed_outputs": list(value.failed_outputs),
+        "data": _plain_json(value.data),
+        "artifacts": [
+            {
+                "asset_id": item.asset_id,
+                "role": item.role,
+                "asset_type": item.asset_type,
+            }
+            for item in value.artifacts
+        ],
+        "warnings": _plain_json(value.warnings),
+        "error": _plain_json(value.error),
+        "process_parameters": _plain_json(value.process_parameters),
+        "tool_id": value.tool_id,
+        "tool_version": value.tool_version,
+        "schema_version": value.schema_version,
+    }
+    encoded = json.dumps(
+        safe_value,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return sha256(encoded).hexdigest()
 
 
 class MockExplanationAdapter:
@@ -26,6 +72,22 @@ class MockExplanationAdapter:
             raise ValueError("Unsupported Mock Explanation mode.")
         self.mode = mode
         self.call_count = 0
+
+    def request_metadata(
+        self,
+        value: ExplanationInput,
+    ) -> ExplanationRequestMetadata:
+        return ExplanationRequestMetadata(
+            provider=self.provider,
+            model_name=self.model_name,
+            prompt_template_id=self.prompt_template_id,
+            prompt_template_version=self.prompt_template_version,
+            prompt_digest=_prompt_digest(value),
+            generation_parameters={
+                "temperature": 0,
+                "max_tokens": 512,
+            },
+        )
 
     def explain(self, value: ExplanationInput) -> ExplanationOutcome:
         self.call_count += 1

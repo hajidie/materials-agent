@@ -821,40 +821,39 @@ git diff --cached --check
 
 **M11 完成证据：** M11-A/M11-B 完整命令日志、E2E 和浏览器验收报告、资源计数、scope/SEM/Git 审计。到此必须暂停，等待项目负责人通过 M11 检查点并确认阶段 1A 完成。未来建议提交：`test: add phase 1a mock acceptance`。
 
-## M12：真实 LangChain 与 LLM Provider 接入
+## M12：DeepSeek Provider 接入
 
-**目标：** 在保持 Mock LLM 自动化测试替身的同时，新增真实 Chat Orchestration 与 Explanation Adapter，通过 LangChain structured output 接入真实 Provider；Application 的确定性标准化、硬校验和 Tool 执行权继续不变。
+M12 拆成两个独立暂停点。M12-A 只实现并离线验证 Provider Adapter、应用接线和 Mock 回归；M12-B 才允许使用项目负责人提供的进程环境配置做受控真实 Provider 验收。M12-A 获批前不得开始 M12-B。
 
-**用户价值：** 平台不再以 Mock LLM 作为最终 MVP 的聊天与解释能力；用户可通过真实模型获得知识回答、Tool 意图识别、缺参追问和结果解释，同时错误路径仍可安全恢复。
+### M12-A：离线 Provider 实现、应用接线与 Mock 回归
 
-**前置条件：** M11 项目负责人检查点通过；项目负责人允许真实 Provider 的受控网络调用；Backend 依赖仍只由 `backend/pyproject.toml` 管理；API Key 已通过本地环境变量提供。
+**目标：** 保留 Mock 自动化替身，新增 DeepSeek Chat Orchestration 与 Explanation Adapter；使用 fake Runnable/model 完成严格 structured output、Prompt digest、usage/request-id 白名单、静态错误矩阵、持久化、幂等和 wiring 的全离线验证。Application 的单位换算、完整性/精度/范围硬校验、Tool Registry 和 Tool 执行权保持不变。
 
-**允许修改的文件范围：** Backend Chat Orchestration/Explanation Port 的真实 LangChain Adapter、LLM 配置与安全错误映射、`.env.example` 变量名说明、真实 Adapter contract/integration tests、`docs/acceptance/real-llm-provider.md`；保留并测试既有 Mock Adapter。
+**固定配置：** provider=`deepseek`、model=`deepseek-v4-flash`、根地址 `https://api.deepseek.com`、temperature=0、Chat max tokens=1024、Explanation max tokens=768、timeout=60 秒、SDK retries=0、streaming=false、thinking=disabled、response headers enabled。配置只能接受该精确模型和根地址。
 
-**明确不做：** 真实 LLM 不直接执行 Tool，不做最终单位转换、范围判断或固定参数选择；不删除 Mock LLM；不保存完整 Prompt、Secret、Provider 原始响应或内部堆栈；不接入真实 ZTA35G Runtime，不运行 `SEM/`。
+**安全边界：** Key 仅为 `SecretStr | None`，Mock 不要求 Key，DeepSeek wiring 缺 Key fail closed；不保存或记录 Key、Authorization、完整 Prompt、原始响应、完整 headers、reasoning content、SDK 异常正文或内部堆栈。成功只白名单保存 input/output token 和合法 `x-request-id`；失败只保存静态错误码/文案和合法 request id。
 
-**接口与 structured output：** Chat Adapter 必须返回 `KNOWLEDGE_ANSWER | TOOL_EXECUTION | NEEDS_INPUT` 判别联合；Tool 路径只允许 `zta35g_sem_virtual_lab`，并提取四维参数候选、原始单位和 `requested_outputs`。Explanation Adapter 只读取已持久化 ToolResult 的安全投影。Application 对候选继续执行确定性单位换算、去重、完整性/精度/范围硬校验和 Tool Registry 解析。
+**接口与 structured output：** Chat 使用 `with_structured_output(ProviderChatResponse, method="json_mode", include_raw=True)`，Provider Schema 严格禁止额外字段并表达 `KNOWLEDGE_ANSWER | TOOL_EXECUTION | NEEDS_INPUT`。Explanation 使用独立普通 model 实例。每次业务调用最多 invoke 一次，不 repair、不 retry、不 fallback。Provider Schema 通过后仍必须经过现有 Application 硬校验。
 
-**实现步骤：**
+**持久化与事务：** Adapter 的纯函数 `request_metadata()` 与实际 invoke 共享同一 Prompt 渲染函数；先提交 PENDING LLMCall，再退出事务调用 Provider，最后用短事务保存白名单 outcome。Prompt template 为 Chat `chat-orchestration/2`、Explanation `tool-result-explanation/2`；仅保存固定身份、canonical SHA-256 digest 和受控 generation parameters。
 
-1. 先为三类 structured output、四维参数/单位/requested_outputs、Explanation、非法结构、认证失败、限流、超时和 Provider 故障编写失败测试。
-2. 在 `backend/pyproject.toml` 声明并锁定所需 LangChain/Provider 包约束；Conda YAML 不重复维护这些版本。
-3. 实现真实 Chat Orchestration Adapter 和真实 Explanation Adapter；API Key、模型名和受控超时只从配置读取，其中 Secret 只来自环境变量。
-4. 对 Provider 返回执行严格 Schema 校验；非法 structured output 不猜测修复为 Tool 调用，映射为安全失败或受控 NEEDS_INPUT。
-5. 只保存基线允许的模板身份/版本、prompt digest、模型标识、generation parameters、usage、耗时、安全 structured output 摘要和稳定错误码。
-6. 运行受控真实调用，分别验证知识回答、完整 Tool 候选、缺参追问、单位转换候选和 Explanation；核对 Adapter 没有直接调用 Tool/Runtime。
+**自动化验收：** 覆盖三条 Chat route、Explanation、严格 Schema、空响应/非法 JSON/Schema mismatch、400/401/402/422/429/500/503/连接/超时、一次 invoke、双独立 model、显式注入优先、Mock lazy boundary、socket 阻断、Chat 同 key 重放、Explanation retry 同 key 重放与新 key 资源增量。阶段 1A Runner 必须强制 Mock 并精确恢复调用者环境。
 
-**自动化测试与四类场景：** 成功覆盖 KNOWLEDGE_ANSWER、TOOL_EXECUTION、NEEDS_INPUT 和 Explanation；输入错误覆盖缺失/多余字段、非法 tool_id、非法 requested_outputs/单位候选；依赖失败覆盖认证失败、429 限流、网络错误和超时；同幂等 key 重放不重复调用 Provider，Mock suite 继续离线稳定通过。
+**明确不做：** 不发出任何真实 Provider 请求，不读取/设置/索要真实 Key，不创建 live test，不修改本地 `.env`，不修改公共 API Schema、migration、Frontend、Mock Runtime 或 `SEM/`，不运行真实模型。
 
-运行：`conda run -n materialsagent-backend python -m pytest backend/tests/contract/test_chat_orchestration.py backend/tests/contract/test_real_llm_adapters.py backend/tests/integration/llm backend/tests/api/test_message_orchestration.py backend/tests/api/test_explanation_outcomes.py -q`
+**暂停点：** 完成离线测试、阶段 1A Mock 回归、Scope、SEM、Secret/Prompt 扫描与 Git 审计后标记 `M12A_IMPLEMENTED_AWAITING_PROJECT_OWNER_REVIEW`。未经项目负责人验收不得暂存、commit、push、amend 或开始 M12-B。
 
-预期：0 failed；Mock 与真实 Adapter 使用同一 Port 契约；真实调用日志和数据库中无 API Key、完整 Prompt 或 Provider 原始响应；非法 structured output 不触发 Tool；三类编排和 Explanation 均有真实 Provider 验收证据。
+### M12-B：受控真实 Provider 验收
 
-**人工验收步骤：** 在环境变量中临时提供 API Key，分别提交材料知识问题、完整四维 Tool 请求、缺少一维参数的请求、带分钟单位的请求，并对已持久化 Mock ToolResult 生成真实 Explanation；清除进程环境后确认仓库无 Secret diff。
+**状态：** `NOT STARTED`。
 
-**失败时回退：** 配置切回 Mock LLM，保留安全失败记录；不修改已持久化 ToolResult，不运行真实 Runtime，不为迁就 Provider 绕过 Application 硬校验。
+**前置条件：** M12-A 项目负责人检查点通过；项目负责人另行明确授权真实网络调用和进程环境中的 Key。不得从仓库、`.env`、日志、报告或测试自动发现 Key。
 
-**完成证据：** Mock/真实 Adapter 契约结果、四类真实响应安全摘要、Provider 故障矩阵、Tool/Provider 调用计数、Secret/Prompt 扫描和 `git diff --check`。到此必须暂停，等待项目负责人通过 M12 检查点。未来建议提交：`feat: add real langchain llm adapters`。
+**范围：** 使用 M12-A 已审查 Adapter 对知识回答、完整 Tool 候选、缺参追问、单位候选和 Explanation 做最小真实调用；记录安全摘要、调用计数、错误矩阵和无敏感信息的验收报告。真实 LLM 仍不得直接调用 Tool、Runtime、PostgreSQL 或 MinIO。
+
+**失败时回退：** 配置切回 Mock，保留静态安全失败事实；不修改 ToolResult，不绕过 Application 硬校验，不进入 M13。
+
+**完成证据：** 真实调用安全摘要、三类编排与 Explanation、故障映射、幂等计数、无 Secret/Prompt/raw response 扫描和 Git 审计。到此再次暂停，等待项目负责人通过 M12 overall 检查点。
 
 ## M13：Python 3.8 模型环境与权重加载验证
 

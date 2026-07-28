@@ -9,6 +9,69 @@ from typing import Any
 import pytest
 
 
+def test_chat_port_exposes_immutable_request_metadata_and_outcome() -> None:
+    from materialsagent.domain.ports.chat_orchestration import (
+        ChatOrchestrationOutcome,
+        ChatOrchestrationRequestMetadata,
+        KnowledgeAnswer,
+    )
+
+    metadata = ChatOrchestrationRequestMetadata(
+        provider="deepseek",
+        model_name="deepseek-v4-flash",
+        prompt_template_id="chat-orchestration",
+        prompt_template_version="2",
+        prompt_digest="a" * 64,
+        generation_parameters={
+            "temperature": 0,
+            "max_tokens": 1024,
+            "thinking_mode": "disabled",
+            "response_format": "json_object",
+            "streaming": False,
+        },
+    )
+    outcome = ChatOrchestrationOutcome(
+        result=KnowledgeAnswer(answer_text="受控答案。"),
+        usage={"input_tokens": 3, "output_tokens": 2},
+        provider_request_id="provider-request-1",
+    )
+
+    assert metadata.provider == "deepseek"
+    assert metadata.generation_parameters["max_tokens"] == 1024
+    assert outcome.result.route == "KNOWLEDGE_ANSWER"
+    assert outcome.usage == {"input_tokens": 3, "output_tokens": 2}
+    with pytest.raises(TypeError):
+        metadata.generation_parameters["max_tokens"] = 1
+    with pytest.raises(TypeError):
+        outcome.usage["input_tokens"] = 0
+
+
+@pytest.mark.parametrize(
+    ("usage", "provider_request_id"),
+    [
+        ({"input_tokens": True, "output_tokens": 1}, None),
+        ({"input_tokens": 1, "output_tokens": -1}, None),
+        ({"input_tokens": 1}, None),
+        (None, "contains a space"),
+    ],
+)
+def test_chat_outcome_rejects_uncontrolled_metadata(
+    usage: object,
+    provider_request_id: str | None,
+) -> None:
+    from materialsagent.domain.ports.chat_orchestration import (
+        ChatOrchestrationOutcome,
+        KnowledgeAnswer,
+    )
+
+    with pytest.raises(ValueError):
+        ChatOrchestrationOutcome(
+            result=KnowledgeAnswer(answer_text="受控答案。"),
+            usage=usage,
+            provider_request_id=provider_request_id,
+        )
+
+
 def test_port_module_owns_the_safe_failure_contract() -> None:
     port_module = import_module(
         "materialsagent.domain.ports.chat_orchestration"
@@ -40,6 +103,41 @@ def test_mock_adapter_has_no_static_provider_request_id() -> None:
     assert {"provider", "model_name"} <= set(annotations)
     assert "provider_request_id" not in annotations
     assert not hasattr(adapter, "provider_request_id")
+
+
+def test_mock_request_metadata_preserves_the_legacy_identity() -> None:
+    from hashlib import sha256
+
+    from materialsagent.infrastructure.llm.mock import (
+        MockChatOrchestrationAdapter,
+    )
+
+    types = _types()
+    request = _request(types)
+    adapter = MockChatOrchestrationAdapter(
+        lambda _: {
+            "route": "KNOWLEDGE_ANSWER",
+            "answer_text": "安全答案。",
+        }
+    )
+
+    metadata = adapter.request_metadata(request)
+
+    expected = sha256(
+        (
+            "chat-orchestration:1\n"
+            f"{request.content_text}"
+        ).encode("utf-8")
+    ).hexdigest()
+    assert metadata.provider == "mock"
+    assert metadata.model_name == "mock-chat-orchestration-v1"
+    assert metadata.prompt_template_id == "chat-orchestration"
+    assert metadata.prompt_template_version == "1"
+    assert metadata.prompt_digest == expected
+    assert metadata.generation_parameters == {
+        "temperature": 0,
+        "max_tokens": 256,
+    }
 
 
 def _types() -> dict[str, Any]:
@@ -128,7 +226,7 @@ def test_mock_decodes_each_discriminated_result(
         responder=lambda _: payload
     )
 
-    result = adapter.orchestrate(_request(types))
+    result = adapter.orchestrate(_request(types)).result
 
     assert isinstance(result, types[expected_type])
     assert result.route == expected_route
@@ -153,7 +251,7 @@ def test_candidate_models_are_strongly_typed() -> None:
         }
     )
 
-    result = adapter.orchestrate(_request(types))
+    result = adapter.orchestrate(_request(types)).result
 
     assert isinstance(result.material, types["AmbiguousValue"])
     assert isinstance(
@@ -390,7 +488,7 @@ def test_default_mock_responder_has_controlled_acceptance_scenarios(
     second = adapter.orchestrate(request)
 
     assert first == second
-    assert first.route == expected_route
+    assert first.result.route == expected_route
 
 
 @pytest.mark.parametrize(
@@ -417,7 +515,7 @@ def test_default_mock_responder_accepts_controlled_aging_temperature_supplement(
     )
     result = types["MockChatOrchestrationAdapter"](
         default_mock_responder
-    ).orchestrate(request)
+    ).orchestrate(request).result
 
     assert isinstance(result, types["ToolCandidate"])
     assert result.route == "TOOL_EXECUTION"

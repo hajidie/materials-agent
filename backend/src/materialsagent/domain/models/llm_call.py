@@ -130,14 +130,22 @@ def _require_exact_keys(
 
 def _controlled_generation_parameters(
     value: Mapping[str, object],
+    purpose: str,
 ) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         raise ValueError("generation_parameters must be a JSON object.")
-    _require_exact_keys(
-        value,
-        {"temperature", "max_tokens"},
-        "generation_parameters",
-    )
+    legacy_keys = {"temperature", "max_tokens"}
+    deepseek_keys = {
+        "temperature",
+        "max_tokens",
+        "thinking_mode",
+        "response_format",
+        "streaming",
+    }
+    if set(value) not in {frozenset(legacy_keys), frozenset(deepseek_keys)}:
+        raise ValueError(
+            "generation_parameters does not match its controlled schema."
+        )
     temperature = value["temperature"]
     if (
         type(temperature) not in (int, float)
@@ -156,6 +164,23 @@ def _controlled_generation_parameters(
         raise ValueError(
             "generation_parameters.max_tokens must be a positive integer."
         )
+    if set(value) == deepseek_keys:
+        response_format = value["response_format"]
+        expected_response_format, expected_max_tokens = {
+            CHAT_ORCHESTRATION: ("json_object", 1024),
+            TOOL_RESULT_EXPLANATION: ("text", 768),
+        }[purpose]
+        if (
+            temperature != 0
+            or value["thinking_mode"] != "disabled"
+            or type(value["streaming"]) is not bool
+            or value["streaming"] is not False
+            or response_format != expected_response_format
+            or max_tokens != expected_max_tokens
+        ):
+            raise ValueError(
+                "generation_parameters does not match its controlled schema."
+            )
     return _bounded_frozen_object(value, "generation_parameters")
 
 
@@ -388,7 +413,10 @@ class LLMCall:
         object.__setattr__(
             self,
             "generation_parameters",
-            _controlled_generation_parameters(self.generation_parameters),
+            _controlled_generation_parameters(
+                self.generation_parameters,
+                self.purpose,
+            ),
         )
         object.__setattr__(
             self,

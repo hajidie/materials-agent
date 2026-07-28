@@ -56,7 +56,9 @@ function ConvertTo-RepoPath {
 }
 
 $normalizedMilestone = $Milestone.Trim().ToUpperInvariant()
-$recognizedMilestones = @('G0', 'M0', 'M4A', 'M4B', 'M4PLAN', 'M11A', 'M11B') + @(1..16 | ForEach-Object { "M$_" })
+$recognizedMilestones = @(
+    'G0', 'M0', 'M4A', 'M4B', 'M4PLAN', 'M11A', 'M11B', 'M12A'
+) + @(1..16 | ForEach-Object { "M$_" })
 if ($recognizedMilestones -notcontains $normalizedMilestone) {
     Complete-ScopeCheck -Code 'UNKNOWN_MILESTONE' -Summary $normalizedMilestone
 }
@@ -458,6 +460,40 @@ $milestoneAllowlists = @{
         'backend/tests/e2e/test_mock_journey.py'
         'backend/tests/e2e/test_mock_acceptance_matrix.py'
         'docs/acceptance/phase-1a-report.md'
+    )
+    M12A = @(
+        '.env.example'
+        'backend/pyproject.toml'
+        'backend/src/materialsagent/domain/ports/chat_orchestration.py'
+        'backend/src/materialsagent/domain/ports/explanation.py'
+        'backend/src/materialsagent/domain/models/llm_call.py'
+        'backend/src/materialsagent/application/chat_orchestration.py'
+        'backend/src/materialsagent/application/explanation_service.py'
+        'backend/src/materialsagent/infrastructure/config.py'
+        'backend/src/materialsagent/infrastructure/llm/mock.py'
+        'backend/src/materialsagent/infrastructure/llm/mock_explanation.py'
+        'backend/src/materialsagent/infrastructure/llm/deepseek_common.py'
+        'backend/src/materialsagent/infrastructure/llm/deepseek_chat.py'
+        'backend/src/materialsagent/infrastructure/llm/deepseek_explanation.py'
+        'backend/src/materialsagent/main.py'
+        'backend/tests/contract/test_chat_orchestration.py'
+        'backend/tests/contract/test_explanation.py'
+        'backend/tests/contract/test_deepseek_adapters.py'
+        'backend/tests/unit/test_chat_orchestration_service.py'
+        'backend/tests/unit/test_explanation_service.py'
+        'backend/tests/unit/test_llm_call_domain.py'
+        'backend/tests/unit/test_config.py'
+        'backend/tests/api/test_message_orchestration.py'
+        'backend/tests/api/test_explanation_outcomes.py'
+        'backend/tests/integration/db/test_chat_orchestration_persistence.py'
+        'backend/tests/integration/db/test_explanation_persistence.py'
+        'backend/tests/integration/db/test_llm_call.py'
+        'backend/tests/integration/llm/test_deepseek_wiring.py'
+        'backend/tests/integration/llm/test_provider_idempotency.py'
+        'docs/superpowers/plans/2026-07-17-sem-mvp-phase-1-implementation-plan.md'
+        'docs/acceptance/m12-a-offline-provider.md'
+        'scripts/dev/check-scope.ps1'
+        'scripts/acceptance/run-phase-1a.ps1'
     )
 }
 

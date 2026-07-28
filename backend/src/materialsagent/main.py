@@ -81,6 +81,7 @@ from materialsagent.infrastructure.config import (
     AppSettings,
     ConfigurationError,
     load_settings,
+    parse_deepseek_config,
     parse_minio_config,
     parse_zta35g_runtime_config,
 )
@@ -381,6 +382,44 @@ def create_app(
     resolved_tool_workflow_service = tool_workflow_service
     resolved_tool_retry_service = tool_retry_service
     resolved_explanation_retry_service = explanation_retry_service
+    resolved_chat_orchestration_port = chat_orchestration_port
+    resolved_explanation_port = explanation_port
+    needs_default_chat_port = (
+        resolved_chat_orchestration_service is None
+        and resolved_chat_orchestration_port is None
+    )
+    needs_default_explanation_port = (
+        resolved_explanation_service is None
+        and resolved_explanation_port is None
+    )
+    if needs_default_chat_port or needs_default_explanation_port:
+        if resolved_settings.llm_adapter == "mock":
+            if needs_default_chat_port:
+                resolved_chat_orchestration_port = (
+                    MockChatOrchestrationAdapter(default_mock_responder)
+                )
+            if needs_default_explanation_port:
+                resolved_explanation_port = MockExplanationAdapter()
+        else:
+            deepseek_config = parse_deepseek_config(resolved_settings)
+            if deepseek_config is None:
+                raise ConfigurationError("Invalid DeepSeek configuration.")
+            if needs_default_chat_port:
+                from materialsagent.infrastructure.llm.deepseek_chat import (
+                    DeepSeekChatAdapter,
+                )
+
+                resolved_chat_orchestration_port = DeepSeekChatAdapter(
+                    deepseek_config
+                )
+            if needs_default_explanation_port:
+                from materialsagent.infrastructure.llm.deepseek_explanation import (
+                    DeepSeekExplanationAdapter,
+                )
+
+                resolved_explanation_port = DeepSeekExplanationAdapter(
+                    deepseek_config
+                )
     tool_chain_requested = (
         m7_tool_chain_enabled is True
         or (
@@ -431,9 +470,11 @@ def create_app(
                 clock=clock,
             )
         if resolved_explanation_service is None:
+            if resolved_explanation_port is None:
+                raise ConfigurationError("Invalid LLM adapter configuration.")
             resolved_explanation_service = ExplanationService(
                 resolved_unit_of_work_factory,
-                explanation_port or MockExplanationAdapter(),
+                resolved_explanation_port,
                 clock=clock,
             )
         if (
@@ -486,10 +527,8 @@ def create_app(
             and resolved_tool_workflow_service is not None
         )
         if resolved_chat_orchestration_service is None:
-            resolved_chat_orchestration_port = (
-                chat_orchestration_port
-                or MockChatOrchestrationAdapter(default_mock_responder)
-            )
+            if resolved_chat_orchestration_port is None:
+                raise ConfigurationError("Invalid LLM adapter configuration.")
             resolved_chat_orchestration_service = ChatOrchestrationService(
                 resolved_unit_of_work_factory,
                 resolved_chat_orchestration_port,

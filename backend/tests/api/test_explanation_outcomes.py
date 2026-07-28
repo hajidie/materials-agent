@@ -9,6 +9,7 @@ from sqlalchemy import text
 from backend.tests.api.conftest import BASE_TIME
 from backend.tests.api.test_assets import _MemoryStorage, _valid_image
 from backend.tests.integration.db.test_explanation_persistence import (
+    _DetailedFailureExplanationAdapter,
     _FailingFinalizeFactory,
     _UnexpectedExplanationAdapter,
 )
@@ -546,6 +547,80 @@ def test_runtime_transport_failure_selects_persisted_failed_tool_run(
         assert connection.scalar(
             text("SELECT count(*) FROM natural_language_explanation")
         ) == 0
+
+
+def test_deepseek_auth_failure_is_detailed_only_in_llm_call(
+    api_harness,
+) -> None:
+    actor_id = "actor_local"
+    api_harness.persist_actor(actor_id)
+    runtime = _Runtime()
+    storage = _MemoryStorage()
+    adapter = _DetailedFailureExplanationAdapter(
+        llm_error_code="LLM_AUTHENTICATION_FAILED",
+        llm_safe_error_message="LLM provider authentication failed.",
+        error_code="EXPLANATION_PROVIDER_UNAVAILABLE",
+        safe_error_message="Explanation provider is unavailable.",
+    )
+    options = _client_options(
+        api_harness,
+        runtime,
+        storage,
+        "success",
+    )
+    options["explanation_port"] = adapter
+
+    with api_harness.create_client(
+        actor_id,
+        **options,
+        raise_server_exceptions=True,
+    ) as client:
+        conversation = client.post(
+            "/api/v1/conversations",
+            json={},
+        ).json()["data"]["conversation_id"]
+        response = _submit(client, conversation)
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["task"]["status"] == "PARTIALLY_SUCCEEDED"
+    assert data["explanation"]["error_code"] == (
+        "EXPLANATION_PROVIDER_UNAVAILABLE"
+    )
+    assert data["explanation"]["safe_error_message"] == (
+        "Explanation provider is unavailable."
+    )
+    assert "LLM_AUTHENTICATION_FAILED" not in response.text
+    assert "LLM provider authentication failed." not in response.text
+    with api_harness.engine.connect() as connection:
+        call_row = connection.execute(
+            text(
+                "SELECT error_code, safe_error_message FROM llm_call "
+                "WHERE purpose = 'TOOL_RESULT_EXPLANATION'"
+            )
+        ).mappings().one()
+        explanation_row = connection.execute(
+            text(
+                "SELECT error_code, safe_error_message "
+                "FROM natural_language_explanation"
+            )
+        ).mappings().one()
+        task_row = connection.execute(
+            text(
+                "SELECT error_code, safe_error_message FROM task "
+                "WHERE task_type = 'TOOL_EXECUTION'"
+            )
+        ).mappings().one()
+    assert call_row == {
+        "error_code": "LLM_AUTHENTICATION_FAILED",
+        "safe_error_message": "LLM provider authentication failed.",
+    }
+    public_error = {
+        "error_code": "EXPLANATION_PROVIDER_UNAVAILABLE",
+        "safe_error_message": "Explanation provider is unavailable.",
+    }
+    assert explanation_row == public_error
+    assert task_row == public_error
 
 
 def test_result_commit_failure_has_no_result_explanation_or_memory_success(

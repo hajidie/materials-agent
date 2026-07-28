@@ -6,11 +6,11 @@
 
 | 字段 | 当前值 |
 |---|---|
-| 当前阶段 | 阶段 1A |
-| 当前里程碑 | M11 |
-| 当前工作单元 | M11-B：完整 Mock 故障矩阵、阶段 1A 统一验收入口与正式验收报告 |
-| 状态 | `M11B_PROJECT_OWNER_ACCEPTED_STAGING_AUTHORIZED` |
-| 上一已验收工作单元 | M11-A：Mock 栈安全启动/停止与基础端到端旅程 |
+| 当前阶段 | 真实能力接入 |
+| 当前里程碑 | M12 |
+| 当前工作单元 | M12-A：DeepSeek Provider 离线实现、应用接线与 Mock 回归 |
+| 状态 | `M12A_PROJECT_OWNER_ACCEPTED` |
+| 上一已验收工作单元 | M11-B：阶段 1A 完整 Mock 验收 |
 | Pre-M8 stop-loss commit | `891714dd58cf069073a7d4037be43ef66304d0ac` |
 | M8 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M8 acceptance commit | `18005944982ca5191412e06154effc67465ca3a7` |
@@ -20,30 +20,35 @@
 | M10-B acceptance commit | `f426e6f23703002a648991e5bb436929df19e8e2` |
 | M10 overall acceptance commit | `f426e6f23703002a648991e5bb436929df19e8e2` |
 | M11-A acceptance commit | `4ed740222238433541fb31c993dd75610634d157` |
-| Expected subject | M11-B 尚未授权 commit，不预设主题 |
-| 实际 branch / HEAD | `main` / `4ed740222238433541fb31c993dd75610634d157` |
-| HEAD parent / subject | `f426e6f23703002a648991e5bb436929df19e8e2` / `feat: add reliable mock stack acceptance` |
-| 暂存区 | 本轮已授权精确暂存 15 个 M11-B 变更路径；commit 尚未授权 |
-| 当前工作区 | M11-B 当前 15 个 allowlist 路径已精确暂存，等待 staged diff 审计与后续 commit 授权；最终代码审查、浏览器验收和阶段 1A 权威验收均已通过 |
+| M11-B / Phase 1A acceptance commit | `f5e24dcaab4801dbeffb8400f2960c33b60b4f00` |
+| Expected subject | `feat: add offline DeepSeek provider integration` |
+| 实际 branch / HEAD | `main` / `f5e24dcaab4801dbeffb8400f2960c33b60b4f00` |
+| HEAD parent / subject | `4ed740222238433541fb31c993dd75610634d157` / `feat: complete phase 1a mock acceptance` |
+| 暂存区 | empty；已授权在 staged diff 门槛全部通过后精确暂存并创建唯一 M12-A 验收提交 |
+| 当前工作区 | M12-A 已通过项目负责人代码审查和离线验收；等待 staged diff 门槛与唯一验收提交 |
 | 已确认设计基线 | 五份均未修改 |
 | 历史 migration | `0001`–`0008` 均未修改；当前唯一 head/current 为 `0009_timeline_query_indexes` |
 | `SEM/` | 未修改、未加载或运行真实模型；`SEM_INTEGRITY_OK` |
 | Mock Runtime | 实现和协议未修改 |
-| Commit | `NO / NOT AUTHORIZED` |
+| Commit | `AUTHORIZED SUBJECT TO STAGED-DIFF GATES` |
 | Push | `NO` |
 | Amend | `NO` |
-| Git 外部动作 | 仅授权精确暂存 15 个 M11-B 路径；未授权 commit、push、amend、rebase、reset、stash、创建分支或 worktree |
+| Git 外部动作 | 仅精确暂存 31 个批准路径及一个 M12-A 验收 commit 获授权；push、amend、rebase、reset、stash、创建分支或 worktree 均未授权 |
 | M10-A | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M10-B | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M10 overall | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
-| M11 | `IN PROGRESS — awaiting M11-B acceptance commit` |
+| M11 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M11-A | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
-| M11-B | `PROJECT_OWNER_ACCEPTED_STAGING_AUTHORIZED` |
-| Phase 1A | `PROJECT_OWNER_ACCEPTED — awaiting M11-B acceptance commit` |
-| M12 | `NOT STARTED / NOT AUTHORIZED` |
+| M11-B | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
+| Phase 1A | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
+| M12 | `IN PROGRESS` |
+| M12-A | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
+| M12-B | `NOT STARTED` |
+| M13 | `NOT STARTED` |
 | M11 start baseline | `main@f426e6f23703002a648991e5bb436929df19e8e2` |
 | M11-B start baseline | `main@4ed740222238433541fb31c993dd75610634d157` |
-| 是否处于项目负责人暂停点 | 是；M11-B 已验收，仅授权精确暂存并等待 staged diff 审计与后续 commit 授权；M12 未开始 |
+| M12-A start baseline | `main@f5e24dcaab4801dbeffb8400f2960c33b60b4f00` |
+| 是否处于项目负责人暂停点 | M12-A 已通过项目负责人代码审查和离线验收。已授权在 staged diff 门槛全部通过后创建 M12-A 唯一验收提交。真实 Provider 调用、M12-B、M13、push 和 amend 均未授权。 |
 | 更新时间 | `2026-07-28` |
 
 ## M8 已实现内容
@@ -526,67 +531,142 @@ Runtime、MinIO 和 Explanation Provider 调用均不在数据库 UoW 内。Back
 - 本工作单元当前共 15 个 dirty 路径，全部属于扩展后的精确 17 路径 M11-B
   allowlist；其余已审查生产修复和测试保持冻结。
 
+## M12-A 当前执行记录
+
+- 开始门禁实时核对为
+  `main@f5e24dcaab4801dbeffb8400f2960c33b60b4f00`，subject
+  `feat: complete phase 1a mock acceptance`，parent
+  `4ed740222238433541fb31c993dd75610634d157`；开始时仅
+  `backend/pyproject.toml` 为已审查依赖 diff，暂存区和 untracked 均为空。
+- 依赖恢复副本为 `materialsagent-backend-pre-m12a-20260728`；已核实
+  `langchain-deepseek==1.1.0`、`langchain-core==1.4.9`、
+  `langchain-openai==1.3.5`、`openai==2.46.0`、`tiktoken==0.13.0`、
+  `httpx==0.28.1`，`pip check` 通过。本轮没有继续修改依赖元数据。
+- 配置默认 `LLM_ADAPTER=mock`；DeepSeek 只接受固定 model、根地址与 timeout，
+  Key 为 `SecretStr | None`，全空白归一化为 None，非空 Key 若含首尾空白则
+  fail closed 且不静默 trim。DeepSeek wiring 缺 Key fail closed；未读取
+  `.env`，未设置或请求真实 Key，真实 Provider calls=0。
+- Chat/Explanation Port 已增加不可变 request metadata；Chat 返回 outcome。
+  DeepSeek Chat 使用严格 Provider Schema 与 JSON mode，Explanation 使用独立
+  model。两者固定 thinking disabled、SDK retries=0、streaming=false，
+  request metadata 与 invoke 共享 Prompt 渲染；数据库只保存模板身份、SHA-256
+  digest、五键 generation parameters、白名单 usage/request-id 和静态错误。
+- Application 仍在事务外调用 Provider；Chat 成功保存 outcome usage/request-id，
+  失败在 LLMCall 保存细分类静态错误，而公共 Task/API 保持既有 502/503/504
+  映射。Explanation 初始调用与显式 retry 均使用 Adapter metadata，保留既有
+  commit uncertainty 与幂等语义。
+- `create_app` 保持显式注入优先；Mock 模式不构造 DeepSeek model，DeepSeek
+  模式构造 Chat/Explanation 两个不同实例并共享冻结配置，无静默 fallback。
+- 离线合同已覆盖三条 Chat route、Explanation、严格 Schema、usage/request-id
+  白名单、completion id 排除、空响应、非法 JSON、Schema mismatch、固定错误
+  矩阵、单次 invoke 和 socket 阻断。审查修订聚焦回归为
+  `217 passed in 19.79s`。
+- 阶段 1A Runner 已在嵌套 `try/finally` 中临时强制 Mock 和空 DeepSeek Key，
+  并按原变量是否存在精确恢复；pre/post Scope 使用 M12A，安全扫描增加 Provider
+  敏感字段名。PowerShell parser 为 `RUNNER_PARSE_OK`。
+- `check-scope.ps1` 已增加精确 M12A allowlist；当前初次门禁为
+  `SCOPE_OK M12A`。五份设计基线、migration、公共 API Schema、Frontend、
+  Mock Runtime 与 `SEM/` 均未修改。
+- 最新正式阶段 1A Runner run id 为
+  `20260728T141030Z-5d072a155237`：
+  `PHASE_1A_ACCEPTANCE_PASSED`、`failed=0`、
+  `browser_manual_scenarios=11`。M11 E2E 为 `24 passed`，Backend 全量为
+  `978 passed`，Mock Runtime 为 `11 passed`，Frontend 为 9 files /
+  `204 passed`；typecheck/build 均通过。Runner 动态 artifacts 安全扫描为
+  `ACCEPTANCE_SECURITY_SCAN_OK`。
+- Alembic head/current 均为 `0009_timeline_query_indexes`，check 通过；
+  `SCOPE_OK M12A`。SEM 为 57 files、
+  `total_size_bytes=2043071133`、fingerprint
+  `62bbb0878ed5d659490755e401fba0e3e09f1f36e3a67667ea04227927546b4a`。
+  Runner 动态 artifacts 安全扫描通过，并在 finally 中完成 Mock 栈精确清理。
+
+## M12-A 审查修订执行记录
+
+- 修订开始基线仍为
+  `main@f5e24dcaab4801dbeffb8400f2960c33b60b4f00`，staging empty；
+  22 个 tracked modified 与 7 个 untracked，共 29 个既有 M12-A 路径。
+  本轮只新增修改两个此前未 dirty、但已位于 M12-A allowlist 的测试：
+  `backend/tests/api/test_explanation_outcomes.py` 与
+  `backend/tests/unit/test_explanation_service.py`。当前共 31 个路径，
+  `SCOPE_OK M12A`。
+- Chat `parsing_error` 现以内存 `json.loads(raw.content)` 区分非法 JSON 与
+  合法 JSON 的 Schema 失败；直接 `JSONDecodeError` 固定为
+  `LLM_INVALID_JSON`。`_domain_result()` 的外部数据断言已替换为显式校验；
+  保持单次 invoke，不增加 repair、retry、fallback 或 raw content 持久化。
+- `ExplanationOutcome` 增加可选内部 LLM 错误字段。DeepSeek 细分错误只进入
+  `LLMCall`；`NaturalLanguageExplanation`、`Task` 和 HTTP API 继续使用公开
+  `EXPLANATION_*` 错误。Mock 内部字段为 null 时，LLMCall 兼容回退到公开错误。
+  DB 参数化用例覆盖 401/402/429/空响应，API 用例证明 401 细分类不进入公开响应。
+- DeepSeek 五键 generation parameters 已与 purpose 绑定：
+  Chat 仅接受 `json_object/1024`，Explanation 仅接受 `text/768`；
+  两个交叉组合均拒绝。既有 Mock 两键形状保持兼容，无 migration。
+- Explanation 对 CRLF/CR/LF/tab 先规范化为空格、折叠空白并 trim；
+  其他 Unicode 控制字符、规范化后空文本和超过 4096 字符继续失败关闭，
+  最终 Domain 文本保持可打印受控单行。
+- 干净子进程以 Mock 配置 import main 并创建应用后，两个 DeepSeek adapter
+  模块均不在 `sys.modules`；既有 fail-if-constructed 测试继续证明 Mock 模式
+  DeepSeek construction=0。聚焦 socket 阻断测试为 `1 passed in 1.33s`；
+  该结论只覆盖注入 fake adapter 的聚焦调用路径，不作完整进程级网络泛化。
+- 修订 TDD RED 证据：Chat 分类 `3 failed, 41 passed`；Explanation 分层
+  `17 failed, 45 passed`；purpose 绑定 `2 failed, 55 passed`；Key 首尾空白
+  `2 failed, 52 passed`。对应实现后全部转绿。
+- 最新权威 Runner 的 Backend full 为 `978 passed in 186.40s`，E2E
+  `24 passed in 61.92s`，Mock Runtime `11 passed in 0.93s`，Frontend
+  `204 passed in 4.38s`；Alembic head/current/check、Scope、SEM、
+  Git checks、安全扫描全部通过。SEM fingerprint 仍为
+  `62bbb0878ed5d659490755e401fba0e3e09f1f36e3a67667ea04227927546b4a`。
+- Runner 结束后 3000/8000/8100 listener 为 0、Compose running service
+  为空、Mock state 文件不存在。未删除命名 volume，未运行真实 Provider，
+  未读取 `.env`，未暂存或 commit。
+
 ## 已知风险
 
-- 统一入口和启停脚本依赖 Windows PowerShell 5.1、CIM/WMI、Docker Desktop/
-  Compose 和可发现的 Backend Python；不是生产守护进程或跨平台进程管理器。
-- 生产 blocker 和默认 Mock 补参缺陷已按 TDD 修复，M11-B 已通过最终代码
-  审查、浏览器验收和阶段 1A 权威验收；acceptance commit 尚未创建，因此
-  M11 与阶段 1A 尚不标记 `COMPLETE`。
-- M12 为 `NOT STARTED / NOT AUTHORIZED`。
-- start/stop 以严格 ownership 为先；state、PID、Docker context/engine 不可信
-  时会安全拒绝接管，需要按日志和实时资源事实处理，不得宽泛杀进程或删 volume。
-- M12 真实 LLM 和阶段 1B 真实模型均未开始。
+- M12-A 只证明离线合同、应用接线和 Mock 回归；真实 Provider 的模型可用性、
+  响应质量、实际 request-id/header 行为和真实延迟必须等待 M12-B 明确授权。
+- 阶段 1A Runner 依赖 Windows PowerShell、Docker Desktop/Compose 和本机
+  Backend/Frontend 工具链；它不是生产守护进程。
+- start/stop 继续以严格 ownership 为先；不得宽泛终止进程或删除 volume。
+- M12-B 与 M13 均未开始；真实 SEM 模型仍未加载或运行。
 
 ## 下一步
 
-停在 M11-B 精确暂存与 staged diff 审计点；不提交、不开始 M12：
+停在 M12-A 条件性验收提交门槛；只允许精确暂存、硬审计和唯一验收提交，
+不得进入 M12-B 或 M13：
 
 ```text
-当前里程碑：M11
-当前工作单元：M11-B 完整 Mock 故障矩阵、阶段 1A 统一验收入口与正式验收报告
-状态：M11B_PROJECT_OWNER_ACCEPTED_STAGING_AUTHORIZED
-
-M10:
-COMPLETE / PROJECT_OWNER_ACCEPTED
-acceptance commit:
-f426e6f23703002a648991e5bb436929df19e8e2
-
-M11-A:
-COMPLETE / PROJECT_OWNER_ACCEPTED
-acceptance commit:
-4ed740222238433541fb31c993dd75610634d157
-
-M11-B:
-PROJECT_OWNER_ACCEPTED_STAGING_AUTHORIZED
-
-Production fix:
-IMPLEMENTED / PROJECT-OWNER ACCEPTED
+当前里程碑：M12
+当前工作单元：M12-A DeepSeek Provider 离线实现、应用接线与 Mock 回归
+状态：M12A_PROJECT_OWNER_ACCEPTED
 
 M11:
-IN PROGRESS — awaiting M11-B acceptance commit
+COMPLETE / PROJECT_OWNER_ACCEPTED
+acceptance commit:
+f5e24dcaab4801dbeffb8400f2960c33b60b4f00
 
 Phase 1A:
-PROJECT_OWNER_ACCEPTED — awaiting M11-B acceptance commit
+COMPLETE / PROJECT_OWNER_ACCEPTED
 
 M12:
-NOT STARTED / NOT AUTHORIZED
+IN PROGRESS
 
-M11-B start baseline:
-main@4ed740222238433541fb31c993dd75610634d157
+M12-A:
+COMPLETE / PROJECT_OWNER_ACCEPTED
+
+M12-B:
+NOT STARTED
+
+M13:
+NOT STARTED
 
 Staging:
-AUTHORIZED FOR EXACT 15-PATH STAGING
+EMPTY / AUTHORIZED FOR EXACT 31-PATH GATE
 
 Commit:
-NO / NOT AUTHORIZED
+AUTHORIZED SUBJECT TO STAGED-DIFF GATES
 
 Push:
 NO
 
 Amend:
 NO
-
-M11-B project-owner browser acceptance:
-PASSED / 2026-07-28
 ```

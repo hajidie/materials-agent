@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 from hashlib import sha256
@@ -57,7 +58,9 @@ from materialsagent.domain.ports.chat_orchestration import (
     ChatOrchestrationProtocolError,
     ChatOrchestrationProviderError,
     ChatOrchestrationInput,
+    ChatOrchestrationOutcome,
     ChatOrchestrationPort,
+    ChatOrchestrationRequestMetadata,
     ChatOrchestrationTimeoutError,
     KnowledgeAnswer,
     NeedsInputCandidate,
@@ -67,9 +70,6 @@ from materialsagent.domain.ports.unit_of_work import (
     PersistenceError,
     UnitOfWorkFactory,
 )
-PROMPT_TEMPLATE_ID: Final = "chat-orchestration"
-PROMPT_TEMPLATE_VERSION: Final = "1"
-GENERATION_PARAMETERS: Final = {"temperature": 0, "max_tokens": 256}
 FOLLOW_UP_TEXT: Final = "请补充缺失参数或明确存在歧义的参数。"
 VALIDATION_ERROR_MESSAGE: Final = "输入参数未通过验证。"
 TOOL_UNAVAILABLE_MESSAGE: Final = "当前阶段尚未开放材料工具执行。"
@@ -135,28 +135,38 @@ class ChatOrchestrationService:
         actor_context: ActorContext,
         submission: PreparedSubmission,
     ) -> ChatOrchestrationProjection:
-        call = self._prepare_call(actor_context, submission)
+        orchestration_input = ChatOrchestrationInput(
+            task_id=submission.task.task_id,
+            conversation_id=submission.conversation_id,
+            request_id=submission.user_message.request_id,
+            content_text=submission.user_message.content_text,
+        )
+        metadata = self._orchestration_port.request_metadata(
+            orchestration_input
+        )
+        if (
+            not isinstance(metadata, ChatOrchestrationRequestMetadata)
+            or metadata.provider != self._provider
+            or metadata.model_name != self._model_name
+        ):
+            raise ChatOrchestrationProtocolError(
+                "Chat orchestration metadata violated the protocol."
+            )
+        call = self._prepare_call(actor_context, submission, metadata)
         started = self._start_call(actor_context, submission, call)
         if not started.invoke_adapter:
             return self.load_current_submission(actor_context, submission)
         call = started.call
         self._log_event("chat_orchestration_started", submission, call.llm_call_id)
         try:
-            result = self._orchestration_port.orchestrate(
-                ChatOrchestrationInput(
-                    task_id=submission.task.task_id,
-                    conversation_id=submission.conversation_id,
-                    request_id=submission.user_message.request_id,
-                    content_text=submission.user_message.content_text,
-                )
+            outcome = self._orchestration_port.orchestrate(
+                orchestration_input
             )
-            if not isinstance(
-                result,
-                (KnowledgeAnswer, ToolCandidate, NeedsInputCandidate),
-            ):
+            if not isinstance(outcome, ChatOrchestrationOutcome):
                 raise ChatOrchestrationProtocolError(
-                    "Chat orchestration result has an invalid runtime type."
+                    "Chat orchestration outcome has an invalid runtime type."
                 )
+            result = outcome.result
             if (
                 submission.submission_mode == SUPPLEMENT_TASK
                 and isinstance(result, KnowledgeAnswer)
@@ -164,13 +174,16 @@ class ChatOrchestrationService:
                 raise ChatOrchestrationProtocolError(
                     "A task supplement must remain a tool candidate."
                 )
-        except ChatOrchestrationTimeoutError:
+        except ChatOrchestrationTimeoutError as error:
             self._finalize_failure(
                 actor_context,
                 submission,
                 call.llm_call_id,
-                error_code="UPSTREAM_TIMEOUT",
-                safe_error_message=TIMEOUT_MESSAGE,
+                llm_error_code=error.error_code,
+                llm_safe_error_message=error.safe_error_message,
+                task_error_code="UPSTREAM_TIMEOUT",
+                task_safe_error_message=TIMEOUT_MESSAGE,
+                provider_request_id=error.provider_request_id,
             )
             self._log_event(
                 "chat_orchestration_failed",
@@ -185,13 +198,16 @@ class ChatOrchestrationService:
                 code="UPSTREAM_TIMEOUT",
                 message=TIMEOUT_MESSAGE,
             ) from None
-        except ChatOrchestrationProviderError:
+        except ChatOrchestrationProviderError as error:
             self._finalize_failure(
                 actor_context,
                 submission,
                 call.llm_call_id,
-                error_code="CHAT_ORCHESTRATION_FAILED",
-                safe_error_message=ORCHESTRATION_FAILURE_MESSAGE,
+                llm_error_code=error.error_code,
+                llm_safe_error_message=error.safe_error_message,
+                task_error_code="CHAT_ORCHESTRATION_FAILED",
+                task_safe_error_message=ORCHESTRATION_FAILURE_MESSAGE,
+                provider_request_id=error.provider_request_id,
             )
             self._log_event(
                 "chat_orchestration_failed",
@@ -206,13 +222,16 @@ class ChatOrchestrationService:
                 code="CHAT_ORCHESTRATION_FAILED",
                 message=ORCHESTRATION_FAILURE_MESSAGE,
             ) from None
-        except ChatOrchestrationProtocolError:
+        except ChatOrchestrationProtocolError as error:
             self._finalize_failure(
                 actor_context,
                 submission,
                 call.llm_call_id,
-                error_code="CHAT_ORCHESTRATION_FAILED",
-                safe_error_message=PROTOCOL_FAILURE_MESSAGE,
+                llm_error_code=error.error_code,
+                llm_safe_error_message=error.safe_error_message,
+                task_error_code="CHAT_ORCHESTRATION_FAILED",
+                task_safe_error_message=PROTOCOL_FAILURE_MESSAGE,
+                provider_request_id=error.provider_request_id,
             )
             self._log_event(
                 "chat_orchestration_failed",
@@ -232,8 +251,11 @@ class ChatOrchestrationService:
                 actor_context,
                 submission,
                 call.llm_call_id,
-                error_code="CHAT_ORCHESTRATION_FAILED",
-                safe_error_message=ORCHESTRATION_FAILURE_MESSAGE,
+                llm_error_code="CHAT_ORCHESTRATION_FAILED",
+                llm_safe_error_message=ORCHESTRATION_FAILURE_MESSAGE,
+                task_error_code="CHAT_ORCHESTRATION_FAILED",
+                task_safe_error_message=ORCHESTRATION_FAILURE_MESSAGE,
+                provider_request_id=None,
             )
             self._log_event(
                 "chat_orchestration_failed",
@@ -254,6 +276,8 @@ class ChatOrchestrationService:
             submission,
             llm_call_id=call.llm_call_id,
             result=result,
+            usage=outcome.usage,
+            provider_request_id=outcome.provider_request_id,
         )
         self._log_event(
             "chat_orchestration_completed",
@@ -408,6 +432,8 @@ class ChatOrchestrationService:
         *,
         llm_call_id: str,
         result: KnowledgeAnswer | ToolCandidate | NeedsInputCandidate,
+        usage: Mapping[str, int] | None = None,
+        provider_request_id: str | None = None,
     ) -> ChatOrchestrationProjection:
         if not isinstance(
             result,
@@ -464,6 +490,8 @@ class ChatOrchestrationService:
                         result,
                         validation,
                         completed_at,
+                        usage,
+                        provider_request_id,
                     )
                     unit_of_work.commit()
         except PersistenceError as error:
@@ -473,6 +501,8 @@ class ChatOrchestrationService:
                 llm_call_id=llm_call_id,
                 result=result,
                 validation=validation,
+                usage=usage,
+                provider_request_id=provider_request_id,
             )
             if recovered is not None:
                 return recovered
@@ -501,6 +531,8 @@ class ChatOrchestrationService:
         llm_call_id: str,
         result: KnowledgeAnswer | ToolCandidate | NeedsInputCandidate,
         validation: ZTA35GValidationResult | None,
+        usage: Mapping[str, int] | None,
+        provider_request_id: str | None,
     ) -> ChatOrchestrationProjection | None:
         try:
             with self._unit_of_work_factory() as unit_of_work:
@@ -524,6 +556,8 @@ class ChatOrchestrationService:
             projection,
             result=result,
             validation=validation,
+            usage=usage,
+            provider_request_id=provider_request_id,
         ):
             raise self._conflict(submission)
         return projection
@@ -534,9 +568,16 @@ class ChatOrchestrationService:
         *,
         result: KnowledgeAnswer | ToolCandidate | NeedsInputCandidate,
         validation: ZTA35GValidationResult | None,
+        usage: Mapping[str, int] | None = None,
+        provider_request_id: str | None = None,
     ) -> bool:
         call = projection.llm_call
         if call is None or call.status != LLM_SUCCEEDED:
+            return False
+        if (
+            call.usage != usage
+            or call.provider_request_id != provider_request_id
+        ):
             return False
         if isinstance(result, KnowledgeAnswer):
             answer_text = result.answer_text.strip()
@@ -601,6 +642,7 @@ class ChatOrchestrationService:
         self,
         actor_context: ActorContext,
         submission: PreparedSubmission,
+        metadata: ChatOrchestrationRequestMetadata,
     ) -> LLMCall:
         timestamp = _validated_utc_now(self._clock)
         call = LLMCall(
@@ -610,12 +652,12 @@ class ChatOrchestrationService:
             request_id=submission.user_message.request_id,
             purpose=CHAT_ORCHESTRATION,
             input_result_id=None,
-            provider=self._provider,
-            model_name=self._model_name,
-            prompt_template_id=PROMPT_TEMPLATE_ID,
-            prompt_template_version=PROMPT_TEMPLATE_VERSION,
-            prompt_digest=self._prompt_digest(submission.user_message),
-            generation_parameters=GENERATION_PARAMETERS,
+            provider=metadata.provider,
+            model_name=metadata.model_name,
+            prompt_template_id=metadata.prompt_template_id,
+            prompt_template_version=metadata.prompt_template_version,
+            prompt_digest=metadata.prompt_digest,
+            generation_parameters=metadata.generation_parameters,
             structured_output_summary=None,
             usage=None,
             provider_request_id=None,
@@ -800,6 +842,8 @@ class ChatOrchestrationService:
         result: KnowledgeAnswer | ToolCandidate | NeedsInputCandidate,
         validation: ZTA35GValidationResult | None,
         completed_at: datetime,
+        usage: Mapping[str, int] | None,
+        provider_request_id: str | None,
     ) -> None:
         duration_ms = _duration_ms(running_call.started_at, completed_at)
         assistant_message: Message | None = None
@@ -952,6 +996,8 @@ class ChatOrchestrationService:
             running_call,
             status=LLM_SUCCEEDED,
             structured_output_summary=summary,
+            usage=usage,
+            provider_request_id=provider_request_id,
             completed_at=completed_at,
             duration_ms=duration_ms,
         )
@@ -991,8 +1037,11 @@ class ChatOrchestrationService:
         submission: PreparedSubmission,
         llm_call_id: str,
         *,
-        error_code: str,
-        safe_error_message: str,
+        llm_error_code: str,
+        llm_safe_error_message: str,
+        task_error_code: str,
+        task_safe_error_message: str,
+        provider_request_id: str | None,
     ) -> None:
         completed_at = _validated_utc_now(self._clock)
         try:
@@ -1016,13 +1065,15 @@ class ChatOrchestrationService:
                     running_call,
                     status=LLM_FAILED,
                     structured_output_summary=None,
+                    usage=None,
+                    provider_request_id=provider_request_id,
                     completed_at=completed_at,
                     duration_ms=_duration_ms(
                         running_call.started_at,
                         completed_at,
                     ),
-                    error_code=error_code,
-                    safe_error_message=safe_error_message,
+                    error_code=llm_error_code,
+                    safe_error_message=llm_safe_error_message,
                 )
                 failed_task = replace(
                     task,
@@ -1031,8 +1082,8 @@ class ChatOrchestrationService:
                     selected_result_id=None,
                     updated_at=completed_at,
                     completed_at=completed_at,
-                    error_code=error_code,
-                    safe_error_message=safe_error_message,
+                    error_code=task_error_code,
+                    safe_error_message=task_safe_error_message,
                 )
                 if unit_of_work.llm_calls.update(
                     failed_call,
@@ -1048,8 +1099,11 @@ class ChatOrchestrationService:
                 actor_context,
                 submission,
                 llm_call_id=llm_call_id,
-                error_code=error_code,
-                safe_error_message=safe_error_message,
+                llm_error_code=llm_error_code,
+                llm_safe_error_message=llm_safe_error_message,
+                task_error_code=task_error_code,
+                task_safe_error_message=task_safe_error_message,
+                provider_request_id=provider_request_id,
             )
             if recovered:
                 return
@@ -1065,8 +1119,11 @@ class ChatOrchestrationService:
         submission: PreparedSubmission,
         *,
         llm_call_id: str,
-        error_code: str,
-        safe_error_message: str,
+        llm_error_code: str,
+        llm_safe_error_message: str,
+        task_error_code: str,
+        task_safe_error_message: str,
+        provider_request_id: str | None,
     ) -> bool:
         try:
             with self._unit_of_work_factory() as unit_of_work:
@@ -1094,11 +1151,13 @@ class ChatOrchestrationService:
             persisted_call is None
             or persisted_call.status != LLM_FAILED
             or persisted_call.structured_output_summary is not None
-            or persisted_call.error_code != error_code
-            or persisted_call.safe_error_message != safe_error_message
+            or persisted_call.error_code != llm_error_code
+            or persisted_call.safe_error_message != llm_safe_error_message
+            or persisted_call.provider_request_id != provider_request_id
             or projection.task.current_status != TASK_FAILED
-            or projection.task.error_code != error_code
-            or projection.task.safe_error_message != safe_error_message
+            or projection.task.error_code != task_error_code
+            or projection.task.safe_error_message
+            != task_safe_error_message
         ):
             raise self._conflict(submission)
         return True
@@ -1319,11 +1378,31 @@ class ChatOrchestrationService:
             reject()
 
         if call.status == LLM_FAILED:
+            detailed_public_code = {
+                "LLM_TIMEOUT": "UPSTREAM_TIMEOUT",
+                "LLM_AUTHENTICATION_FAILED": "CHAT_ORCHESTRATION_FAILED",
+                "LLM_BALANCE_EXHAUSTED": "CHAT_ORCHESTRATION_FAILED",
+                "LLM_RATE_LIMITED": "CHAT_ORCHESTRATION_FAILED",
+                "LLM_PROVIDER_UNAVAILABLE": "CHAT_ORCHESTRATION_FAILED",
+                "LLM_REQUEST_REJECTED": "CHAT_ORCHESTRATION_FAILED",
+                "LLM_EMPTY_RESPONSE": "CHAT_ORCHESTRATION_FAILED",
+                "LLM_INVALID_JSON": "CHAT_ORCHESTRATION_FAILED",
+                "LLM_SCHEMA_MISMATCH": "CHAT_ORCHESTRATION_FAILED",
+            }.get(call.error_code)
+            legacy_error_pair = (
+                call.error_code == task.error_code
+                and call.safe_error_message == task.safe_error_message
+            )
+            detailed_error_pair = (
+                detailed_public_code is not None
+                and task.error_code == detailed_public_code
+                and call.safe_error_message is not None
+                and task.safe_error_message is not None
+            )
             if (
                 task.current_status != TASK_FAILED
                 or call.error_code is None
-                or call.error_code != task.error_code
-                or call.safe_error_message != task.safe_error_message
+                or not (legacy_error_pair or detailed_error_pair)
                 or call.structured_output_summary is not None
                 or assistant_message is not None
                 or revisions
@@ -1428,15 +1507,6 @@ class ChatOrchestrationService:
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"orchestration_port.{field_name} is required.")
         return value.strip()
-
-    @staticmethod
-    def _prompt_digest(user_message: Message) -> str:
-        canonical = (
-            f"{PROMPT_TEMPLATE_ID}:{PROMPT_TEMPLATE_VERSION}\n"
-            f"{user_message.content_text}"
-        )
-        return sha256(canonical.encode("utf-8")).hexdigest()
-
 
 def _duration_ms(started_at: datetime | None, completed_at: datetime) -> int:
     if started_at is None or completed_at < started_at:

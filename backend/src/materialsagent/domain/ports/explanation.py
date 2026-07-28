@@ -106,6 +106,8 @@ class ExplanationOutcome:
     provider_request_id: str | None
     error_code: str | None
     safe_error_message: str | None
+    llm_error_code: str | None = None
+    llm_safe_error_message: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -126,6 +128,8 @@ class ExplanationOutcome:
                 or not self.text.isprintable()
                 or self.error_code is not None
                 or self.safe_error_message is not None
+                or self.llm_error_code is not None
+                or self.llm_safe_error_message is not None
             ):
                 raise ValueError("Successful outcome requires bounded text only.")
         else:
@@ -142,6 +146,25 @@ class ExplanationOutcome:
                 raise ValueError(
                     "Failed outcome requires a controlled safe error."
                 )
+            llm_error_present = self.llm_error_code is not None
+            llm_message_present = self.llm_safe_error_message is not None
+            if llm_error_present != llm_message_present:
+                raise ValueError(
+                    "Detailed LLM failure fields must be supplied together."
+                )
+            if llm_error_present and (
+                not isinstance(self.llm_error_code, str)
+                or not self.llm_error_code.strip()
+                or len(self.llm_error_code) > 64
+                or not self.llm_error_code.isprintable()
+                or not isinstance(self.llm_safe_error_message, str)
+                or not self.llm_safe_error_message.strip()
+                or len(self.llm_safe_error_message) > 256
+                or not self.llm_safe_error_message.isprintable()
+            ):
+                raise ValueError(
+                    "Detailed LLM failure requires a controlled safe error."
+                )
         if self.usage is not None:
             if set(self.usage) != {"input_tokens", "output_tokens"} or any(
                 type(value) is not int or value < 0
@@ -155,10 +178,45 @@ class ExplanationOutcome:
             )
 
 
+@dataclass(frozen=True, slots=True)
+class ExplanationRequestMetadata:
+    provider: str
+    model_name: str
+    prompt_template_id: str
+    prompt_template_version: str
+    prompt_digest: str
+    generation_parameters: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "provider",
+            "model_name",
+            "prompt_template_id",
+            "prompt_template_version",
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field_name} must be non-blank.")
+        if re.fullmatch(r"[0-9a-f]{64}", self.prompt_digest) is None:
+            raise ValueError("prompt_digest must be lowercase SHA-256 hex.")
+        if not isinstance(self.generation_parameters, Mapping):
+            raise ValueError("generation_parameters must be an object.")
+        object.__setattr__(
+            self,
+            "generation_parameters",
+            MappingProxyType(dict(self.generation_parameters)),
+        )
+
+
 class ExplanationPort(Protocol):
     provider: str
     model_name: str
     prompt_template_id: str
     prompt_template_version: str
+
+    def request_metadata(
+        self,
+        value: ExplanationInput,
+    ) -> ExplanationRequestMetadata: ...
 
     def explain(self, value: ExplanationInput) -> ExplanationOutcome: ...

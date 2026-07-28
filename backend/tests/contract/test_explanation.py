@@ -80,6 +80,26 @@ def test_mock_explanation_is_deterministic_and_fact_bound() -> None:
     assert adapter.call_count == 3
 
 
+def test_mock_explanation_request_metadata_preserves_legacy_identity() -> None:
+    adapter = MockExplanationAdapter(mode="success")
+
+    first = adapter.request_metadata(_input())
+    second = adapter.request_metadata(_input())
+
+    assert first == second
+    assert first.provider == "mock"
+    assert first.model_name == "mock-explanation"
+    assert first.prompt_template_id == "tool-result-explanation"
+    assert first.prompt_template_version == "1"
+    assert len(first.prompt_digest) == 64
+    assert first.generation_parameters == {
+        "temperature": 0,
+        "max_tokens": 512,
+    }
+    with pytest.raises(TypeError):
+        first.generation_parameters["max_tokens"] = 1
+
+
 @pytest.mark.parametrize(
     ("mode", "error_type"),
     [
@@ -106,6 +126,8 @@ def test_mock_explanation_supports_explicit_failure_outcome() -> None:
     assert outcome.text is None
     assert outcome.error_code == "EXPLANATION_FAILED"
     assert outcome.safe_error_message == "Explanation generation failed."
+    assert outcome.llm_error_code is None
+    assert outcome.llm_safe_error_message is None
 
 
 @pytest.mark.parametrize(
@@ -136,6 +158,34 @@ def test_failed_explanation_outcome_accepts_exact_safe_error_boundaries() -> Non
 
     assert len(outcome.error_code) == 64
     assert len(outcome.safe_error_message) == 256
+
+
+def test_failed_explanation_outcome_separates_internal_and_public_errors() -> None:
+    outcome = ExplanationOutcome(
+        text=None,
+        usage=None,
+        provider_request_id="provider-request-1",
+        error_code="EXPLANATION_PROVIDER_UNAVAILABLE",
+        safe_error_message="Explanation provider is unavailable.",
+        llm_error_code="LLM_AUTHENTICATION_FAILED",
+        llm_safe_error_message="LLM provider authentication failed.",
+    )
+
+    assert outcome.error_code == "EXPLANATION_PROVIDER_UNAVAILABLE"
+    assert outcome.llm_error_code == "LLM_AUTHENTICATION_FAILED"
+
+
+def test_successful_explanation_outcome_rejects_internal_errors() -> None:
+    with pytest.raises(ValueError, match="Successful outcome"):
+        ExplanationOutcome(
+            text="受控说明。",
+            usage=None,
+            provider_request_id=None,
+            error_code=None,
+            safe_error_message=None,
+            llm_error_code="LLM_PROVIDER_UNAVAILABLE",
+            llm_safe_error_message="LLM provider is unavailable.",
+        )
 
 
 @pytest.mark.parametrize(

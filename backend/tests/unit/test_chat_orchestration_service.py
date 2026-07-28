@@ -17,6 +17,8 @@ from materialsagent.domain.models.task_input_revision import TaskInputRevision
 from materialsagent.domain.ports.chat_orchestration import (
     ChatOrchestrationProtocolError,
     ChatOrchestrationProviderError,
+    ChatOrchestrationOutcome,
+    ChatOrchestrationRequestMetadata,
     ChatOrchestrationTimeoutError,
     KnowledgeAnswer,
 )
@@ -413,6 +415,64 @@ def test_knowledge_answer_calls_adapter_outside_uow_and_persists_once() -> None:
     assert len(call.prompt_digest) == 64
 
 
+def test_adapter_metadata_usage_and_request_id_are_persisted() -> None:
+    actor, submission, store = _submission()
+    factory = _UnitOfWorkFactory(store)
+
+    class MetadataPort:
+        provider = "deepseek"
+        model_name = "deepseek-v4-flash"
+
+        def request_metadata(
+            self,
+            orchestration_input: object,
+        ) -> ChatOrchestrationRequestMetadata:
+            assert factory.active == 0
+            content = getattr(orchestration_input, "content_text")
+            return ChatOrchestrationRequestMetadata(
+                provider=self.provider,
+                model_name=self.model_name,
+                prompt_template_id="chat-orchestration",
+                prompt_template_version="2",
+                prompt_digest=sha256(content.encode("utf-8")).hexdigest(),
+                generation_parameters={
+                    "temperature": 0,
+                    "max_tokens": 1024,
+                    "thinking_mode": "disabled",
+                    "response_format": "json_object",
+                    "streaming": False,
+                },
+            )
+
+        def orchestrate(
+            self,
+            _orchestration_input: object,
+        ) -> ChatOrchestrationOutcome:
+            assert factory.active == 0
+            return ChatOrchestrationOutcome(
+                result=KnowledgeAnswer("受控答案。"),
+                usage={"input_tokens": 11, "output_tokens": 3},
+                provider_request_id="deepseek-request-1",
+            )
+
+    service = _service_type()(
+        factory,
+        MetadataPort(),
+        clock=_SequenceClock(),
+        id_factory=_id_factory,
+    )
+
+    service.orchestrate_submission(actor, submission)
+
+    call = store.llm_calls["llm_unit"]
+    assert call.provider == "deepseek"
+    assert call.model_name == "deepseek-v4-flash"
+    assert call.prompt_template_version == "2"
+    assert call.generation_parameters["max_tokens"] == 1024
+    assert call.usage == {"input_tokens": 11, "output_tokens": 3}
+    assert call.provider_request_id == "deepseek-request-1"
+
+
 def test_needs_input_recomputes_hints_and_persists_formal_partial_revision() -> None:
     actor, submission, store = _submission()
     factory = _UnitOfWorkFactory(store)
@@ -779,6 +839,20 @@ class _UnnormalizedPort:
     def __init__(self, result_or_error: object) -> None:
         self._result_or_error = result_or_error
 
+    def request_metadata(
+        self,
+        orchestration_input: object,
+    ) -> ChatOrchestrationRequestMetadata:
+        content = getattr(orchestration_input, "content_text")
+        return ChatOrchestrationRequestMetadata(
+            provider=self.provider,
+            model_name=self.model_name,
+            prompt_template_id="replaceable-chat",
+            prompt_template_version="1",
+            prompt_digest=sha256(content.encode("utf-8")).hexdigest(),
+            generation_parameters={"temperature": 0, "max_tokens": 256},
+        )
+
     def orchestrate(self, _orchestration_input: object) -> object:
         if isinstance(self._result_or_error, Exception):
             raise self._result_or_error
@@ -859,6 +933,35 @@ def test_independent_port_safe_failures_use_the_formal_contract(
     assert store.tasks[submission.task.task_id].current_status == "FAILED"
     assert len(store.messages) == 1
     assert store.revisions == {}
+
+
+def test_provider_failure_persists_detailed_llm_error_but_public_task_error() -> None:
+    actor, submission, store = _submission()
+    factory = _UnitOfWorkFactory(store)
+    port = _UnnormalizedPort(
+        ChatOrchestrationProviderError(
+            error_code="LLM_AUTHENTICATION_FAILED",
+            safe_error_message="LLM provider authentication failed.",
+            provider_request_id="failure-request-1",
+        )
+    )
+    service = _service_type()(
+        factory,
+        port,
+        clock=_SequenceClock(),
+        id_factory=_id_factory,
+    )
+
+    with pytest.raises(Exception) as captured:
+        service.orchestrate_submission(actor, submission)
+
+    assert captured.value.status_code == 503
+    call = store.llm_calls["llm_unit"]
+    task = store.tasks[submission.task.task_id]
+    assert call.error_code == "LLM_AUTHENTICATION_FAILED"
+    assert call.safe_error_message == "LLM provider authentication failed."
+    assert call.provider_request_id == "failure-request-1"
+    assert task.error_code == "CHAT_ORCHESTRATION_FAILED"
 
 
 def test_committed_projection_revalidates_assistant_source_chain() -> None:

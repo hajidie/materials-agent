@@ -520,6 +520,14 @@ function Test-AcceptanceArtifacts {
             }
         }
         if (
+            $content -match (
+                '(?i)\b(?:DEEPSEEK_API_KEY|reasoning_content|' +
+                'Authorization|Bearer)\b'
+            )
+        ) {
+            [void]$findings.Add('provider-sensitive field name')
+        }
+        if (
             $content.Contains($repoRoot) -or
             $content.Contains($repoRoot.Replace('\', '/'))
         ) {
@@ -718,7 +726,15 @@ if ($env:MATERIALSAGENT_PHASE1A_SCAN_COVERAGE_PROBE -eq '1') {
     }
 }
 
+$llmAdapterExisted = Test-Path -LiteralPath 'Env:LLM_ADAPTER'
+$deepSeekKeyExisted = Test-Path -LiteralPath 'Env:DEEPSEEK_API_KEY'
+$originalLlmAdapter = $env:LLM_ADAPTER
+$originalDeepSeekKey = $env:DEEPSEEK_API_KEY
+
 try {
+    $env:LLM_ADAPTER = 'mock'
+    $env:DEEPSEEK_API_KEY = ''
+    try {
     $coverageValidation = Invoke-RecordedAction `
         -Name 'acceptance_scan_coverage_validation' `
         -LogRelative 'logs/00-scan-coverage-validation.log' `
@@ -930,7 +946,7 @@ try {
 
     if (-not $abortHighCost) {
         $null = Invoke-RecordedCommand `
-            -Name 'scope_m11_pre' `
+            -Name 'scope_m12a_pre' `
             -FilePath $powershellExe `
             -Arguments @(
                 '-NoProfile',
@@ -939,9 +955,9 @@ try {
                 '-File',
                 $scopeScript,
                 '-Milestone',
-                'M11'
+                'M12A'
             ) `
-            -LogRelative 'logs/03-scope-m11-pre.log' `
+            -LogRelative 'logs/03-scope-m12a-pre.log' `
             -Required
         $null = Invoke-RecordedCommand `
             -Name 'sem_integrity_pre' `
@@ -1303,7 +1319,7 @@ catch {
 }
 finally {
     $null = Invoke-RecordedCommand `
-        -Name 'scope_m11_post' `
+        -Name 'scope_m12a_post' `
         -FilePath $powershellExe `
         -Arguments @(
             '-NoProfile',
@@ -1312,23 +1328,9 @@ finally {
             '-File',
             $scopeScript,
             '-Milestone',
-            'M11'
+            'M12A'
         ) `
-        -LogRelative 'logs/18-scope-m11-post.log' `
-        -Required
-    $null = Invoke-RecordedCommand `
-        -Name 'scope_m11b_post' `
-        -FilePath $powershellExe `
-        -Arguments @(
-            '-NoProfile',
-            '-ExecutionPolicy',
-            'Bypass',
-            '-File',
-            $scopeScript,
-            '-Milestone',
-            'M11B'
-        ) `
-        -LogRelative 'logs/18-scope-m11b-post.log' `
+        -LogRelative 'logs/18-scope-m12a-post.log' `
         -Required
     $null = Invoke-RecordedCommand `
         -Name 'sem_integrity_post' `
@@ -1459,4 +1461,19 @@ finally {
         exit 0
     }
     exit 1
+}
+}
+finally {
+    if ($llmAdapterExisted) {
+        $env:LLM_ADAPTER = $originalLlmAdapter
+    }
+    else {
+        Remove-Item -LiteralPath 'Env:LLM_ADAPTER' -ErrorAction SilentlyContinue
+    }
+    if ($deepSeekKeyExisted) {
+        $env:DEEPSEEK_API_KEY = $originalDeepSeekKey
+    }
+    else {
+        Remove-Item -LiteralPath 'Env:DEEPSEEK_API_KEY' -ErrorAction SilentlyContinue
+    }
 }

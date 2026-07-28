@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from hashlib import sha256
 import re
 from typing import Final
 
@@ -9,6 +10,8 @@ from materialsagent.domain.ports.chat_orchestration import (
     ChatOrchestrationProtocolError,
     ChatOrchestrationProviderError,
     ChatOrchestrationInput,
+    ChatOrchestrationOutcome,
+    ChatOrchestrationRequestMetadata,
     ChatOrchestrationResult,
     ChatOrchestrationTimeoutError,
     KnowledgeAnswer,
@@ -21,6 +24,9 @@ from materialsagent.domain.ports.chat_orchestration import (
 
 MOCK_PROVIDER: Final = "mock"
 MOCK_MODEL_NAME: Final = "mock-chat-orchestration-v1"
+PROMPT_TEMPLATE_ID: Final = "chat-orchestration"
+PROMPT_TEMPLATE_VERSION: Final = "1"
+GENERATION_PARAMETERS: Final = {"temperature": 0, "max_tokens": 256}
 PARAMETER_FIELDS: Final = (
     "solution_temperature",
     "solution_time",
@@ -256,10 +262,27 @@ class MockChatOrchestrationAdapter:
             raise TypeError("responder must be callable.")
         self._responder = responder
 
+    def request_metadata(
+        self,
+        orchestration_input: ChatOrchestrationInput,
+    ) -> ChatOrchestrationRequestMetadata:
+        canonical = (
+            f"{PROMPT_TEMPLATE_ID}:{PROMPT_TEMPLATE_VERSION}\n"
+            f"{orchestration_input.content_text}"
+        )
+        return ChatOrchestrationRequestMetadata(
+            provider=self.provider,
+            model_name=self.model_name,
+            prompt_template_id=PROMPT_TEMPLATE_ID,
+            prompt_template_version=PROMPT_TEMPLATE_VERSION,
+            prompt_digest=sha256(canonical.encode("utf-8")).hexdigest(),
+            generation_parameters=GENERATION_PARAMETERS,
+        )
+
     def orchestrate(
         self,
         orchestration_input: ChatOrchestrationInput,
-    ) -> ChatOrchestrationResult:
+    ) -> ChatOrchestrationOutcome:
         try:
             payload = self._responder(orchestration_input)
         except ChatOrchestrationTimeoutError:
@@ -275,8 +298,13 @@ class MockChatOrchestrationAdapter:
                 "Chat orchestration result is not an object."
             )
         try:
-            return _decode(payload)
+            result = _decode(payload)
         except Exception:
             raise ChatOrchestrationProtocolError(
                 "Chat orchestration result violated the protocol."
             ) from None
+        return ChatOrchestrationOutcome(
+            result=result,
+            usage=None,
+            provider_request_id=None,
+        )
