@@ -7,10 +7,10 @@
 | 字段 | 当前值 |
 |---|---|
 | 当前阶段 | 真实能力接入 |
-| 当前里程碑 | M12 |
-| 当前工作单元 | M12-B：真实浏览器验收与最终三路径收尾 |
+| 当前里程碑 | P1B1 |
+| 当前工作单元 | P1B1：真实 ZTA35G Runtime 离线实现与契约接入 |
 | 状态 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
-| 上一已验收工作单元 | M12-A：DeepSeek Provider 离线实现、应用接线与 Mock 回归 |
+| 上一已验收工作单元 | M12-B：真实浏览器验收与最终三路径收尾 |
 | Pre-M8 stop-loss commit | `891714dd58cf069073a7d4037be43ef66304d0ac` |
 | M8 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M8 acceptance commit | `18005944982ca5191412e06154effc67465ca3a7` |
@@ -22,20 +22,20 @@
 | M11-A acceptance commit | `4ed740222238433541fb31c993dd75610634d157` |
 | M11-B / Phase 1A acceptance commit | `f5e24dcaab4801dbeffb8400f2960c33b60b4f00` |
 | M12-A acceptance commit | `ffd29353cb4682c74fd3455425822999444bb1d2` |
-| Expected subject | `test: complete real DeepSeek provider acceptance` |
-| 本轮提交前 branch / HEAD | `main` / `ffd29353cb4682c74fd3455425822999444bb1d2` |
-| 提交前 HEAD parent / subject | `f5e24dcaab4801dbeffb8400f2960c33b60b4f00` / `feat: add offline DeepSeek provider integration` |
-| 暂存区 | empty；本轮仅授权三个精确路径的验收暂存 |
-| 当前工作区 | 提交前仅 M12-B 三个精确 allowlist 路径；验收提交后要求 clean；自动 real-provider Runner 未采用并已删除 |
+| P1B1 验收提交 baseline branch / HEAD | `main` / `61a6a88db674cbd84990d6b5288d8db8eec480ed` |
+| P1B1 验收提交 baseline subject | `test: complete real DeepSeek provider acceptance` |
+| P1B1 验收提交 baseline parent | `ffd29353cb4682c74fd3455425822999444bb1d2` |
+| 暂存区 | 验收收尾开始时 empty；仅唯一 P1B1 条件性提交获授权，提交后必须 empty |
+| P1B1 验收提交范围 | 精确 26 个 allowlist 路径；原 24 路径加 Phase 1A Runner 和 compatibility 共享授权门 |
 | 已确认设计基线 | 五份均未修改 |
 | 历史 migration | `0001`–`0008` 均未修改；当前唯一 head/current 为 `0009_timeline_query_indexes` |
 | `SEM/` | 未修改、未加载或运行真实模型；`SEM_INTEGRITY_OK` |
 | Mock Runtime | 实现和协议未修改 |
 | Real Provider calls | `6 observed LLMCalls`：5 次计划验收调用 + 1 次额外人工知识问答 |
-| Commit | `AUTHORIZED / UNIQUE M12-B ACCEPTANCE COMMIT` |
+| Commit | `ONE CONDITIONAL LOCAL COMMIT AUTHORIZED` |
 | Push | `NO` |
 | Amend | `NO` |
-| Git 外部动作 | 仅三个精确路径的 staging 与唯一 M12-B 验收 commit 已授权；push、amend、rebase、reset、stash、创建分支或 worktree 均未授权 |
+| Git 外部动作 | 仅授权一次 P1B1 本地验收提交；push、amend、rebase、reset、restore、stash、clean、切换分支均禁止 |
 | M10-A | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M10-B | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M10 overall | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
@@ -46,13 +46,94 @@
 | M12 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M12-A | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M12-B | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
-| M13 | `NOT STARTED` |
+| P1B1 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
+| P1B2 | `NOT STARTED / NOT AUTHORIZED` |
+| M13–M16 | `HISTORICAL DECOMPOSITION / MAPPED TO P1B1 AND P1B2` |
 | M11 start baseline | `main@f426e6f23703002a648991e5bb436929df19e8e2` |
 | M11-B start baseline | `main@4ed740222238433541fb31c993dd75610634d157` |
 | M12-A start baseline | `main@f5e24dcaab4801dbeffb8400f2960c33b60b4f00` |
 | M12-B start baseline | `main@ffd29353cb4682c74fd3455425822999444bb1d2` |
-| 是否处于项目负责人暂停点 | M12 已完成项目负责人验收。等待开始 M13 前的单独授权。push、amend、M13 和真实 SEM 均未授权。 |
-| 更新时间 | `2026-07-29` |
+| 是否处于项目负责人暂停点 | 是，P1B1 已验收并授权唯一条件性提交；P1B2、真实环境、依赖安装、权重加载、真实模型和 GPU 均未授权。 |
+| 更新时间 | `2026-07-30` |
+
+## P1B1 第一轮代码审查修订与验证证据
+
+- 完整只读对照 `SEM/ZTA35G_lab/virtual_lab_sem.py` 后，DDPM 模型模块属性恢复为
+  原始 `state_dict` 身份，并补回原定义的 `ConditionEmbeddings.emb_dim` 元属性；
+  精确属性集合、默认参数与完整 `__init__`/`forward` AST 摘要锁定所有层构造、
+  通道/卷积参数和数学顺序；未运行或 import 原文件，未建立大规模 key rename 表。
+- DDPM mismatch 仅用 `strict=False` 采集计数，missing/unexpected 任一非零立即
+  fail closed；DenseNet 使用 `strict=True`。失败关闭当前及已加载对象，错误不含
+  私有键名或绝对路径，Runtime 不进入 ready。
+- 生产采样删除 `torch.nan_to_num`；每个 DDPM 迭代后发现 NaN/Inf 立即
+  `InvalidModelOutputError`，不继续 DenseNet/SVR，不返回图片或性能成功；逐迭代
+  AST 门确认检查位于采样循环体最后一步且直接抛错。
+- 四类加载失败（bundle 反序列化、DDPM device、DenseNet device、beta/alpha）
+  均清空引用、禁止重复 load、保持 `engine.is_loaded()=false`；Runtime ready 为
+  HTTP 503、NOT_READY、INVALID、device unavailable/unknown、bundle null。
+- ready 加载成功空闲/执行中分别精确表达 AVAILABLE 与 busy；现有 Backend
+  Adapter 对 busy 为 DEGRADED、对非 200 ready 为 UNAVAILABLE，Backend 生产代码
+  未修改。
+- 新增标准库安全 JSON 日志，独立 Runtime 入口显式配置专用 INFO handler，覆盖
+  启动、加载、加载失败、接收、busy、SEM、性能、完成、执行失败与停止；干净子进程
+  和捕获测试确认默认可输出，且不含 Token、Base64、私有路径和完整异常正文。
+- compatibility 三条真实测试共同要求精确 P1B2 授权、模型 Conda 环境和非空模型
+  根；真实推理/资源测试额外要求 GPU 授权。默认结果为 `1 passed, 3 skipped`，
+  跳过发生在 Torch/Joblib import 或权重打开之前，本轮未设置任何授权变量。
+- 次要合同已收紧：`0 <= seed < 2**63`、递归 JSON 映射 HTTP 400，懒导入由
+  干净 Python 子进程证明。
+- 审查聚焦测试 `104 passed`；Runtime 全量 `107 passed, 3 skipped`；Mock
+  Runtime `11 passed`；Frontend `204 passed`，typecheck/build 通过。
+- Phase 1A Runner 新增默认 M12A 的 `ScopeMilestone` 参数，P1B1 pre/post scope
+  命令与日志表达实际 milestone；历史 M12A allowlist 未修改。权威 run
+  `20260729T151355Z-a3a7b642f201` 为 `PHASE_1A_AUTOMATION_PASSED`、
+  `failed=0`：M11 E2E `24 passed`、Backend `985 passed`、Mock Runtime
+  `11 passed`、Frontend `204 passed`，pip/compileall/SEM/Git/安全扫描和受控
+  Mock Stack 清理均通过。
+- 直接无受控栈 Backend 全量达到 10 分钟工具上限且无断言输出；只清理了该命令
+  的精确 Conda/pytest PID 树。权威 Backend 全量证据采用上述 Runner 结果。
+- 当前 P1B1 检查为 `SCOPE_OK P1B1`；`SEM_INTEGRITY_OK`；暂存区为空。
+- 修订后只读复核未发现剩余 Critical、Important 或 Minor，assessment 为
+  `APPROVED`；该结论仅覆盖本次 P1B1 代码复核，仍停在项目负责人复审点。
+
+## P1B1 第二轮代码审查修订与验证证据
+
+- Runtime 关闭先原子标记 closed 并记录安全 `runtime_stopping`，再等待
+  `execution_lock`；当前 execute 完整形成响应后才关闭 Engine，最后关闭 HTTP
+  Server。关闭期间的新请求在读 body 前、解析后及取得执行锁后均 fail closed 为
+  安全 503，不开始模型执行、不增加 execution count；重复 close 仍只关闭 Engine 一次。
+- compatibility 公共门现在核对 `sys.version_info[:2] == (3, 8)`，Python 3.11、
+  3.9 以及环境名正确但版本错误均在任何 Torch/Joblib import 或权重打开前失败。
+  普通门通过且 GPU 已授权后才 import Torch；CUDA 不可用明确 fail，不能 skip 或
+  回退 CPU。真实推理/资源测试还要求 `engine.device_kind == "cuda"`。
+- 固定 bundle 身份精确为 `zta35g-sem-original-bundle`。Runtime 启动只在
+  loaded=true、固定 bundle 且 device 为 cpu/cuda 时进入 ready；任一不变量失败都
+  立即且仅一次关闭 Engine，ready 为 503、bundle null、`MODEL_LOAD_FAILED`。
+  execute response 的空、其他、带空白或超长 bundle 均安全映射 500；response
+  完整校验前不记录诊断，校验后日志只使用固定 bundle 和受限 device 值。
+- RecursionError 契约测试改为 monkeypatch `contracts.json.loads` 确定性抛错；
+  不再依赖 2000 层 JSON 在不同解释器中的递归行为。
+- 四组 RED/GREEN：关闭一致性 `2 failed → 2 passed`；Python/GPU 授权门
+  `4 failed, 1 skipped → 4 passed, 1 skipped`；固定 bundle
+  `6 failed, 7 passed → 13 passed`；RecursionError 捕获 mutation
+  `1 failed → 1 passed`。只读复核追加的运行期 bundle 日志 canary
+  `1 failed, 1 passed → 2 passed`；关闭测试同时捕获线程异常并断言 close 正常返回。
+- 第二轮聚焦组合 `110 passed, 1 skipped`；Runtime 全量
+  `126 passed, 3 skipped`；隔离 compatibility
+  `4 passed, 3 skipped`、`HEAVY_IMPORTS=[]`；Mock Runtime `11 passed`；
+  Frontend 9 files / `204 passed`，typecheck/build 通过。
+- 正式 Phase 1A Runner
+  `20260729T163241Z-d7841be818ab` 为
+  `PHASE_1A_AUTOMATION_PASSED`、`failed=0`：M11 E2E `24 passed`、Backend
+  `985 passed`、Mock Runtime `11 passed`、Frontend `204 passed`，
+  pip/compileall、P1B1 pre/post scope、SEM、Git 与动态安全扫描均通过。
+  Runner 结束后 3000/8000/8100 无监听、Compose 运行服务为 0、状态文件已删除。
+- 直接无受控栈 Backend 全量约 4 分钟仍无断言输出；在核对 ownership 后只停止该
+  命令精确的 Conda/pytest PID 树。权威 Backend 全量采用上述受控 Runner 结果。
+- 当前仍为精确 26 个 P1B1 allowlist 路径，暂存区为空；四份真实权重打开、
+  Torch/Joblib 真实 loader、真实模型、GPU 和 DeepSeek 调用均为 0。P1B2 未开始。
+- 日志 canary 与关闭线程断言修订后的只读复核为 Critical 0、Important 0、
+  Minor 0、`APPROVED`；这不替代项目负责人最终代码复审。
 
 ## M8 已实现内容
 
@@ -889,6 +970,11 @@ Runtime、MinIO 和 Explanation Provider 调用均不在数据库 UoW 内。Back
 
 ## 已知风险
 
+- P1B1 仍只完成离线 Fake/HTTP/Adapter 验证；Python 3.8 模型环境、四份权重真实
+  mismatch、CUDA/GPU、DDPM/DenseNet/SVR 推理和资源测量均属于未授权 P1B2，
+  本轮没有把离线通过表述为真实模型兼容性。
+- `npm ci` 仍报告既有 lockfile 的 6 个 high severity audit 项；P1B1 禁止修改
+  Frontend 依赖，未执行 `npm audit fix`。
 - M12-B 浏览器验收已证明真实 Provider 正常业务链路；真实错误分类和幂等合同
   仍引用 M12-A 离线自动测试，不声称本轮通过额外真实错误调用验证。
 - Provider 在 6 次成功调用中均未暴露 `x-request-id`；该事实作为能力观察保留，
@@ -896,17 +982,18 @@ Runtime、MinIO 和 Explanation Provider 调用均不在数据库 UoW 内。Back
 - 阶段 1A Runner 依赖 Windows PowerShell、Docker Desktop/Compose 和本机
   Backend/Frontend 工具链；它不是生产守护进程。
 - start/stop 继续以严格 ownership 为先；不得宽泛终止进程或删除 volume。
-- M12-B 尚未完成项目负责人最终复审，M12 仍为 `IN PROGRESS`；M13 未开始，
-  真实 SEM 模型仍未加载或运行。
+- P1B1 已通过最终代码审查和项目负责人验收；P1B2 未开始，真实 SEM 模型仍未加载
+  或运行。
 
 ## 下一步
 
-M12 已完成项目负责人验收。等待开始 M13 前的单独授权。不得读取或配置 API Key，
-不得再次执行真实 Provider 调用；push、amend、M13 和真实 SEM 均未授权：
+P1B1 已完成最终代码审查和项目负责人验收，并仅授权本工作包的唯一条件性本地提交。
+不得进入 P1B2；不得读取或配置 API Key，不得打开真实权重、运行真实模型或使用 GPU，
+也不得 push 或 amend：
 
 ```text
-当前里程碑：M12
-当前工作单元：M12-B 真实浏览器验收与最终三路径收尾
+当前里程碑：P1B1
+当前工作单元：P1B1：真实 ZTA35G Runtime 离线实现与契约接入
 状态：COMPLETE / PROJECT_OWNER_ACCEPTED
 
 M11:
@@ -931,14 +1018,17 @@ Real Provider calls:
 - 5 planned acceptance calls
 - 1 additional manual knowledge call
 
-M13:
-NOT STARTED
+P1B1:
+COMPLETE / PROJECT_OWNER_ACCEPTED
+
+P1B2:
+NOT STARTED / NOT AUTHORIZED
 
 Staging:
-EMPTY / AUTHORIZED ONLY FOR UNIQUE M12-B ACCEPTANCE COMMIT
+ONLY FOR AUTHORIZED P1B1 ACCEPTANCE COMMIT
 
 Commit:
-AUTHORIZED / UNIQUE M12-B ACCEPTANCE COMMIT
+ONE CONDITIONAL LOCAL COMMIT AUTHORIZED
 
 Push:
 NO

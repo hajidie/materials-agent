@@ -57,7 +57,8 @@ function ConvertTo-RepoPath {
 
 $normalizedMilestone = $Milestone.Trim().ToUpperInvariant()
 $recognizedMilestones = @(
-    'G0', 'M0', 'M4A', 'M4B', 'M4PLAN', 'M11A', 'M11B', 'M12A', 'M12B'
+    'G0', 'M0', 'M4A', 'M4B', 'M4PLAN', 'M11A', 'M11B', 'M12A', 'M12B',
+    'P1B1'
 ) + @(1..16 | ForEach-Object { "M$_" })
 if ($recognizedMilestones -notcontains $normalizedMilestone) {
     Complete-ScopeCheck -Code 'UNKNOWN_MILESTONE' -Summary $normalizedMilestone
@@ -499,6 +500,35 @@ $milestoneAllowlists = @{
         'scripts/dev/check-scope.ps1'
         'docs/acceptance/real-llm-provider.md'
         'docs/progress/phase-1-current-status.md'
+    )
+    P1B1 = @(
+        '.env.example'
+        'docs/superpowers/plans/2026-07-17-sem-mvp-phase-1-implementation-plan.md'
+        'docs/progress/phase-1-current-status.md'
+        'docs/acceptance/zta35g-runtime-offline.md'
+        'scripts/dev/check-scope.ps1'
+        'scripts/acceptance/run-phase-1a.ps1'
+        'zta35g-runtime/pyproject.toml'
+        'zta35g-runtime/src/materialsagent_zta35g_runtime/__init__.py'
+        'zta35g-runtime/src/materialsagent_zta35g_runtime/constants.py'
+        'zta35g-runtime/src/materialsagent_zta35g_runtime/contracts.py'
+        'zta35g-runtime/src/materialsagent_zta35g_runtime/config.py'
+        'zta35g-runtime/src/materialsagent_zta35g_runtime/model_architecture.py'
+        'zta35g-runtime/src/materialsagent_zta35g_runtime/model_bundle.py'
+        'zta35g-runtime/src/materialsagent_zta35g_runtime/inference.py'
+        'zta35g-runtime/src/materialsagent_zta35g_runtime/app.py'
+        'zta35g-runtime/src/materialsagent_zta35g_runtime/main.py'
+        'zta35g-runtime/tests/conftest.py'
+        'zta35g-runtime/tests/unit/test_contracts.py'
+        'zta35g-runtime/tests/unit/test_config.py'
+        'zta35g-runtime/tests/unit/test_model_bundle.py'
+        'zta35g-runtime/tests/unit/test_inference.py'
+        'zta35g-runtime/tests/contract/test_runtime_http.py'
+        'zta35g-runtime/tests/compatibility/conftest.py'
+        'zta35g-runtime/tests/compatibility/test_model_loading.py'
+        'zta35g-runtime/tests/compatibility/test_minimal_inference.py'
+        'zta35g-runtime/tests/compatibility/test_payload_and_resources.py'
+        'backend/tests/contract/test_real_runtime_adapter.py'
     )
 }
 

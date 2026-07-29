@@ -855,6 +855,28 @@ M12 拆成两个独立暂停点。M12-A 只实现并离线验证 Provider Adapte
 
 **完成证据：** 真实调用安全摘要、三类编排与 Explanation、故障映射、幂等计数、无 Secret/Prompt/raw response 扫描和 Git 审计。到此再次暂停，等待项目负责人通过 M12 overall 检查点。
 
+## 阶段 1B 合并执行工作包
+
+M13–M16 继续作为阶段 1B 的历史能力分解和验收追溯基线；实际执行改为两个合并工作包，避免重复实现已在 M5 落地并经 M11/M12 回归验证的 Backend `LocalZTA35GToolClientAdapter`。
+
+### P1B1：真实 ZTA35G Runtime 离线实现与契约接入
+
+**范围：** 在现有 `materialsagent-backend` 测试环境中，以 Python 3.8 兼容源码、Fake Loader、Fake Model Components 和真实 loopback HTTP 黑盒服务完成 Runtime 配置、严格契约、模型结构提取、bundle 预校验、推理编排、单执行槽、生命周期和现有 Backend Adapter 接线验证。
+
+**历史映射：** 吸收 M13 的 bundle 身份/加载兼容入口、M14 的推理边界与 payload/resource 入口、M15 的 Runtime 离线实现和 Adapter 黑盒契约；不执行这些历史里程碑中的环境创建、依赖安装、真实反序列化、真实推理、GPU 或人工运行验收。
+
+**硬边界：** `SEM/` 只读；四份真实权重不得打开；不得调用真实 `torch.load`、`joblib.load`、模型、GPU、DeepSeek 或根 `.env`；不得修改 Backend 生产代码、Mock Runtime、Frontend、设计基线或 migration。现有 Backend Adapter 只通过新增黑盒测试验证，不再作为实现任务重复开发；若证实其存在缺陷，必须停止并另行评审。
+
+**完成证据：** Runtime unit/contract 全绿；compatibility 入口默认明确授权跳过；现有 Backend Adapter 三种输出、ready/busy、错误与大小边界黑盒通过；Backend、Mock Runtime、Frontend 和阶段 1A 回归通过；`SEM_INTEGRITY_OK`、`SCOPE_OK P1B1`、安全扫描和 Git 审计通过。到此必须暂停，不得进入 P1B2。
+
+### P1B2：真实环境、权重、GPU、Runtime 与浏览器验收
+
+**前置条件：** P1B1 经项目负责人代码审查并另行明确授权；真实模型 Conda 环境、依赖安装、权重打开、GPU、真实 Runtime、浏览器和真实 Provider 调用分别受授权门控制。
+
+**历史映射：** 执行 M13 的 Python 3.8 环境与四权重真实加载、M14 的固定参数最小推理和资源测量、M15 的真实 Runtime 人工运行验收，以及 M16 的真实 LLM + 真实 Runtime 浏览器 E2E。固定 `num_samples=1`、`guide_scale=2.0`、`timesteps=1000` 和全部真实验收暂停点保持不变。
+
+**当前状态：** `NOT STARTED / NOT AUTHORIZED`。
+
 ## M13：Python 3.8 模型环境与权重加载验证
 
 **目标：** 建立隔离的 `materialsagent-zta35g` 环境，只读核验模型文件 SHA-256，加载 DDPM、DenseNet121 和两个 SVR，形成兼容性验收记录。
@@ -922,7 +944,7 @@ M12 拆成两个独立暂停点。M12-A 只实现并离线验证 Provider Adapte
 
 **完成证据：** 最小推理记录、图片元数据、性能值、必需基础统计、warm 原始耗时、冷启动/首次/warm-up/分项开销、显存/主机内存、Base64 大小、G0 SEM manifest 前后检查、diff 检查。到此必须暂停，等待项目负责人通过 M14 检查点。未来建议提交：`test: validate zta35g minimal inference`。
 
-## M15：真实 Runtime 与 Local Tool Client Adapter
+## M15：真实 Runtime 与现有 Local Tool Client Adapter 验收（历史分解）
 
 **目标：** 在 Python 3.8 环境实现只监听 loopback、共享 Token 保护、加载一次复用、并发 1 的真实 `/internal/v1` Runtime，并让 Backend Adapter 可配置切换 Mock/真实。
 
@@ -941,7 +963,7 @@ M12 拆成两个独立暂停点。M12-A 只实现并离线验证 Provider Adapte
 1. 先用 Mock contract suite 对真实 Runtime 做黑盒红测。
 2. 实现配置/Token安全比较、生命周期、健康状态、单执行槽和安全错误。
 3. 接入 M13/M14 已验证加载/推理函数，不改变公共模型行为。
-4. 实现 Backend Local Adapter 的 ID/版本/大小/`.npy`/错误校验；execute 不自动重试。
+4. 使用现有 Backend Local Adapter 验证 ID/版本/大小/`.npy`/错误校验和 execute 无自动重试；不得重复实现 Adapter，发现真实缺陷时停止并另行评审。
 5. 按“手动 Runtime→ready→Backend”写最小运行手册。
 
 **自动化测试与四类场景：** 成功真实 execute；输入错误 Token/参数/version/payload 被拒；依赖失败进程崩溃/超时/模型加载失败映射；公共同 key 重放不再次调用，显式 retry 新 ID/seed。

@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
-    [switch]$ManualBrowserAccepted
+    [switch]$ManualBrowserAccepted,
+    [ValidateSet('M12A', 'P1B1')]
+    [string]$ScopeMilestone = 'M12A'
 )
 
 Set-StrictMode -Version Latest
@@ -13,6 +15,7 @@ $runId = (
     [Guid]::NewGuid().ToString('N').Substring(0, 12)
 )
 $runRelative = "tmp/phase-1a-acceptance/$runId"
+$scopeMilestoneSlug = $ScopeMilestone.ToLowerInvariant()
 $runRoot = Join-Path $repoRoot ($runRelative.Replace('/', '\'))
 $logsRoot = Join-Path $runRoot 'logs'
 $junitRoot = Join-Path $runRoot 'junit'
@@ -675,6 +678,7 @@ function Write-AcceptanceMetadata {
     $summary = [ordered]@{
         run_id = $runId
         status = $Marker
+        scope_milestone = $ScopeMilestone
         started_by_runner = $script:startedByRunner
         manual_browser_accepted = [bool]$ManualBrowserAccepted
         git = $script:gitEvidence
@@ -946,7 +950,7 @@ try {
 
     if (-not $abortHighCost) {
         $null = Invoke-RecordedCommand `
-            -Name 'scope_m12a_pre' `
+            -Name "scope_${scopeMilestoneSlug}_pre" `
             -FilePath $powershellExe `
             -Arguments @(
                 '-NoProfile',
@@ -955,9 +959,9 @@ try {
                 '-File',
                 $scopeScript,
                 '-Milestone',
-                'M12A'
+                $ScopeMilestone
             ) `
-            -LogRelative 'logs/03-scope-m12a-pre.log' `
+            -LogRelative "logs/03-scope-$scopeMilestoneSlug-pre.log" `
             -Required
         $null = Invoke-RecordedCommand `
             -Name 'sem_integrity_pre' `
@@ -1319,7 +1323,7 @@ catch {
 }
 finally {
     $null = Invoke-RecordedCommand `
-        -Name 'scope_m12a_post' `
+        -Name "scope_${scopeMilestoneSlug}_post" `
         -FilePath $powershellExe `
         -Arguments @(
             '-NoProfile',
@@ -1328,9 +1332,9 @@ finally {
             '-File',
             $scopeScript,
             '-Milestone',
-            'M12A'
+            $ScopeMilestone
         ) `
-        -LogRelative 'logs/18-scope-m12a-post.log' `
+        -LogRelative "logs/18-scope-$scopeMilestoneSlug-post.log" `
         -Required
     $null = Invoke-RecordedCommand `
         -Name 'sem_integrity_post' `

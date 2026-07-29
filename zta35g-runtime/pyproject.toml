@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68,<69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "materialsagent-zta35g-runtime"
+version = "0.1.0"
+description = "Local contract-faithful ZTA35G model Runtime"
+requires-python = ">=3.8,<3.9"
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["materialsagent_zta35g_runtime*"]
+namespaces = true
