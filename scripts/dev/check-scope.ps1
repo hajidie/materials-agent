@@ -57,7 +57,7 @@ function ConvertTo-RepoPath {
 
 $normalizedMilestone = $Milestone.Trim().ToUpperInvariant()
 $recognizedMilestones = @(
-    'G0', 'M0', 'M4A', 'M4B', 'M4PLAN', 'M11A', 'M11B', 'M12A'
+    'G0', 'M0', 'M4A', 'M4B', 'M4PLAN', 'M11A', 'M11B', 'M12A', 'M12B'
 ) + @(1..16 | ForEach-Object { "M$_" })
 if ($recognizedMilestones -notcontains $normalizedMilestone) {
     Complete-ScopeCheck -Code 'UNKNOWN_MILESTONE' -Summary $normalizedMilestone
@@ -494,6 +494,11 @@ $milestoneAllowlists = @{
         'docs/acceptance/m12-a-offline-provider.md'
         'scripts/dev/check-scope.ps1'
         'scripts/acceptance/run-phase-1a.ps1'
+    )
+    M12B = @(
+        'scripts/dev/check-scope.ps1'
+        'docs/acceptance/real-llm-provider.md'
+        'docs/progress/phase-1-current-status.md'
     )
 }
 

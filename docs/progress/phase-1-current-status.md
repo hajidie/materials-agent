@@ -8,9 +8,9 @@
 |---|---|
 | 当前阶段 | 真实能力接入 |
 | 当前里程碑 | M12 |
-| 当前工作单元 | M12-A：DeepSeek Provider 离线实现、应用接线与 Mock 回归 |
-| 状态 | `M12A_PROJECT_OWNER_ACCEPTED` |
-| 上一已验收工作单元 | M11-B：阶段 1A 完整 Mock 验收 |
+| 当前工作单元 | M12-B：真实浏览器验收与最终三路径收尾 |
+| 状态 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
+| 上一已验收工作单元 | M12-A：DeepSeek Provider 离线实现、应用接线与 Mock 回归 |
 | Pre-M8 stop-loss commit | `891714dd58cf069073a7d4037be43ef66304d0ac` |
 | M8 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M8 acceptance commit | `18005944982ca5191412e06154effc67465ca3a7` |
@@ -21,19 +21,21 @@
 | M10 overall acceptance commit | `f426e6f23703002a648991e5bb436929df19e8e2` |
 | M11-A acceptance commit | `4ed740222238433541fb31c993dd75610634d157` |
 | M11-B / Phase 1A acceptance commit | `f5e24dcaab4801dbeffb8400f2960c33b60b4f00` |
-| Expected subject | `feat: add offline DeepSeek provider integration` |
-| 实际 branch / HEAD | `main` / `f5e24dcaab4801dbeffb8400f2960c33b60b4f00` |
-| HEAD parent / subject | `4ed740222238433541fb31c993dd75610634d157` / `feat: complete phase 1a mock acceptance` |
-| 暂存区 | empty；已授权在 staged diff 门槛全部通过后精确暂存并创建唯一 M12-A 验收提交 |
-| 当前工作区 | M12-A 已通过项目负责人代码审查和离线验收；等待 staged diff 门槛与唯一验收提交 |
+| M12-A acceptance commit | `ffd29353cb4682c74fd3455425822999444bb1d2` |
+| Expected subject | `test: complete real DeepSeek provider acceptance` |
+| 本轮提交前 branch / HEAD | `main` / `ffd29353cb4682c74fd3455425822999444bb1d2` |
+| 提交前 HEAD parent / subject | `f5e24dcaab4801dbeffb8400f2960c33b60b4f00` / `feat: add offline DeepSeek provider integration` |
+| 暂存区 | empty；本轮仅授权三个精确路径的验收暂存 |
+| 当前工作区 | 提交前仅 M12-B 三个精确 allowlist 路径；验收提交后要求 clean；自动 real-provider Runner 未采用并已删除 |
 | 已确认设计基线 | 五份均未修改 |
 | 历史 migration | `0001`–`0008` 均未修改；当前唯一 head/current 为 `0009_timeline_query_indexes` |
 | `SEM/` | 未修改、未加载或运行真实模型；`SEM_INTEGRITY_OK` |
 | Mock Runtime | 实现和协议未修改 |
-| Commit | `AUTHORIZED SUBJECT TO STAGED-DIFF GATES` |
+| Real Provider calls | `6 observed LLMCalls`：5 次计划验收调用 + 1 次额外人工知识问答 |
+| Commit | `AUTHORIZED / UNIQUE M12-B ACCEPTANCE COMMIT` |
 | Push | `NO` |
 | Amend | `NO` |
-| Git 外部动作 | 仅精确暂存 31 个批准路径及一个 M12-A 验收 commit 获授权；push、amend、rebase、reset、stash、创建分支或 worktree 均未授权 |
+| Git 外部动作 | 仅三个精确路径的 staging 与唯一 M12-B 验收 commit 已授权；push、amend、rebase、reset、stash、创建分支或 worktree 均未授权 |
 | M10-A | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M10-B | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M10 overall | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
@@ -41,15 +43,16 @@
 | M11-A | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M11-B | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | Phase 1A | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
-| M12 | `IN PROGRESS` |
+| M12 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M12-A | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
-| M12-B | `NOT STARTED` |
+| M12-B | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M13 | `NOT STARTED` |
 | M11 start baseline | `main@f426e6f23703002a648991e5bb436929df19e8e2` |
 | M11-B start baseline | `main@4ed740222238433541fb31c993dd75610634d157` |
 | M12-A start baseline | `main@f5e24dcaab4801dbeffb8400f2960c33b60b4f00` |
-| 是否处于项目负责人暂停点 | M12-A 已通过项目负责人代码审查和离线验收。已授权在 staged diff 门槛全部通过后创建 M12-A 唯一验收提交。真实 Provider 调用、M12-B、M13、push 和 amend 均未授权。 |
-| 更新时间 | `2026-07-28` |
+| M12-B start baseline | `main@ffd29353cb4682c74fd3455425822999444bb1d2` |
+| 是否处于项目负责人暂停点 | M12 已完成项目负责人验收。等待开始 M13 前的单独授权。push、amend、M13 和真实 SEM 均未授权。 |
+| 更新时间 | `2026-07-29` |
 
 ## M8 已实现内容
 
@@ -619,24 +622,292 @@ Runtime、MinIO 和 Explanation Provider 调用均不在数据库 UoW 内。Back
   为空、Mock state 文件不存在。未删除命名 volume，未运行真实 Provider，
   未读取 `.env`，未暂存或 commit。
 
+## M12-B 当前执行记录
+
+- 开始门禁实时核对为
+  `main@ffd29353cb4682c74fd3455425822999444bb1d2`，subject
+  `feat: add offline DeepSeek provider integration`，parent
+  `f5e24dcaab4801dbeffb8400f2960c33b60b4f00`；开始时 working tree、
+  staging 和 untracked 均为空。
+- 新增 PowerShell Runner 与非 pytest Python executor。`-SelfTest` /
+  `--self-test` 不检查 `DEEPSEEK_API_KEY`，使用 fake Chat、Explanation 与
+  Runtime，并在公网 socket 封锁下验证五次硬预算、第六次 delegate 前拒绝、
+  Complete Tool 两次余额门槛、两类零增量重放、usage、request-id
+  present/absent、失败停机、环境恢复和安全 summary。
+- 真实模式具有双重授权门；缺少非空进程级 `DEEPSEEK_API_KEY` 或
+  `M12B_REAL_CALLS_AUTHORIZED=YES` 时，在服务启动和网络调用前 fail closed。
+  Runner 在内存保存 Key 后从父环境移除，以 `LLM_ADAPTER=mock` 启动本 Run
+  独占的 PostgreSQL、MinIO 与 Mock Runtime；不启动 Frontend 或独立 Backend。
+  只有 Python executor 子进程获得 Key 与 `LLM_ADAPTER=deepseek`，Key 不进入
+  命令行、文件、stdout、stderr 或报告。
+- executor 为每 Run 创建唯一 database、MinIO bucket、actor、conversation、
+  idempotency key 与 artifact 目录；运行既有 Alembic migration，显式构造并
+  分别包装 DeepSeek Chat / Explanation Port，通过 `create_app` 注入后使用
+  FastAPI TestClient 从正式公共 API 进入。Tool 仍只调用 Mock Runtime。
+- 固定真实预算为 Knowledge Chat 1、Complete Tool Chat 1 + Explanation 1、
+  NEEDS_INPUT Chat 1、90 min 且缺 aging time 的受控 Chat 1，总计 5；
+  Knowledge 与 Complete Tool 相同 key 重放必须使 Provider、Runtime 和全部
+  业务资源增量为 0。M12-B 不执行真实 Explanation retry。
+- 每个场景后同时核对线程安全 wrapper 计数、独立数据库中
+  `deepseek/deepseek-v4-flash` LLMCall 数量与预期增量。成功 LLMCall 还核对
+  purpose 对应模板、64 位 digest、精确 generation parameters、正 token
+  usage 与 provider request-id 持久化。header 未暴露或被生产 Adapter
+  过滤统一记录 `PROVIDER_REQUEST_ID_NOT_EXPOSED_OR_REJECTED`，不使用
+  completion/framework ID 替代。
+- `check-scope.ps1` 新增精确 M12B allowlist，仅含两个 Runner、Scope、
+  `docs/acceptance/real-llm-provider.md` 与本进度文件；旧 milestone allowlist
+  未改。正式报告当前仅为 `M12B_IMPLEMENTED_NOT_EXECUTED` 模板，不含真实结果
+  或固定合成场景正文。
+- Python executor `--self-test` 为 `M12B_EXECUTOR_SELF_TEST_OK`，
+  PowerShell Runner `-SelfTest` 为 `M12B_POWERSHELL_SELF_TEST_OK`，
+  PowerShell parser、`pip check`、`SCOPE_OK M12B` 与 `SEM_INTEGRITY_OK`
+  均通过。
+- 为避免旧 Phase 1A Runner 固定 `Scope M12A` 与当前未提交 M12-B 五路径
+  产生伪冲突，本轮从当前空 staging 导出临时 HEAD 快照，并以不含
+  `DEEPSEEK_API_KEY` 的最小子进程环境运行原 Runner；未修改真实 index、
+  working tree 或旧 allowlist。相同的临时快照、junction 与成功后清理流程已
+  内置于 M12-B 真实 Runner 的 Phase 1A 回归阶段。run id
+  `20260728T164744Z-6c67a9b91214` 为
+  `PHASE_1A_AUTOMATION_PASSED`、`failed=0`：M11 E2E `24 passed`，
+  Backend full `978 passed`，Mock Runtime `11 passed`，Frontend
+  9 files / `204 passed`，typecheck/build、Scope M12A、SEM、Git 与动态
+  artifacts 安全扫描均通过。未声明本轮人工浏览器验收。
+- Runner 后 Compose running service 为 0，3000/8000/8100 listener 为 0，
+  Mock state 不存在，隔离快照已删除。当前真实 Provider calls=`0`；未读取或
+  设置 API Key，未运行 Runner 真实模式，未暂存或 commit，未进入 M13。
+
+## M12-B 审查修订执行记录
+
+- 真实模式在任何服务启动前强制核对 branch、HEAD、subject、parent、两项
+  tracked modified、三项 untracked、空 staging 和精确五路径集合；任一缺失或
+  unexpected 均以 `M12B_GIT_PREFLIGHT_FAILED` 停止。
+- Phase 1A snapshot 改到系统临时目录。cleanup 无条件优先删除 snapshot
+  `.env`，再安全删除 SEM 与 node_modules junction；即使 state 残留也不保留
+  `.env`，任何 snapshot 残留继续返回
+  `M12B_PHASE1A_CLEANUP_FAILED`。M12-B artifact 不包含 `.env`。
+- PostgreSQL、MinIO 与 Mock Runtime 启动前，父进程备份并移除 Key、授权门、
+  model、base URL、timeout 五项 Provider 变量并强制 Mock；只有 executor
+  child 获得固定 Provider 环境，`finally` 按原存在性和值逐项恢复父环境。
+- Python executor 只在 with 内形成 pending summary；场景、metadata 与 DB
+  安全扫描完成并成功退出资源 context 后才写 `status=PASSED`。cleanup exit
+  失败写受控 FAILED summary，不保留 PASSED。
+- 资源 count 与 ID 集合现纳入 IdempotencyRecord、TaskInputRevision 和
+  ResultAssetLink；Knowledge 与 Complete Tool replay 必须保持
+  IdempotencyRecord count 和 ID 集合不变。
+- Port 可观察到的 null request-id 统一记录为
+  `PROVIDER_REQUEST_ID_NOT_EXPOSED_OR_REJECTED`；Port 无法区分 header 未暴露与
+  非法 header 被生产 Adapter 过滤，非法 header 拒绝引用 M12-A 离线合同证据。
+- 统一 Secret scan 忽略空值，覆盖 Key、PostgreSQL password、MinIO secret、
+  Runtime token 和 Timeline signing key。Phase 1A 三项 artifacts 生成后再做
+  最终 artifact scan；只有最终扫描通过才输出真实验收终态 marker。
+- failure summary 将 `status`、`safe_error_code` 与 `security_scan` 分开；
+  security scan 只取 `PASS`、`FAILED`、`NOT_COMPLETED`，普通业务失败不再误记
+  为 Secret 泄漏。
+- 审查修订 RED：原 Python self-test 以
+  `M12B_SELF_TEST_REPLAY_RESOURCE_SET_INCOMPLETE` 退出 1；原 PowerShell
+  self-test 因缺少 Provider 隔离/snapshot cleanup 行为退出 1。最小实现后
+  Python 与 PowerShell self-test 均转绿；真实 Provider calls 保持 `0`。
+- Phase 1A snapshot cleanup 进一步以真实 junction RED 锁定 Windows
+  PowerShell 的 reparse-point 删除差异；实现先验证 ReparsePoint，再以非递归
+  方式删除 junction 但保留目标。snapshot 树在 junction/state 门槛通过后以
+  同进程同步删除，最多 30 秒按路径 absent 条件轮询；cleanup artifact 只记录
+  `.env`、junction、state、snapshot 与 helper result 五项布尔值。
+- 直接在无 Mock Stack 的 shell 中运行 Backend full / integration 时分别达到
+  10 分钟和 5 分钟工具上限；定位到 PostgreSQL fixture 等待而非测试断言失败，
+  并按精确 PID/command 清理本轮 pytest/Conda 进程。随后只通过正式 Phase 1A
+  Runner 启动受控栈，不用扩大 timeout 掩盖环境前置条件。
+- 最终权威 Phase 1A run id 为
+  `20260729T034211Z-c1b66e05f59c`：
+  `PHASE_1A_AUTOMATION_PASSED`、`failed=0`。Runner 执行 Backend E2E、
+  Backend full、Mock Runtime、Frontend、pip、Alembic、Scope、SEM、Git 与
+  动态安全扫描；Backend 当前收集 978 tests。另行离线证据为 Unit
+  `469 passed`、Contract `147 passed`、DeepSeek wiring `5 passed`、
+  Mock Runtime `11 passed`。最终 cleanup 与 Phase 1A artifacts 加入后的统一
+  scan 均通过。
+
+## M12-B 最终收敛修订执行记录
+
+- 本轮对两个验收脚本做职责收敛：PowerShell Runner 负责 Git/文件基线、
+  双重授权、Provider 环境隔离、Compose/Runtime 生命周期、外部进程 timeout、
+  executor 启动、fallback cleanup、Phase 1A 回归、最终 artifact scan 和
+  overall `summary.json`；Python executor 负责四个公共 API 场景、五次预算、
+  provider-call ledger、真实 Adapter 包装、独立数据库/MinIO 生命周期、
+  业务资源/幂等/metadata 检查、`executor-summary.json` 和 `--cleanup`。
+- `provider-call-ledger.json` 由 PowerShell 在 executor 启动前创建；Python
+  `ProviderCallBudget` 每次 delegate 前在锁内先写账本并读回确认，写入失败、
+  第六次调用或场景停止均不会进入真实 Adapter。账本只保存 run id 与
+  chat/explanation/total delegate attempts，不保存 Prompt、Key、模型响应、
+  异常正文或用户消息。
+- 调用次数语义已收敛：PowerShell 无论 executor 成功、受控失败、非零退出、
+  timeout 或被终止，都会读取账本并尝试读取 `executor-summary.json`；
+  `call_count_state` 只允许 `EXACT`、`CONSERVATIVE_UPPER_BOUND` 和 `UNKNOWN`。
+  整体 PASSED 必须为 `EXACT` 且 `real_provider_calls=5`、
+  `provider_delegate_attempts=5`。失败和 timeout 不再伪造为 0；账本缺失或损坏
+  固定为 `UNKNOWN`。
+- Python `executor-summary.json` 的 FAILED 结构包含 `summary_authority`、
+  `status`、`safe_error_code`、`security_scan`、`real_provider_calls`、
+  `chat_delegate_attempts`、`explanation_delegate_attempts` 和
+  `total_delegate_attempts`。PowerShell 只在结构合法且与账本一致时传播其
+  safe error、security state 和计数；summary 缺失、损坏、timeout 或账本损坏
+  使用 Runner 静态错误码。
+- 新增 Python `--cleanup`，该模式不要求也不读取 Provider 授权变量，不导入
+  DeepSeek Adapter，不执行 Provider 调用；仅按严格 run id 正则清理
+  `materialsagent_m12b_<run-id>` 和 `materialsagent-m12b-<run-id>`，并确认
+  database/bucket 不存在。PowerShell 在 executor 成功、失败、timeout 或被终止
+  后、PostgreSQL/MinIO 仍运行时执行一次无 Provider 环境的 fallback cleanup。
+- 所有本轮列出的可能阻塞外部操作均统一走 `Invoke-M12BChildProcess` timeout：
+  pip check、Python self-test、真实 executor、cleanup executor、Phase 1A
+  Runner、Docker Compose config/up/ps/stop、Scope 和 SEM。Compose `ps` 检查和
+  `stop` 也已改为本 Runner 的 timeout helper，不再调用旧的无 timeout Compose
+  helper。
+- 整体状态权威层级已拆分：Python 只写
+  `executor-summary.json`，其 PASSED 仅证明 Provider 业务场景和 executor
+  独立数据库/MinIO bucket cleanup；PowerShell 的 `summary.json` 是唯一整体
+  权威状态，仅在 executor、Runtime/Compose/ports cleanup、父环境恢复、
+  Phase 1A、snapshot cleanup 和最终 artifact scan 全部通过后才能写 PASSED。
+- Phase 1A 成功或失败后，只要产生 stdout、stderr、summary、cleanup 四项
+  artifact，均进入最终统一扫描；Phase throw 不再越过扫描。发现实际 Secret
+  时不输出匹配值，删除本 Run 的整个污染 artifact 目录，只在 M12-B state
+  root 留存静态无 Secret failure marker。
+- Complete Tool 验收只接受 Task 与 ToolResult 双 `SUCCEEDED`，双输出
+  requested/completed 集合精确匹配且 failed 为空；同时要求单一 artifact、
+  Asset/ResultAssetLink/MinIO object/Explanation 均精确增量 1，并核对
+  `(result_id, artifact.asset_id)` 位于 ResultAssetLink ID 集合。
+- 所有 Runner 子进程均有 wall-clock 上限：pip 与 Python self-test 为 120
+  秒、真实 executor 为 900 秒、Phase 1A Runner 为 1200 秒；超时只终止精确
+  Process 及其子进程树并进入外层 cleanup，不再无限 `WaitForExit()`。
+- Python 在 SelfTest 和真实模式首次 Provider 调用前离线 import 实际
+  Application/ORM/Runtime client 模块，核对七个 ORM ID 字段、
+  `build_tool_registry` callable 和 Local Runtime adapter 构造签名；该
+  preflight 不连接网络、数据库或 MinIO，失败固定为
+  `M12B_REAL_EXECUTOR_INTERFACE_PREFLIGHT_FAILED`。
+- Docker Compose `up` 前使用已移除 Provider 变量的受控环境运行
+  `compose config --format json`，只在内存解析 postgresql/minio 最终环境；
+  Provider 字段或实际 Key 值出现均在服务启动前以静态错误失败关闭，不输出
+  完整 Compose config。
+- 本轮 TDD RED 为 Python
+  `M12B_SELF_TEST_FINAL_REVIEW_HELPERS_MISSING`、PowerShell
+  SelfTest 非零退出；新增严格投影、接口、timeout、Compose、Phase 失败扫描、
+  污染删除和整体 summary 门槛后，两项 SelfTest 均转绿。真实 Provider calls
+  继续为 `0`，API Key 未读取，真实模式未执行。
+- 最终离线回归使用空 staging/HEAD 的系统临时 snapshot，权威 run id
+  `20260729T044121Z-9d97546179b1` 为
+  `PHASE_1A_AUTOMATION_PASSED`、`failed=0`；该 Runner 覆盖 Backend full、
+  Backend E2E、Mock Runtime、Frontend、pip、Alembic、Scope、SEM、Git 和
+  动态安全扫描。Phase stdout/stderr/summary/cleanup 四项 artifact 均通过
+  最终扫描，cleanup 的 `.env`、junction、state、snapshot 和 helper result
+  五项布尔值均为 true，stderr 为空；随后验证临时 driver/artifact 已删除、
+  六个相关端口已释放。
+- 最终新鲜局部门槛为 PowerShell parser、Python compile、
+  `M12B_EXECUTOR_SELF_TEST_OK`、`M12B_POWERSHELL_SELF_TEST_OK` 和
+  `pip check` 全部通过。PowerShell timeout SelfTest 实际启动父/子两级受控
+  sleep 进程，短 timeout 后两级 PID 均无残留。
+- 本轮最终收敛后的新鲜验证为：PowerShell parser `RUNNER_PARSE_OK`、Python
+  compile PASS、Python executor `--self-test` 输出
+  `M12B_EXECUTOR_SELF_TEST_OK`、PowerShell Runner `-SelfTest` 输出
+  `M12B_POWERSHELL_SELF_TEST_OK`、Backend `pip check` 输出
+  `No broken requirements found.`、`SCOPE_OK M12B`、`SEM_INTEGRITY_OK`、
+  `git diff --check` 和 `git diff --cached --check` 均通过。真实 Provider
+  calls 仍为 `0`，API Key 未读取，真实模式未执行。
+- 本轮 Phase 1A 回归使用系统临时 HEAD snapshot 和受控本地栈 `.env` 键，
+  不读取或传递 DeepSeek API Key；权威 run id
+  `20260729T070717Z-0dcd6c53dfe9` 为
+  `PHASE_1A_AUTOMATION_PASSED`、`failed=0`、dynamic artifacts scanned=true。
+  其中 Backend E2E `24 passed in 62.09s`，Backend full
+  `978 passed in 185.86s`，Mock Runtime `11 passed in 0.96s`。该临时 snapshot
+  及先前 `.env.example` placeholder 预尝试目录均已删除；placeholder 预尝试因
+  Alembic 连接本机既有 Docker volume 配置失败，未进入业务测试，不作为验收
+  通过证据。
+
+## M12-B 静态扫描确定性误报修订记录
+
+- 根因是 Git diff 与正式报告沿用了动态证据的 `-StrictOutput` 调用方式；报告中
+  合法的 `Dual authorization:` 已命中 `authorization:` 严格标记。底层实际
+  Secret 值比较没有缺陷，误报来自扫描调用职责混用。
+- TDD RED 在只增加 PowerShell SelfTest 后稳定输出
+  `M12B_POWERSHELL_SELF_TEST_STATIC_REPORT_FALSE_POSITIVE` 并退出 1；失败发生
+  在直接读取当前正式报告并按动态严格策略扫描时。
+- PowerShell Runner 现以 `Test-M12BDynamicEvidenceText` 保持 runtime
+  artifacts/stdout/stderr 的实际 Secret 与严格标记扫描，以
+  `Test-M12BStaticReviewedText` 对 Git diff 和正式报告仅比较非空实际 Secret
+  值。环境变量名称、安全术语和拒绝规则名称本身不视为泄漏。
+- SelfTest 直接读取正式报告，确认包含 `Dual authorization:`、`Bearer`、
+  `reasoning_content` 与 `response headers` 时静态扫描通过；临时副本注入
+  canary Secret 后静态扫描失败；动态文本中的 `Authorization:`、
+  `reasoning_content` 和同一 Secret 值均继续失败。
+- GREEN 为 PowerShell Runner `-SelfTest` 输出
+  `M12B_POWERSHELL_SELF_TEST_OK`。本轮未修改 Python executor 的业务场景、
+  调用预算、账本、数据库、MinIO 或清理逻辑。
+- 本轮新鲜离线门槛为 PowerShell parser `RUNNER_PARSE_OK`、Python compile
+  `PYTHON_COMPILE_OK`、Python executor `M12B_EXECUTOR_SELF_TEST_OK`、
+  PowerShell Runner `M12B_POWERSHELL_SELF_TEST_OK`、Backend `pip check`
+  `No broken requirements found.`、`SCOPE_OK M12B`、`SEM_INTEGRITY_OK`、
+  `git diff --check` 与 `git diff --cached --check` 全部通过。
+- 正式 Phase 1A Runner 使用隔离 HEAD snapshot 完成回归，权威 run id
+  `20260729T081820Z-b387f2c4696b`，状态
+  `PHASE_1A_AUTOMATION_PASSED`、`failed=0`、
+  `dynamic_artifacts_scanned=true`。cleanup 的 `.env`、junction、state、
+  snapshot 与 helper result 五项均为 true，隔离驱动目录随后已删除。
+- 本轮 API Key 未读取，真实 Provider calls=`0`，真实 M12-B 模式未执行；
+  staging、commit、push、amend 与 M13 均未授权。
+
+## M12-B 真实浏览器验收与最终收尾记录
+
+- 项目负责人已通过正常本地开发栈完成浏览器人工验收：Backend 使用 DeepSeek，
+  PostgreSQL/MinIO 为本地服务，Tool Runtime 保持 Mock，Frontend 浏览器作为
+  主要业务入口；未运行真实 SEM 模型。
+- 知识问答成功并返回真实自然语言材料知识回答，未触发 Tool。NEEDS_INPUT 场景
+  成功，`missing_fields` 为 `aging_temperature`、`aging_time`，未执行 Tool。
+  分钟单位场景将 `90 min` 规范化为 `1.5 h`，仍缺 `aging_time`、保持
+  `NEEDS_INPUT`，未执行 Tool。
+- 完整 Tool 场景最终 Task=`SUCCEEDED`，图片、力学性能结果和自动 Explanation
+  均存在，页面无安全错误；Tool Runtime 为 Mock Runtime，真实 SEM 模型未运行。
+- 数据库审计确认 DeepSeek LLMCall 共 6 条且全部 `SUCCEEDED`：
+  `CHAT_ORCHESTRATION=5`、`TOOL_RESULT_EXPLANATION=1`；provider/model、
+  Chat/Explanation template、prompt digest、token usage 与 generation
+  parameters 均符合固定配置，非法 digest、缺失/非法 usage 和 error_code
+  记录均为 0。
+- 计划业务验收调用为 5 次，人工验收过程中额外追加“你是谁”知识问答 1 次，
+  因此累计观察值如实记录为 6，不改写为 5。本轮最终收尾新增真实 Provider
+  调用为 0。
+- 6 条记录均未暴露 `x-request-id`，`provider_request_id=null`；未使用
+  completion ID、LangChain ID、Task ID 或应用 request ID 替代。
+- 两个未采用的 untracked 自动 real-provider Runner 已删除，不进入最终提交。
+  M12B Scope 已收敛为正式报告、本进度文件与 `check-scope.ps1` 三路径；此前
+  Runner 段落仅为未采用实现的审查历史，不代表自动 Runner 完成真实验收。
+- 项目负责人确认本地配置已恢复 `LLM_ADAPTER=mock` 且 API Key 已清空。本轮
+  不读取 `.env`，不再次调用 DeepSeek。
+- 最终 Phase 1A Mock 回归：run id
+  `20260729T095845Z-1fc7cbda8a8d`，`PHASE_1A_AUTOMATION_PASSED`、
+  `failed=0`、`dynamic_artifacts_scanned=true`；Backend E2E `24 passed`、
+  Backend full `978 passed`、Mock Runtime `11 passed`、Frontend 9 files /
+  `204 passed`，Alembic、pip、typecheck/build、Scope M12A、SEM、Git 与动态
+  安全扫描均通过。
+- 最终 Scope / SEM / Git / 三路径安全扫描：`SCOPE_OK M12B`、
+  `SEM_INTEGRITY_OK`、精确 3 路径、空 staging、两项 diff check 与安全扫描
+  均为 `PASS`；3000/8000/8100 无监听残留。
+
 ## 已知风险
 
-- M12-A 只证明离线合同、应用接线和 Mock 回归；真实 Provider 的模型可用性、
-  响应质量、实际 request-id/header 行为和真实延迟必须等待 M12-B 明确授权。
+- M12-B 浏览器验收已证明真实 Provider 正常业务链路；真实错误分类和幂等合同
+  仍引用 M12-A 离线自动测试，不声称本轮通过额外真实错误调用验证。
+- Provider 在 6 次成功调用中均未暴露 `x-request-id`；该事实作为能力观察保留，
+  不使用其他标识符替代。
 - 阶段 1A Runner 依赖 Windows PowerShell、Docker Desktop/Compose 和本机
   Backend/Frontend 工具链；它不是生产守护进程。
 - start/stop 继续以严格 ownership 为先；不得宽泛终止进程或删除 volume。
-- M12-B 与 M13 均未开始；真实 SEM 模型仍未加载或运行。
+- M12-B 尚未完成项目负责人最终复审，M12 仍为 `IN PROGRESS`；M13 未开始，
+  真实 SEM 模型仍未加载或运行。
 
 ## 下一步
 
-停在 M12-A 条件性验收提交门槛；只允许精确暂存、硬审计和唯一验收提交，
-不得进入 M12-B 或 M13：
+M12 已完成项目负责人验收。等待开始 M13 前的单独授权。不得读取或配置 API Key，
+不得再次执行真实 Provider 调用；push、amend、M13 和真实 SEM 均未授权：
 
 ```text
 当前里程碑：M12
-当前工作单元：M12-A DeepSeek Provider 离线实现、应用接线与 Mock 回归
-状态：M12A_PROJECT_OWNER_ACCEPTED
+当前工作单元：M12-B 真实浏览器验收与最终三路径收尾
+状态：COMPLETE / PROJECT_OWNER_ACCEPTED
 
 M11:
 COMPLETE / PROJECT_OWNER_ACCEPTED
@@ -647,22 +918,27 @@ Phase 1A:
 COMPLETE / PROJECT_OWNER_ACCEPTED
 
 M12:
-IN PROGRESS
+COMPLETE / PROJECT_OWNER_ACCEPTED
 
 M12-A:
 COMPLETE / PROJECT_OWNER_ACCEPTED
 
 M12-B:
-NOT STARTED
+COMPLETE / PROJECT_OWNER_ACCEPTED
+
+Real Provider calls:
+6 observed LLMCalls
+- 5 planned acceptance calls
+- 1 additional manual knowledge call
 
 M13:
 NOT STARTED
 
 Staging:
-EMPTY / AUTHORIZED FOR EXACT 31-PATH GATE
+EMPTY / AUTHORIZED ONLY FOR UNIQUE M12-B ACCEPTANCE COMMIT
 
 Commit:
-AUTHORIZED SUBJECT TO STAGED-DIFF GATES
+AUTHORIZED / UNIQUE M12-B ACCEPTANCE COMMIT
 
 Push:
 NO
