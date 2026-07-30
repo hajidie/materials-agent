@@ -8,9 +8,9 @@
 |---|---|
 | 当前阶段 | 真实能力接入 |
 | 当前里程碑 | P1B2 |
-| 当前工作单元 | P1B2 门三：真实 GPU 最小推理与资源测量 |
+| 当前工作单元 | P1B2 门四 timeout 前置修订 |
 | 状态 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
-| 上一已验收工作单元 | P1B2 门二：真实权重加载兼容性 |
+| 上一已验收工作单元 | P1B2 门三：真实 GPU 最小推理与资源测量 |
 | Pre-M8 stop-loss commit | `891714dd58cf069073a7d4037be43ef66304d0ac` |
 | M8 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M8 acceptance commit | `18005944982ca5191412e06154effc67465ca3a7` |
@@ -29,19 +29,21 @@
 | P1B2 门一恢复 baseline subject | `feat: add offline zta35g runtime` |
 | P1B2 门一 acceptance commit | `c86c8eddfbb7a4b7354dd2299465cf352530623a` |
 | P1B2 门二 acceptance commit | `62e0273ff32bd1a7462abf2e9f33d898b993eb43` |
-| 暂存区 | 唯一验收提交仅允许精确暂存 7 个门三路径；提交后必须 `empty` |
+| P1B2 门三 acceptance commit | `5735384430a7556682993de8861d2a7d28889156` |
+| P1B2 门四恢复 baseline branch / HEAD | `main` / `5735384430a7556682993de8861d2a7d28889156` |
+| 暂存区 | 本轮只允许精确 7 路径验收暂存；提交后必须恢复 `empty` |
 | P1B1 验收提交范围 | 精确 26 个 allowlist 路径；原 24 路径加 Phase 1A Runner 和 compatibility 共享授权门 |
 | P1B2 门一范围 | 精确 8 个 allowlist 路径；2 个测试兼容性修订路径加 6 个收尾路径 |
-| P1B2 当前 allowlist | 保留门一/门二既有路径，并新增门三 3 个 compatibility 路径，合计精确 12 路径 |
+| P1B2 当前 allowlist | 精确 7 个路径：既有 3 个门四阻塞文档、`check-scope.ps1`、Backend config、unit config test 和既有 Runtime contract test |
 | 已确认设计基线 | 五份均未修改 |
 | 历史 migration | `0001`–`0008` 均未修改；当前唯一 head/current 为 `0009_timeline_query_indexes` |
 | `SEM/` | 未修改；门三前后 `SEM_INTEGRITY_OK`；固定 bundle 在 GPU 完成 A–D 精确 4 次受控推理并已释放 |
 | Mock Runtime | 实现和协议未修改 |
 | Real Provider calls | `6 observed LLMCalls`：5 次计划验收调用 + 1 次额外人工知识问答 |
-| Commit | 项目负责人已授权唯一门三验收提交；hash 不在文档中预填 |
+| Commit | timeout 前置修订唯一验收提交已授权；不得预填 hash |
 | Push | `NO` |
 | Amend | `NO` |
-| Git 外部动作 | 仅允许精确暂存 7 路径和创建唯一验收提交；禁止第二提交、push、amend、rebase、reset、restore、stash、clean 和切换分支 |
+| Git 外部动作 | 只允许精确 7 路径 `git add` 和一个固定主题验收提交；禁止 push、amend、第二提交、rebase、reset、restore、stash、clean 和切换分支 |
 | M10-A | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M10-B | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M10 overall | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
@@ -53,13 +55,13 @@
 | M12-A | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M12-B | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | P1B1 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
-| P1B2 | 门一 `COMPLETE / PROJECT_OWNER_ACCEPTED`；门二 `COMPLETE / PROJECT_OWNER_ACCEPTED`；门三 `COMPLETE / PROJECT_OWNER_ACCEPTED`；门四 `NOT STARTED / NOT AUTHORIZED` |
+| P1B2 | 门一、门二、门三与门四 timeout 前置修订均 `COMPLETE / PROJECT_OWNER_ACCEPTED`；门四综合验收 `NOT STARTED / AWAITING_PROJECT_OWNER_RESTART_AUTHORIZATION` |
 | M13–M16 | `HISTORICAL DECOMPOSITION / MAPPED TO P1B1 AND P1B2` |
 | M11 start baseline | `main@f426e6f23703002a648991e5bb436929df19e8e2` |
 | M11-B start baseline | `main@4ed740222238433541fb31c993dd75610634d157` |
 | M12-A start baseline | `main@f5e24dcaab4801dbeffb8400f2960c33b60b4f00` |
 | M12-B start baseline | `main@ffd29353cb4682c74fd3455425822999444bb1d2` |
-| 是否处于项目负责人暂停点 | 是，停在 P1B2 门三验收提交完成点；门四未开始、未授权。 |
+| 是否处于项目负责人暂停点 | 是，timeout 前置修订已验收；门四综合验收等待项目负责人重新授权。 |
 | 更新时间 | `2026-07-30` |
 
 ## P1B2 门一：独立环境与依赖验证
@@ -245,6 +247,77 @@
   工作区仍为精确 7 个门三路径，staging empty、untracked 0、生产代码无 diff。
   `check-scope.ps1` 与 `test_payload_and_resources.py` 的 SHA-256 与本轮开始值
   完全一致。
+
+## P1B2 门四：真实 Runtime 与综合验收
+
+- 恢复基线精确为
+  `main@5735384430a7556682993de8861d2a7d28889156`，subject
+  `test: validate zta35g minimal gpu inference`，parent
+  `62e0273ff32bd1a7462abf2e9f33d898b993eb43`；开始 working tree
+  clean、staging empty、untracked 0，两项 Git diff check 通过。
+- 项目负责人已授权门四，但离线读取
+  `backend/src/materialsagent/infrastructure/config.py` 后确认精确环境变量为
+  `ZTA35G_RUNTIME_TIMEOUT_SECONDS`，生产字段
+  `zta35g_runtime_timeout_seconds` 的合法范围是 `> 0` 且 `<= 300` 秒。
+- 现有 `LocalZTA35GToolClientAdapter` 将该配置值实际传入
+  `urllib3.Timeout(total=...)`；门四要求的 900 秒不能通过现有生产配置验证。
+  固定阻塞码为
+  `P1B2_BACKEND_RUNTIME_TIMEOUT_CONFIGURATION_BLOCKED`。
+- 按门四硬门立即停止：未修改生产配置上限，未创建 Runner、Executor、运行手册
+  或真实 E2E 测试，未启动 Docker、真实 Runtime、Backend 或 Frontend，未读取
+  API Key，真实 Provider delegate、Runtime delegate 和 DDPM sampling 均为 0。
+- 纯离线显式配置验证输出
+  `P1B2_BACKEND_RUNTIME_TIMEOUT_CONFIGURATION_BLOCKED`；随后
+  `SCOPE_OK P1B2`、`SEM_INTEGRITY_OK`、两项 Git diff check 通过，staging
+  empty，实际 diff 精确为 3 个既有 P1B2 文档路径。
+- 门四状态：
+  `BLOCKED / AWAITING_PROJECT_OWNER_REVIEW`。
+
+### P1B2 门四前置修订：Backend Runtime timeout 合法范围
+
+- 恢复基线仍为
+  `main@5735384430a7556682993de8861d2a7d28889156`，staging empty、untracked 0；
+  开始工作区精确包含上次阻塞后修改的 Phase 1B 报告、当前进度和阶段计划 3 个
+  文档路径。
+- 本轮经项目负责人独立授权，将
+  `ZTA35G_RUNTIME_TIMEOUT_SECONDS` 的生产最大值从 300 秒精确提高到 900 秒；
+  默认 10.0 秒和 `> 0` 最小值规则不变。理由是门三实测最大约 640.46 秒，
+  900 秒提供约 259 秒受控余量，当前无证据支持扩大到 1200 秒。
+- TDD RED：`1 failed, 96 passed`，唯一失败测试
+  `test_runtime_timeout_accepts_gate4_upper_boundary` 精确因原 `<= 300` 上限拒绝
+  900；单行生产修改后的聚焦 GREEN 为 `97 passed`。900 接受，901、0、负数、
+  非数字拒绝，默认值仍为 10.0 秒。
+- 既有 `backend/tests/contract/test_runtime_contract.py` 证明 900 被精确传给
+  `urllib3.Timeout(total=900)`，只有一个 fake request，`retries=False`，无
+  真实 HTTP 网络调用。`local_zta35g.py` 未修改。
+- DeepSeek timeout 独立字段默认仍为 60 秒，Provider 生产代码未修改；
+  Provider calls 为 0，未读取或设置 API Key。
+- 权威受控回归 run id `20260730t111457z-71352452`：Backend unit
+  `475 passed`、contract `155 passed`、full `992 passed`、Mock Runtime
+  `11 passed`、Backend pip check clean、compileall 通过、Alembic head/current
+  为 `0009_timeline_query_indexes` 且 check clean。Frontend 9 个 test files、
+  `204 passed`，typecheck/build 通过。
+- 为遵守根目录 `.env` 不读取边界，未直接使用会读取该文件且 Scope 参数不支持
+  P1B2 的 Phase 1A Runner；权威回归在系统临时快照中强制 Mock LLM，并只使用
+  唯一临时 PostgreSQL/MinIO 容器和受控 Mock Runtime。两个前置 harness 尝试
+  分别因测试进程环境污染和 `APP_ENV=test` 不满足既有 E2E `local` 前置而停止，
+  均不属于生产代码失败；修正夹具后只执行一次上述权威回归。
+- 固定 PostgreSQL/MinIO 镜像声明的 `VOLUME` 使三个受控尝试实际隐式创建精确
+  6 个匿名卷。最终按三个 run 的秒级创建时间、anonymous 标签和引用容器数 0
+  逐个证明所有权，只删除这 6 个本轮匿名卷；未使用 prune，既有
+  `materialsagent_*` 和 `rag_system_*` 命名卷未修改。相关容器、Mock Runtime、
+  快照和匿名卷均已清理；未启动真实 Runtime、未加载权重、未使用 GPU、未调用
+  DeepSeek。
+- 项目负责人代码审查结论：
+  `P1B2_GATE4_TIMEOUT_PREREQUISITE_CODE_REVIEW: APPROVED`。
+- 审查包内未找到权威全量回归 run 的持久化 artifact；Backend full
+  `992 passed`、Mock Runtime、Frontend 与 Alembic 全量结果沿用实施报告记录，
+  未在代码审查阶段重新独立执行。配置、Adapter、Unit、Contract、Scope 和 SEM
+  已由审查包独立核验。
+- 本前置修订状态：
+  `COMPLETE / PROJECT_OWNER_ACCEPTED`。
+- P1B2 门四综合验收：
+  `NOT STARTED / AWAITING_PROJECT_OWNER_RESTART_AUTHORIZATION`。
 
 ## P1B1 第一轮代码审查修订与验证证据
 
@@ -1187,15 +1260,16 @@ Runtime、MinIO 和 Explanation Provider 调用均不在数据库 UoW 内。Back
 
 ## 下一步
 
-停在 P1B2 门三验收提交完成点。
+创建 timeout 前置修订唯一验收提交并恢复干净工作区。
 
-未经新的项目负责人明确授权，不得开始门四，不得再次执行真实模型推理，
-不得启动真实 Runtime、Backend、PostgreSQL、MinIO、Frontend，
-不得调用 DeepSeek 或执行浏览器综合验收。不得创建第二提交、push 或 amend：
+项目负责人重新授权门四综合验收后，从新的正式 HEAD 完整重新执行门四，不得沿用
+此前阻塞尝试的执行状态。未经新的明确指令，不得进入门四阶段 A/B/C/D，不得启动
+真实 Runtime、Backend、PostgreSQL、MinIO、Frontend，不得调用 DeepSeek 或执行
+真实模型推理。不得 push、amend 或创建第二提交：
 
 ```text
 当前里程碑：P1B2
-当前工作单元：P1B2 门三：真实 GPU 最小推理与资源测量
+当前工作单元：P1B2 门四 timeout 前置修订
 状态：COMPLETE / PROJECT_OWNER_ACCEPTED
 
 M11:
@@ -1236,14 +1310,17 @@ acceptance commit:
 P1B2 门三:
 COMPLETE / PROJECT_OWNER_ACCEPTED
 
-P1B2 门四:
-NOT STARTED / NOT AUTHORIZED
+P1B2 门四 timeout 前置修订:
+COMPLETE / PROJECT_OWNER_ACCEPTED
+
+P1B2 门四综合验收:
+NOT STARTED / AWAITING_PROJECT_OWNER_RESTART_AUTHORIZATION
 
 Staging:
-EMPTY AFTER THE SOLE ACCEPTANCE COMMIT
+EXACT SEVEN-PATH ACCEPTANCE STAGING ONLY
 
 Commit:
-ONE ACCEPTANCE COMMIT AUTHORIZED / HASH REPORTED AFTER GIT CREATION
+SOLE ACCEPTANCE COMMIT AUTHORIZED / HASH NOT PREFILLED
 
 Push:
 NO

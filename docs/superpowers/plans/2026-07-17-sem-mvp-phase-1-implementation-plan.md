@@ -926,13 +926,36 @@ M13–M16 继续作为阶段 1B 的历史能力分解和验收追溯基线；实
    `COMPLETE / PROJECT_OWNER_ACCEPTED`。
 4. **门四：真实 Runtime 与综合验收。** 仅在前三门分别验收后，才允许启动真实
    Runtime，并执行 Backend、MinIO、真实 Provider、浏览器和阶段 1 综合回归。
-   状态为 `NOT STARTED / NOT AUTHORIZED`。
+   2026-07-30 项目负责人已授权执行；离线读取生产配置后确认
+   `ZTA35G_RUNTIME_TIMEOUT_SECONDS` 的现有合法上限为 300 秒，低于门四要求的
+   900 秒，命中
+   `P1B2_BACKEND_RUNTIME_TIMEOUT_CONFIGURATION_BLOCKED`。未修改生产配置上限，
+   未进入 SelfTest、真实 Runtime、综合栈或浏览器阶段。状态为
+   `BLOCKED / AWAITING_PROJECT_OWNER_REVIEW`。
+
+   **门四前置生产配置修订：** 2026-07-30 经项目负责人单独授权，只将
+   `ZTA35G_RUNTIME_TIMEOUT_SECONDS` 最大合法值从 300 秒精确提高到 900 秒；
+   默认 10.0 秒和 `> 0` 最小值规则不变。该上限以门三实测最大约 640.46 秒为
+   依据，提供约 259 秒受控余量；当前没有证据支持 1200 秒。既有
+   `LocalZTA35GToolClientAdapter` 继续使用 `urllib3.Timeout(total=配置值)`，
+   DeepSeek timeout 独立保持默认 60 秒，Runtime 自动重试仍为 0。固定设计决定为
+   `0 < ZTA35G_RUNTIME_TIMEOUT_SECONDS <= 900`，默认 10.0 秒；重新执行门四时
+   Backend → Runtime timeout 使用 900 秒，外层 execute watchdog 使用 1200 秒，
+   DeepSeek timeout 仍为 60 秒。前置修订通过
+   TDD 边界、Adapter 精确传递、Backend 全量 Mock 回归与 Frontend 离线回归后，
+   项目负责人代码审查结论为
+   `P1B2_GATE4_TIMEOUT_PREREQUISITE_CODE_REVIEW: APPROVED`，前置修订状态为
+   `COMPLETE / PROJECT_OWNER_ACCEPTED`。不得据此继续门四 A/B/C/D；门四综合
+   验收状态为 `NOT STARTED / AWAITING_PROJECT_OWNER_RESTART_AUTHORIZATION`，
+   须先形成独立验收提交并恢复干净工作区，再由项目负责人重新授权并从新的正式
+   HEAD 完整重新开始，不沿用此前阻塞尝试的执行状态。
 
 **当前状态：** P1B2 门一
 `COMPLETE / PROJECT_OWNER_ACCEPTED`；P1B2 门二
 `COMPLETE / PROJECT_OWNER_ACCEPTED`；门三
-`COMPLETE / PROJECT_OWNER_ACCEPTED`；门四仍为
-`NOT STARTED / NOT AUTHORIZED`。
+`COMPLETE / PROJECT_OWNER_ACCEPTED`；门四 timeout 前置修订
+`COMPLETE / PROJECT_OWNER_ACCEPTED`；门四综合验收
+`NOT STARTED / AWAITING_PROJECT_OWNER_RESTART_AUTHORIZATION`。
 
 ## M13：Python 3.8 模型环境与权重加载验证
 

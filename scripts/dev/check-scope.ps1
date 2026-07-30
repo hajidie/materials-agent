@@ -541,6 +541,9 @@ $milestoneAllowlists = @{
         'docs/progress/phase-1-current-status.md'
         'docs/acceptance/phase-1b-report.md'
         'scripts/dev/check-scope.ps1'
+        'backend/src/materialsagent/infrastructure/config.py'
+        'backend/tests/unit/test_config.py'
+        'backend/tests/contract/test_runtime_contract.py'
         'environments/materialsagent-zta35g.yml'
         'zta35g-runtime/requirements-win-py38.lock.txt'
     )

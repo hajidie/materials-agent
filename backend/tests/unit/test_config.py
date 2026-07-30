@@ -253,6 +253,57 @@ def test_runtime_configuration_is_loopback_only_and_secret_safe() -> None:
     assert secret not in repr(config)
 
 
+def test_runtime_timeout_defaults_remain_independent_from_deepseek() -> None:
+    from materialsagent.infrastructure.config import load_settings
+
+    settings = load_settings({})
+
+    assert settings.zta35g_runtime_timeout_seconds == 10.0
+    assert settings.deepseek_timeout_seconds == 60.0
+
+
+def test_runtime_timeout_accepts_gate4_upper_boundary() -> None:
+    from materialsagent.infrastructure.config import (
+        load_settings,
+        parse_zta35g_runtime_config,
+    )
+
+    settings = load_settings(
+        {
+            "ZTA35G_RUNTIME_URL": "http://127.0.0.1:8100",
+            "ZTA35G_RUNTIME_TOKEN": "runtime-test-secret",
+            "ZTA35G_RUNTIME_TIMEOUT_SECONDS": "900",
+        }
+    )
+
+    parsed = parse_zta35g_runtime_config(settings)
+
+    assert parsed is not None
+    assert settings.zta35g_runtime_timeout_seconds == 900.0
+    assert parsed.timeout_seconds == 900.0
+    assert settings.deepseek_timeout_seconds == 60.0
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["901", "0", "-1", "not-a-number"],
+    ids=("above-upper-bound", "zero", "negative", "non-numeric"),
+)
+def test_runtime_timeout_rejects_values_outside_gate4_boundary(
+    value: str,
+) -> None:
+    from materialsagent.infrastructure.config import (
+        ConfigurationError,
+        load_settings,
+    )
+
+    with pytest.raises(
+        ConfigurationError,
+        match=r"^Invalid application configuration\.$",
+    ):
+        load_settings({"ZTA35G_RUNTIME_TIMEOUT_SECONDS": value})
+
+
 @pytest.mark.parametrize(
     "values",
     [

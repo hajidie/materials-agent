@@ -173,11 +173,15 @@ def _json_response(payload: dict[str, object], status: int = 200) -> _Response:
     return _Response(status=status, data=json.dumps(payload).encode("utf-8"))
 
 
-def _tool_with_pool(pool: _Pool):
+def _tool_with_pool(
+    pool: _Pool,
+    *,
+    timeout_seconds: float = 2.5,
+):
     adapter = LocalZTA35GToolClientAdapter(
         base_url="http://127.0.0.1:8100",
         token=TOKEN,
-        timeout_seconds=2.5,
+        timeout_seconds=timeout_seconds,
         pool=pool,
     )
     registry = build_tool_registry(adapter)
@@ -287,6 +291,26 @@ def test_material_tool_sends_only_allowed_runtime_fields_and_maps_output() -> No
     }
     assert forbidden.isdisjoint(request_payload)
     assert response.released is True
+
+
+def test_adapter_passes_900_seconds_to_one_unretried_request() -> None:
+    pool = _Pool([_json_response(_success_payload())])
+    registered, _ = _tool_with_pool(pool, timeout_seconds=900.0)
+    validated = registered.tool.validate_input(_normalized_input(), seed=42)
+
+    output = registered.tool.execute(validated, _context())
+
+    assert output.status == "SUCCEEDED"
+    assert len(pool.calls) == 1
+    call = pool.calls[0]
+    timeout = call["timeout"]
+    assert isinstance(timeout, urllib3.Timeout)
+    assert timeout.total == 900.0
+    assert timeout.connect_timeout == 900.0
+    read_timeout = timeout.clone()
+    read_timeout.start_connect()
+    assert 899.0 < read_timeout.read_timeout <= 900.0
+    assert call["retries"] is False
 
 
 @pytest.mark.parametrize(

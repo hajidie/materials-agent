@@ -442,3 +442,119 @@ Runtime 验收。
 
 门三最终状态：
 `P1B2_GPU_INFERENCE_GATE_PROJECT_OWNER_ACCEPTED`。
+
+## 十三、P1B2 门四真实 Runtime 与综合验收
+
+### 13.1 恢复基线
+
+- Branch：`main`。
+- HEAD：`5735384430a7556682993de8861d2a7d28889156`。
+- Subject：`test: validate zta35g minimal gpu inference`。
+- Parent：`62e0273ff32bd1a7462abf2e9f33d898b993eb43`。
+- 开始 working tree clean、staging empty、untracked 0；`git diff --check` 与
+  `git diff --cached --check` 均无输出。
+
+### 13.2 Backend Runtime timeout 配置阻塞
+
+- 门四目标 Backend → Runtime execute timeout 为 900 秒。
+- 实际生产环境变量名为 `ZTA35G_RUNTIME_TIMEOUT_SECONDS`。
+- `AppSettings.zta35g_runtime_timeout_seconds` 当前验证范围为 `> 0` 且
+  `<= 300` 秒。
+- `parse_zta35g_runtime_config()` 将该字段写入
+  `ZTA35GRuntimeConfig.timeout_seconds`；现有
+  `LocalZTA35GToolClientAdapter` 随后将其实际传入
+  `urllib3.Timeout(total=...)`。
+- 因生产配置最大值低于 900 秒，固定阻塞码为
+  `P1B2_BACKEND_RUNTIME_TIMEOUT_CONFIGURATION_BLOCKED`。
+- DeepSeek timeout 仍为独立的 `DEEPSEEK_TIMEOUT_SECONDS`，默认 60 秒；
+  本轮没有把 Provider timeout 改成 Runtime timeout。
+
+### 13.3 停止边界
+
+- 未修改 `backend/src/**`、`zta35g-runtime/src/**`、`frontend/src/**`、
+  `SEM/**`、migration、依赖锁、Docker Compose 或五份设计基线。
+- 未创建 `run-phase-1b.ps1`、`run-phase-1b.py`、真实 E2E 测试或运行手册。
+- 未启动 Docker、PostgreSQL、MinIO、真实 Runtime、Backend 或 Frontend。
+- 未读取或发现 `DEEPSEEK_API_KEY`、Runtime Token 或其他 Secret。
+- Provider delegate：`0 / 5`。
+- Runtime delegate：`0 / 2`。
+- DDPM sampling：`0 / 2`。
+- 未进入阶段 A SelfTest、阶段 B 真实 Runtime、阶段 C 浏览器 checkpoint 或
+  阶段 D 回归。
+
+### 13.4 当前状态
+
+- 纯离线显式配置验证输出
+  `P1B2_BACKEND_RUNTIME_TIMEOUT_CONFIGURATION_BLOCKED`。
+- `SCOPE_OK P1B2`。
+- `SEM_INTEGRITY_OK`：57 files、`2043071133 bytes`、aggregate fingerprint
+  `62bbb0878ed5d659490755e401fba0e3e09f1f36e3a67667ea04227927546b4a`。
+- `git diff --check` 与 `git diff --cached --check` 通过；staging empty。
+- 实际 diff 精确为本报告、当前进度和阶段计划 3 个文档路径。
+
+P1B2 门四：
+`BLOCKED / AWAITING_PROJECT_OWNER_REVIEW`。
+
+本次门四尝试失败最终状态（历史）：
+`P1B2_GATE4_BLOCKED`。
+
+### 13.5 P1B2 门四前置生产配置修订
+
+- 阻塞原因：门三实测单次真实推理最大耗时约 640.46 秒，而生产
+  `ZTA35G_RUNTIME_TIMEOUT_SECONDS` 上限为 300 秒，无法合法采用门四要求的
+  900 秒 Backend → Runtime execute timeout。
+- 经项目负责人单独授权，只把
+  `AppSettings.zta35g_runtime_timeout_seconds` 的最大合法值从 300 秒精确提高到
+  900 秒；默认值保持 10.0 秒，最小值规则保持 `> 0`，字段名和正常环境解析入口
+  均未改变。900 合法，901、0、负数和非数字值均由生产配置校验拒绝。
+- `LocalZTA35GToolClientAdapter` 生产代码未修改。既有 fake PoolManager 合同测试
+  证明配置值 900 被原样传给 `urllib3.Timeout(total=900)`，只发出一次 fake
+  request，`retries=False`，没有真实网络调用。
+- DeepSeek 生产代码未修改；独立字段 `DEEPSEEK_TIMEOUT_SECONDS` 默认仍为
+  60 秒，`max_retries=0`。本轮 DeepSeek Provider calls 为 0，未读取或设置
+  API Key。
+- TDD RED 为 `1 failed, 96 passed`；唯一失败测试
+  `test_runtime_timeout_accepts_gate4_upper_boundary` 精确因原生产约束
+  `<= 300` 拒绝 900。单行生产修改后的聚焦 GREEN 为 `97 passed`，完整
+  contract 为 `155 passed`。
+- 权威受控离线回归 run id 为
+  `20260730t111457z-71352452`。为遵守根目录 `.env` 不读取边界，没有直接调用会
+  读取该文件且 Scope 参数不支持 P1B2 的 Phase 1A Runner；改用基于
+  `git archive HEAD` 加本轮三个代码/测试 diff 的系统临时快照。该 Run 强制
+  Mock LLM，启动唯一 PostgreSQL/MinIO 容器和受控 Mock Runtime，
+  结果为 Backend unit `475 passed`、contract `155 passed`、Backend full
+  `992 passed`、Mock Runtime `11 passed`、Backend `pip check` clean、
+  `compileall` 通过、Alembic 唯一 head/current
+  `0009_timeline_query_indexes` 且 `alembic check` clean。两个前置 harness
+  尝试分别因测试进程环境污染和 `APP_ENV=test` 不满足既有 E2E `local` 前置而
+  停止，均不属于生产代码失败；修正受控夹具后只执行上述一次权威回归。
+  三次受控尝试的临时快照、容器和 Mock Runtime 均已清理。
+- 固定 PostgreSQL 与 MinIO 镜像均声明 `VOLUME`，因此三个 Run 实际隐式创建了
+  精确 6 个匿名卷，而非 0 个。清理审计按三个唯一 run 的秒级创建时间、Docker
+  anonymous 标签和引用容器数 0 逐个证明所有权后，仅删除这 6 个精确匿名卷；
+  未使用 volume prune，既有 `materialsagent_*` 与 `rag_system_*` 命名卷未修改。
+- Frontend test 为 9 个 test files、`204 passed`；typecheck 与 build 均通过。
+  Frontend 生产代码未修改。
+- 本轮真实 Runtime 未启动、真实模型未加载、权重打开 0、CUDA Tensor 0、
+  DDPM 0、SVR predict 0、真实 Provider 0。没有继续门四阶段 A/B/C/D，也没有
+  消耗门四 Runtime 或 Provider 调用预算。
+
+### 13.6 P1B2 门四 timeout 前置修订项目负责人验收
+
+- 项目负责人代码审查结论：
+  `P1B2_GATE4_TIMEOUT_PREREQUISITE_CODE_REVIEW: APPROVED`。
+- 项目负责人确认生产修改仅为 ZTA35G Runtime timeout 最大合法值从 300 秒提高
+  到 900 秒；默认值 10.0 秒和 `> 0` 最小值规则均未改变。
+- `LocalZTA35GToolClientAdapter` 未修改；DeepSeek timeout 仍为独立的 60 秒，
+  DeepSeek 生产代码未修改。
+- 本次验收未启动真实 Runtime，未加载真实模型，真实 Provider calls 为 0。
+- 审查包内未找到权威全量回归 run 的持久化 artifact；因此 Backend full
+  `992 passed`、Mock Runtime、Frontend 与 Alembic 全量结果沿用实施报告记录，
+  未在代码审查阶段重新独立执行。配置、Adapter、Unit、Contract、Scope 和 SEM
+  已由审查包独立核验。
+
+P1B2 门四 timeout 前置修订：
+`COMPLETE / PROJECT_OWNER_ACCEPTED`。
+
+P1B2 门四综合验收：
+`NOT STARTED / AWAITING_PROJECT_OWNER_RESTART_AUTHORIZATION`。

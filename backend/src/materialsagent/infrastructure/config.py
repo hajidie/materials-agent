@@ -74,7 +74,7 @@ class AppSettings(BaseSettings):
 
     zta35g_runtime_url: str | None = None
     zta35g_runtime_token: SecretStr | None = None
-    zta35g_runtime_timeout_seconds: float = Field(default=10.0, gt=0, le=300)
+    zta35g_runtime_timeout_seconds: float = Field(default=10.0, gt=0, le=900)
     m5_dev_routes_enabled: bool = False
     timeline_cursor_signing_key: SecretStr | None = None
 
