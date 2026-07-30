@@ -8,7 +8,7 @@
 |---|---|
 | 当前阶段 | 真实能力接入 |
 | 当前里程碑 | P1B2 |
-| 当前工作单元 | P1B2 门二：真实权重加载兼容性 |
+| 当前工作单元 | P1B2 门三：真实 GPU 最小推理与资源测量 |
 | 状态 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | 上一已验收工作单元 | P1B2 门二：真实权重加载兼容性 |
 | Pre-M8 stop-loss commit | `891714dd58cf069073a7d4037be43ef66304d0ac` |
@@ -28,19 +28,20 @@
 | P1B2 门一恢复 baseline branch / HEAD | `main` / `7367b410f800b63efa9b9d4ba94095a3a45efb7a` |
 | P1B2 门一恢复 baseline subject | `feat: add offline zta35g runtime` |
 | P1B2 门一 acceptance commit | `c86c8eddfbb7a4b7354dd2299465cf352530623a` |
-| 暂存区 | 验收提交完成后 `empty`；只允许精确 5 路径暂存一次 |
+| P1B2 门二 acceptance commit | `62e0273ff32bd1a7462abf2e9f33d898b993eb43` |
+| 暂存区 | 唯一验收提交仅允许精确暂存 7 个门三路径；提交后必须 `empty` |
 | P1B1 验收提交范围 | 精确 26 个 allowlist 路径；原 24 路径加 Phase 1A Runner 和 compatibility 共享授权门 |
 | P1B2 门一范围 | 精确 8 个 allowlist 路径；2 个测试兼容性修订路径加 6 个收尾路径 |
-| P1B2 当前 allowlist | 保留门一 8 路径并新增 `test_model_loading.py`，合计精确 9 路径 |
+| P1B2 当前 allowlist | 保留门一/门二既有路径，并新增门三 3 个 compatibility 路径，合计精确 12 路径 |
 | 已确认设计基线 | 五份均未修改 |
 | 历史 migration | `0001`–`0008` 均未修改；当前唯一 head/current 为 `0009_timeline_query_indexes` |
-| `SEM/` | 未修改；前置和最终 `SEM_INTEGRITY_OK`；四份真实权重与完整 bundle 均仅在 CPU 受控加载，未执行推理 |
+| `SEM/` | 未修改；门三前后 `SEM_INTEGRITY_OK`；固定 bundle 在 GPU 完成 A–D 精确 4 次受控推理并已释放 |
 | Mock Runtime | 实现和协议未修改 |
 | Real Provider calls | `6 observed LLMCalls`：5 次计划验收调用 + 1 次额外人工知识问答 |
-| Commit | 仅允许本轮唯一验收提交；实际 hash 不在提交前预填，由 Git 创建后报告 |
+| Commit | 项目负责人已授权唯一门三验收提交；hash 不在文档中预填 |
 | Push | `NO` |
 | Amend | `NO` |
-| Git 外部动作 | 只允许精确 5 路径 add 和唯一验收 commit；禁止 push、amend、第二提交、rebase、reset、restore、stash、clean 和切换分支 |
+| Git 外部动作 | 仅允许精确暂存 7 路径和创建唯一验收提交；禁止第二提交、push、amend、rebase、reset、restore、stash、clean 和切换分支 |
 | M10-A | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M10-B | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M10 overall | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
@@ -52,13 +53,13 @@
 | M12-A | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M12-B | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | P1B1 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
-| P1B2 | 门一 `COMPLETE / PROJECT_OWNER_ACCEPTED`；门二 `COMPLETE / PROJECT_OWNER_ACCEPTED`；门三、门四 `NOT STARTED / NOT AUTHORIZED` |
+| P1B2 | 门一 `COMPLETE / PROJECT_OWNER_ACCEPTED`；门二 `COMPLETE / PROJECT_OWNER_ACCEPTED`；门三 `COMPLETE / PROJECT_OWNER_ACCEPTED`；门四 `NOT STARTED / NOT AUTHORIZED` |
 | M13–M16 | `HISTORICAL DECOMPOSITION / MAPPED TO P1B1 AND P1B2` |
 | M11 start baseline | `main@f426e6f23703002a648991e5bb436929df19e8e2` |
 | M11-B start baseline | `main@4ed740222238433541fb31c993dd75610634d157` |
 | M12-A start baseline | `main@f5e24dcaab4801dbeffb8400f2960c33b60b4f00` |
 | M12-B start baseline | `main@ffd29353cb4682c74fd3455425822999444bb1d2` |
-| 是否处于项目负责人暂停点 | 是，停在 P1B2 门二验收提交完成点；门三和门四未开始、未授权。 |
+| 是否处于项目负责人暂停点 | 是，停在 P1B2 门三验收提交完成点；门四未开始、未授权。 |
 | 更新时间 | `2026-07-30` |
 
 ## P1B2 门一：独立环境与依赖验证
@@ -167,6 +168,83 @@
   和 3076 正确但类型错误；canary 自测试分别触发 module-call 与直接 forward。
   这些负例均不加载真实权重。Runtime 生产源码、Backend、Frontend、Mock Runtime、
   `SEM/`、环境/锁文件、五份设计基线和 migration 均未修改。
+
+## P1B2 门三：真实 GPU 最小推理与资源测量
+
+- 恢复基线精确为
+  `main@62e0273ff32bd1a7462abf2e9f33d898b993eb43`；工作区、staging 和
+  untracked 均为空。主机开始空闲 `8.610 GiB`，GPU 为 RTX 3060 Laptop /
+  driver `595.79` / CC `8.6` / `6144 MiB`，开始 free `5994 MiB`、计算进程 0。
+- 双重授权只传给目标 Python 3.8 pytest 子进程，父进程四变量随后恢复；默认回归
+  前再次确认均为 UNSET。共享正式 Engine / Components / bundle 只加载和迁移一次，
+  DDPM/DenseNet 位于 `cuda:0`，两个 SVR 保持 CPU。
+- 固定输入为 solution `1000 °C / 3.0 h`、aging `730 °C / 3.0 h`、
+  seed `20260730`，固定 `1 / 2.0 / 1000`。A/B/C/D 完整推理耗时为
+  `515.474634 / 594.399754 / 635.616855 / 640.459573 s`；预算精确
+  `4/4`，无重试、无第五次。
+- 四次 SEM 均为 `<f4`、`[512,512]`、二维、C contiguous、有限、非全常数，
+  min/max/mean/std 为
+  `-1.0 / 1.0 / 0.09459365904331207 / 0.43903008103370667`。
+  Yield Strength 为 `413.39765052163557 MPa`，Elongation 为
+  `2.9387915447083017 %`，均有限且大于 0、未 clipping。
+- A vs C、C vs D SEM 均 exact/allclose 且差值 0；B vs C、C vs D 两项性能
+  也精确相等。观察结果不扩展为跨硬件保证或生产 SLA。
+- 计数为 Engine 4、SEM/DDPM 4、mechanical/DenseNet/Yield/Elongation 各 3，
+  fit/score/backward/optimizer 均 0。每次 torch peak allocated/reserved 均为
+  `1141142016/1761607680 bytes`；nvidia-smi peak used 最大 `3093 MiB`，
+  主机最低空闲 `5150273536 bytes`，未触发安全停止门。
+- C payload `.npy` `1048704 bytes`、Base64 `1398272 chars`、JSON
+  `1399715 bytes`、4 MiB 余量 `2794589 bytes`，`allow_pickle=False`
+  roundtrip 与 SHA-256 均通过。
+- 受控产物位于
+  `tmp/p1b2-gpu-inference/20260730T082132Z-c339fc11686f/`；NPY、review-only
+  PNG、safe summary 和 manifest 均有固定 SHA-256。PNG 为 L/512×512/无 alpha，
+  只用于项目负责人观察形貌。
+- 双授权测试 `2 passed in 2396.89s (39:56)`；授权恢复后的两套默认回归均为
+  `143 passed, 3 skipped`，目标 pip check 和两套 compileall 通过。
+  真实 pytest 在 `2396.89 s` 内正常完成；45 分钟外层 timeout 的具体执行配置
+  未持久化进入审查包，不把 watchdog 作为本门自动化通过证据。推理后 SEM 指纹
+  不变。
+- Engine close 后、测试进程仍存活时，`summary.json` 观察到 CUDA context
+  尚存在，GPU used `1917 MiB`、compute process count `1`；pytest 子进程退出后
+  的外部只读检查为主机 free `8.927 GiB`、GPU used/free `0/5994 MiB`、
+  compute process count `0`。两组数据分别代表对象关闭与进程退出，不把 Engine
+  close 表述为同进程内销毁 CUDA context。
+- 生产 Runtime、Backend、Frontend、Mock Runtime、环境/锁、设计基线、
+  migration 与 `SEM/` 未修改；真实 Runtime、Backend、PostgreSQL、MinIO、
+  Frontend、DeepSeek 和浏览器均未启动或调用。
+- 当前状态：
+  `COMPLETE / PROJECT_OWNER_ACCEPTED`。门四保持
+  `NOT STARTED / NOT AUTHORIZED`。
+
+## P1B2 门三代码审查修订
+
+- 本轮只修订 compatibility 测试 harness 的加载失败清理和门三证据措辞；三项真实
+  授权变量保持未设置，真实权重打开、CUDA Tensor、DDPM 采样、forward、SVR
+  predict 和 GPU 迁移均为 0，既有 A–D 真实 GPU 结果未重跑。
+- sampler 在 `start()` 成功后由 `finally` 保证精确尝试一次 `stop()`；停止会终止
+  轮询进程、join host/GPU 线程并验证无存活项，失败固定为
+  `P1B2_RESOURCE_SAMPLER_SHUTDOWN_FAILED`。重复停止不再 terminate/kill/join，
+  也不生成第二组摘要。
+- 加载 OOM 只按明确存在的 `torch.cuda.OutOfMemoryError` 设置标志；Engine 包装
+  后由 harness 检查该标志，按 sampler stop、Engine close、`gc.collect()`、
+  `torch.cuda.empty_cache()` 顺序清理，最终固定为 `CUDA_OUT_OF_MEMORY`。
+  普通加载错误独立为 `P1B2_ENGINE_LOAD_FAILED`，不输出原异常正文。
+- 离线 TDD RED 为 6 个 helper fixture 缺失 setup error；GREEN 增至 7 个纯
+  fake/helper 用例。目标 Python 3.8 与 Backend Python 聚焦测试均为
+  `7 passed, 1 deselected`；两套默认回归均为 `150 passed, 3 skipped`，
+  三项 skip 精确对应未授权真实 compatibility。目标 pip check 和两套 compileall
+  均通过。
+- Engine close 与 pytest 退出资源状态、以及未持久化的 45 分钟 watchdog 配置，
+  已在 Phase 1B 报告中分层陈述。本轮没有把离线失败路径修订写成新的真实 GPU
+  推理；项目负责人最终审查结论为
+  `P1B2_GPU_INFERENCE_CODE_REVIEW: APPROVED`，门三为
+  `COMPLETE / PROJECT_OWNER_ACCEPTED`，门四继续
+  `NOT STARTED / NOT AUTHORIZED`。
+- 最终 `SEM_INTEGRITY_OK`、`SCOPE_OK P1B2`、两项 Git diff check 均通过；
+  工作区仍为精确 7 个门三路径，staging empty、untracked 0、生产代码无 diff。
+  `check-scope.ps1` 与 `test_payload_and_resources.py` 的 SHA-256 与本轮开始值
+  完全一致。
 
 ## P1B1 第一轮代码审查修订与验证证据
 
@@ -1082,9 +1160,9 @@ Runtime、MinIO 和 Explanation Provider 调用均不在数据库 UoW 内。Back
 
 ## 已知风险
 
-- P1B2 门二只证明四份固定真实权重和完整 bundle 的 CPU 加载兼容性；没有证明
-  DDPM 采样、模型 forward、SVR predict、GPU 显存承载或真实性能预测。实际 GPU
-  仍为 6 GiB RTX 3060 Laptop，相关风险必须留到另行授权的门三验证。
+- P1B2 门三只是在当前单机、固定输入、4 次串行样本上证明 6 GiB RTX 3060
+  Laptop 可承载；单次完整推理约 8.6–10.7 分钟，不是生产 SLA，也没有证明并发、
+  HTTP Runtime 或综合 E2E。
 - DenseNet 的 121 个旧 BatchNorm counter 依赖 PyTorch 1.13.1 内置版本兼容路径；
   compatibility 测试已锁定精确集合和 strict=True 结果，生产 loader 没有放宽。
 - 正式 loader 是无状态工厂；为遵守“不创建第二套完整模型对象”，本门未执行同一
@@ -1102,19 +1180,22 @@ Runtime、MinIO 和 Explanation Provider 调用均不在数据库 UoW 内。Back
 - 阶段 1A Runner 依赖 Windows PowerShell、Docker Desktop/Compose 和本机
   Backend/Frontend 工具链；它不是生产守护进程。
 - start/stop 继续以严格 ownership 为先；不得宽泛终止进程或删除 volume。
-- P1B2 门二完整 CPU bundle 已成功加载和关闭；Module `__call__`、任何直接
-  forward、SVR predict、PCA transform、fit、score、DDPM 采样和 GPU 模型迁移
-  均未执行。
+- 同 seed 在本次同机观察中精确一致，但不得把它表述为跨驱动、跨 PyTorch 或跨硬件
+  的确定性保证。review-only PNG 也不作为 Backend 正式 PNG 编码一致性证据。
+- 开始空闲主机内存仅约 `8.610 GiB`，低于 9 GiB 推荐值；虽然本次最低仍有约
+  `4.797 GiB`，后续门四若资源背景不同必须重新做自己的授权前置门。
 
 ## 下一步
 
-停在 P1B2 门二验收提交完成点。未经新的项目负责人明确授权，不得开始门三，不得
-设置 GPU 授权变量，不得执行模型 forward、SVR predict、DDPM、真实 Runtime、
-Backend、MinIO、浏览器或 DeepSeek 综合验收。不得 push、amend 或创建第二个提交：
+停在 P1B2 门三验收提交完成点。
+
+未经新的项目负责人明确授权，不得开始门四，不得再次执行真实模型推理，
+不得启动真实 Runtime、Backend、PostgreSQL、MinIO、Frontend，
+不得调用 DeepSeek 或执行浏览器综合验收。不得创建第二提交、push 或 amend：
 
 ```text
 当前里程碑：P1B2
-当前工作单元：P1B2 门二：真实权重加载兼容性
+当前工作单元：P1B2 门三：真实 GPU 最小推理与资源测量
 状态：COMPLETE / PROJECT_OWNER_ACCEPTED
 
 M11:
@@ -1149,15 +1230,17 @@ c86c8eddfbb7a4b7354dd2299465cf352530623a
 
 P1B2 门二:
 COMPLETE / PROJECT_OWNER_ACCEPTED
+acceptance commit:
+62e0273ff32bd1a7462abf2e9f33d898b993eb43
 
 P1B2 门三:
-NOT STARTED / NOT AUTHORIZED
+COMPLETE / PROJECT_OWNER_ACCEPTED
 
 P1B2 门四:
 NOT STARTED / NOT AUTHORIZED
 
 Staging:
-EMPTY AFTER ACCEPTANCE COMMIT
+EMPTY AFTER THE SOLE ACCEPTANCE COMMIT
 
 Commit:
 ONE ACCEPTANCE COMMIT AUTHORIZED / HASH REPORTED AFTER GIT CREATION

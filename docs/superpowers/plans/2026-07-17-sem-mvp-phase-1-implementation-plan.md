@@ -912,15 +912,26 @@ M13–M16 继续作为阶段 1B 的历史能力分解和验收追溯基线；实
    `LoadedModelBundle._closed=false → true` 和弱引用清理为证据，不声称存在
    `is_loaded()`。状态为 `COMPLETE / PROJECT_OWNER_ACCEPTED`。
 3. **门三：真实 GPU 最小推理与资源测量。** 仅在门二验收和新的 GPU 推理授权后，
-   才允许按固定参数执行最小 DDPM/DenseNet/SVR 链路并记录资源事实。状态为
-   `NOT STARTED / NOT AUTHORIZED`。
+   才允许按固定参数执行最小 DDPM/DenseNet/SVR 链路并记录资源事实。固定参数为
+   `num_samples=1`、`guide_scale=2.0`、`timesteps=1000`；已按
+   A（SEM）、B（性能）、C（两项）和 D（C 的同 seed 重复）完成精确四次
+   512×512 / 1000 步采样；共享 Engine 只加载一次，未重试、未尝试第五次，
+   RTX 3060 Laptop 6 GiB 可承载，单次完整推理约 8.6–10.7 分钟，
+   nvidia-smi peak used 最大约 3093 MiB。payload、资源、重复性和受控复核产物
+   均已记录。代码审查修订只补强离线测试
+   harness 的加载失败清理、精确 OOM 映射和证据措辞，不重新执行真实 GPU 推理。
+   两套解释器的离线 helper 聚焦测试均为 7 passed；清除授权后的默认回归均为
+   150 passed、3 个真实 compatibility skip。
+   状态为
+   `COMPLETE / PROJECT_OWNER_ACCEPTED`。
 4. **门四：真实 Runtime 与综合验收。** 仅在前三门分别验收后，才允许启动真实
    Runtime，并执行 Backend、MinIO、真实 Provider、浏览器和阶段 1 综合回归。
    状态为 `NOT STARTED / NOT AUTHORIZED`。
 
 **当前状态：** P1B2 门一
 `COMPLETE / PROJECT_OWNER_ACCEPTED`；P1B2 门二
-`COMPLETE / PROJECT_OWNER_ACCEPTED`；门三、门四仍为
+`COMPLETE / PROJECT_OWNER_ACCEPTED`；门三
+`COMPLETE / PROJECT_OWNER_ACCEPTED`；门四仍为
 `NOT STARTED / NOT AUTHORIZED`。
 
 ## M13：Python 3.8 模型环境与权重加载验证

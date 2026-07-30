@@ -533,7 +533,10 @@ $milestoneAllowlists = @{
     P1B2 = @(
         'zta35g-runtime/tests/unit/test_inference.py'
         'zta35g-runtime/tests/unit/test_model_bundle.py'
+        'zta35g-runtime/tests/compatibility/conftest.py'
         'zta35g-runtime/tests/compatibility/test_model_loading.py'
+        'zta35g-runtime/tests/compatibility/test_minimal_inference.py'
+        'zta35g-runtime/tests/compatibility/test_payload_and_resources.py'
         'docs/superpowers/plans/2026-07-17-sem-mvp-phase-1-implementation-plan.md'
         'docs/progress/phase-1-current-status.md'
         'docs/acceptance/phase-1b-report.md'

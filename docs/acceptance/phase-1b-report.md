@@ -3,7 +3,7 @@
 ## 一、恢复基线
 
 - 报告初始工作单元：P1B2 门一——独立环境与依赖验证。
-- 当前工作单元：P1B2 门二——真实权重加载兼容性。
+- 当前工作单元：P1B2 门三——真实 GPU 最小推理与资源测量。
 - 开始分支：`main`。
 - 开始 HEAD：`7367b410f800b63efa9b9d4ba94095a3a45efb7a`。
 - 开始提交主题：`feat: add offline zta35g runtime`。
@@ -266,3 +266,179 @@ Runtime 验收。
 
 门二最终状态：
 `P1B2_MODEL_LOADING_GATE_PROJECT_OWNER_ACCEPTED`。
+
+## 十二、P1B2 门三真实 GPU 最小推理与资源测量
+
+### 12.1 恢复基线、授权与资源门
+
+- 恢复基线精确为
+  `main@62e0273ff32bd1a7462abf2e9f33d898b993eb43`，subject
+  `test: verify zta35g model loading compatibility`，parent
+  `c86c8eddfbb7a4b7354dd2299465cf352530623a`；开始工作区干净、staging
+  empty、untracked 为 0。
+- 真实会话只在目标 Python 3.8 子进程中验证 REAL_MODEL 与 GPU 双重授权、
+  `materialsagent-zta35g` 环境和固定模型根。父进程四个相关变量在开始前均为
+  UNSET，启动子进程后立即恢复，真实会话结束和默认回归前再次确认均为 UNSET。
+- 主机总物理内存 `16539455488 bytes`（`15.404 GiB`）；开始空闲
+  `9245163520 bytes`（约 `8.610 GiB`），加载前空闲
+  `9037590528 bytes`（约 `8.417 GiB`），满足 8 GiB 硬门但低于 9 GiB
+  推荐值。四次推理中的最低空闲内存为 A 的 `5150273536 bytes`
+  （约 `4.797 GiB`），未触发 2 GiB 停止门；pytest 进程退出后的空闲内存为
+  `9585262592 bytes`（`8.927 GiB`）。
+- GPU 为 NVIDIA GeForce RTX 3060 Laptop GPU，driver `595.79`，
+  Compute Capability `8.6`，总显存 `6144 MiB`；开始 used/free 为
+  `0/5994 MiB`，计算进程 0，满足 5500 MiB 空闲硬门。Engine close 后、测试
+  进程仍存活时，`summary.json` 观察到 CUDA context 尚存在，GPU used
+  `1917 MiB`、compute process count `1`。pytest 子进程退出后的外部只读检查为
+  used/free `0/5994 MiB`、compute process count `0`。两组数据分别代表对象关闭
+  和进程退出，不把 Engine close 表述为同进程内销毁 CUDA context。
+- 推理前和推理后 `SEM_INTEGRITY_OK` 均为 57 files、
+  `2043071133 bytes`、aggregate fingerprint
+  `62bbb0878ed5d659490755e401fba0e3e09f1f36e3a67667ea04227927546b4a`；
+  四份固定文件大小和 SHA-256 继续精确匹配门二值，`SEM/` 无 Git 变更。
+
+### 12.2 固定输入、正式路径与调用预算
+
+- 唯一输入为 solution `1000 °C / 3.0 h`、aging `730 °C / 3.0 h`；
+  seed `20260730`，固定 `num_samples=1`、`guide_scale=2.0`、
+  `timesteps=1000`。普通调用方仍不能覆盖后三项。
+- 通过正式 `ZTA35GInferenceEngine` / `TorchZTA35GComponents` /
+  `ModelBundleLoader` 路径加载一次固定
+  `zta35g-sem-original-bundle`。CPU bundle load `3.867348 s`，GPU
+  move/Engine load 阶段 `2.683464 s`，完整 Engine load `6.550812 s`。
+- Engine device 为 `cuda`；DDPM 与 DenseNet 全部 parameters/buffers 位于
+  `cuda:0`，SVR 保持 CPU。未使用 FP16、BF16、AMP、量化、CPU fallback、
+  optimizer 或 backward。
+- 固定序列为 A `["sem_image"]`、B `["mechanical_properties"]`、
+  C `["sem_image","mechanical_properties"]`、D 为 C 的同 seed 重复。
+  `engine_execute=4`、SEM generation/DDPM sampling `4/4`、mechanical /
+  DenseNet / Yield predict / Elongation predict 均为 `3`，fit/score/backward/
+  optimizer 均为 `0`。预算精确 `4/4`，无重试，未尝试第 5 次。
+- A 不执行 DenseNet/SVR；B 内部生成一张 SEM，但完成输出集合仅为
+  mechanical_properties，内部图片角色为 `intermediate_sem` 且
+  `requested_output=false`；C 和 D 各只生成一张 SEM 并复用到性能链。
+
+### 12.3 真实输出与重复性
+
+- 四次 SEM 均为 NumPy `<f4` / float32、`[512,512]`、二维、C contiguous、
+  NaN 0、Inf 0、非全常数。固定图像统计均为 minimum `-1.0`、maximum
+  `1.0`、mean `0.09459365904331207`、standard deviation
+  `0.43903008103370667`。
+- B、C、D 的原始性能值均为 Yield Strength
+  `413.39765052163557 MPa`、Elongation `2.9387915447083017 %`；
+  两者有限且大于 0，没有 clipping、替换或异常值修复。
+- A vs C SEM：exact `true`、allclose `true`、max/mean absolute
+  difference `0.0/0.0`。B vs C 两项性能绝对差均为 `0.0`。
+- C vs D SEM：exact `true`、allclose `true`、max/mean absolute
+  difference `0.0/0.0`；Yield 与 Elongation 均 exact `true`、绝对差
+  `0.0`。这是本机本次同 seed 观察，不扩展为跨硬件确定性承诺。
+
+### 12.4 耗时与资源
+
+- 完整推理原始耗时：A `515.474634 s`、B `594.399754 s`、
+  C `635.616855 s`、D `640.459573 s`。真实 GPU compatibility
+  `2 passed in 2396.89s (39:56)`，stderr 为空。
+- 真实 pytest 实际在 `2396.89 s` 内正常完成；外层 45 分钟 timeout 的具体执行
+  配置未持久化进入审查包，因此不把 watchdog 作为本门自动化通过证据。
+- SEM generation 四样本原始耗时为
+  `[515.470200, 594.316503, 635.578748, 640.422133] s`；
+  minimum `515.470200`、maximum `640.422133`、mean `596.446896`、
+  median/P50 `614.947625`。
+- Mechanical prediction 三样本原始耗时为
+  `[0.0786074, 0.0327715, 0.0327349] s`；minimum `0.032735`、
+  maximum `0.078607`、mean `0.048038`、median/P50 `0.032772`。
+- warm complete inference 取 B/C/D 三样本：
+  `[594.399754, 635.616855, 640.459573] s`；minimum `594.399754`、
+  maximum `640.459573`、mean `623.492060`、median/P50 `635.616855`。
+  三组 P95/P99 均为 `insufficient_samples`；没有为分位数增加推理。
+- A/B/C/D 的 torch peak allocated 均为 `1141142016 bytes`，peak reserved
+  均为 `1761607680 bytes`。nvidia-smi peak used 分别为
+  `3085/3093/3085/3085 MiB`，minimum free 分别为
+  `2910/2902/2910/2910 MiB`，均未触发 400 MiB 安全门。
+- A/B/C/D 主机最低空闲内存分别为
+  `5150273536/5388128256/5532094464/5604921344 bytes`。单机四次数据是
+  门三容量和耗时证据，不称为生产 SLA。
+
+### 12.5 Payload 与人工复核产物
+
+- 只复用 C 的 SEM 做 payload：`.npy` `1048704 bytes`，Base64
+  `1398272 characters`，解码字节 `1048704`，完整安全 JSON 响应实际估算
+  `1399715 bytes`，距 4 MiB 上限余量 `2794589 bytes`。
+- serialization/Base64 encode/decode 分别为
+  `0.0004809/0.0026477/0.0067135 s`。`allow_pickle=False` 解码保持
+  dtype、shape 与值完全一致，Base64 解码字节一致；NPY SHA-256 与生产 payload
+  SHA-256 均为
+  `994a1bde4610ef7eda9a8447552f8d8b55cafe48ee22ee0433feb1f9e12ec578`。
+- 受控目录为
+  `tmp/p1b2-gpu-inference/20260730T082132Z-c339fc11686f/`，已由
+  `git check-ignore` 确认为忽略路径，只含四个批准文件。NPY SHA-256 同上；
+  review-only PNG 为 mode L、512×512、无 alpha、`review_only_preview=true`，
+  SHA-256
+  `be9a282cb44180f586700d9d258143193eeaeae4312a9ef34ccc776b58d34b1a`；
+  `summary.json` SHA-256
+  `5d5acab84cd8f4b905fdf080b593b205f99f591d9e7d1f4dda93a4a121408a96`；
+  `artifact-manifest.json` SHA-256
+  `8db89336c22d11be32bf9c00f1838a44509c15234c7b5888dfa48da914175419`。
+- PNG 使用固定 review-only 映射，不作为 Backend 正式 PNG 编码一致性证据；
+  人工目视仅观察到连续斜向层片/条带组织及清晰亮暗相边界，合理性结论仍由项目
+  负责人判断。
+
+### 12.6 测试、范围与状态
+
+- TDD RED 为两个消费测试因共享 session fixture 尚未实现而精确 setup error；
+  该阶段无授权、无权重加载、无 CUDA Tensor。仅 REAL_MODEL 授权时两项精确 skip，
+  缺失 GPU 授权发生在权重加载和模型构造前；既有矩阵继续覆盖错误环境、
+  非 Python 3.8 和 CUDA unavailable fail closed。
+- 双授权 GREEN 为 `2 passed in 2396.89s`。授权恢复后，目标 Python 3.8 与
+  Backend Python 3.11 的默认 Runtime 回归均为精确
+  `143 passed, 3 skipped`；目标环境 `pip check` 为
+  `No broken requirements found.`，两套 `compileall -q` 均退出 0。
+- 生产 Runtime、Backend、Frontend、Mock Runtime、环境/锁、五份设计基线、
+  migration 和 `SEM/` 均未修改；未启动 Runtime HTTP、Backend、PostgreSQL、
+  MinIO 或 Frontend，未调用 DeepSeek 或浏览器 E2E。
+- 门三已由项目负责人验收为 `COMPLETE / PROJECT_OWNER_ACCEPTED`；门四保持
+  `NOT STARTED / NOT AUTHORIZED`。唯一验收提交已获授权；不执行 push 或 amend。
+
+### 12.7 门三代码审查修订
+
+- 初始审查结论 `P1B2_GPU_INFERENCE_CODE_REVIEW: CHANGES_REQUESTED` 只要求修订
+  compatibility 测试工具的失败清理和证据措辞；修订完成后项目负责人最终审查结论为
+  `P1B2_GPU_INFERENCE_CODE_REVIEW: APPROVED`。本轮三项真实授权变量保持未设置，
+  真实权重打开、CUDA Tensor、DDPM 采样、模型 forward、SVR predict 和 GPU
+  迁移均为 `0`；既有 A–D 真实 GPU 结果未重新执行。
+- 加载资源 sampler 改为 fail-safe 生命周期：`start()` 成功后，
+  `engine.load()` 成功、普通异常、包装后的 CUDA OOM 或 pytest 受控异常均由
+  `finally` 精确尝试一次 `stop()`。首次停止会终止并等待 nvidia-smi 进程、join
+  host/GPU 线程并核对均已退出；仍存活时固定拒绝
+  `P1B2_RESOURCE_SAMPLER_SHUTDOWN_FAILED`。重复停止不会再次 terminate、kill
+  或 join，成功时只返回首组摘要副本，失败时只重放固定错误。
+- 加载 OOM 判定只接受当前 Torch 明确存在的
+  `torch.cuda.OutOfMemoryError`；不再以全部 `RuntimeError` 作为缺省 OOM。
+  生产 Engine 包装加载异常后，由测试 harness 检查既有 `oom_detected` 标志；
+  OOM 路径先停止 sampler，再执行 Engine close、`gc.collect()` 和
+  `torch.cuda.empty_cache()`，最后以无原始异常正文的
+  `CUDA_OUT_OF_MEMORY` 结束。普通加载失败保持独立固定分类
+  `P1B2_ENGINE_LOAD_FAILED`。
+- TDD RED 为 6 个离线用例因新 helper fixture 尚未实现而精确 setup error；
+  全部使用 fake sampler、fake Engine 或纯 helper，未进入真实 session fixture。
+  GREEN 补充预算第五次前置拒绝、加载成功、普通失败、包装 OOM、pytest 受控异常、
+  shutdown 残留和幂等停止，共 7 个用例；目标 Python 3.8 与 Backend Python
+  聚焦测试均为 `7 passed, 1 deselected`。
+- 清除授权变量后的两套默认 Runtime 回归均为精确
+  `150 passed, 3 skipped`；三项 skip 分别为真实最小推理、真实模型加载和真实
+  payload/resource compatibility。目标环境 `pip check` 为
+  `No broken requirements found.`，两套 `compileall -q` 均退出 0。该修订不构成
+  新的真实 GPU 推理证据，门三状态为
+  `COMPLETE / PROJECT_OWNER_ACCEPTED`，门四仍为
+  `NOT STARTED / NOT AUTHORIZED`。
+- 最终 `SEM_INTEGRITY_OK` 仍为 57 files、`2043071133 bytes`、fingerprint
+  `62bbb0878ed5d659490755e401fba0e3e09f1f36e3a67667ea04227927546b4a`；
+  `SCOPE_OK P1B2`。Git 仍为精确 7 个门三路径、staging empty、untracked 0，
+  生产代码无 diff。受保护的 `check-scope.ps1` 与
+  `test_payload_and_resources.py` SHA-256 仍分别为
+  `9a14baa6556733e1c3991b75ddfa0369c54bb169a38404f8780f148f1c520f78` 和
+  `b1febd2f5fff0a4ff8f5fccf91a1677573eaf9de547c438f7b8da558efb87210`，
+  与本轮开始值一致。
+
+门三最终状态：
+`P1B2_GPU_INFERENCE_GATE_PROJECT_OWNER_ACCEPTED`。
