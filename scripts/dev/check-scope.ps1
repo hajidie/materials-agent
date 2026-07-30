@@ -58,7 +58,7 @@ function ConvertTo-RepoPath {
 $normalizedMilestone = $Milestone.Trim().ToUpperInvariant()
 $recognizedMilestones = @(
     'G0', 'M0', 'M4A', 'M4B', 'M4PLAN', 'M11A', 'M11B', 'M12A', 'M12B',
-    'P1B1'
+    'P1B1', 'P1B2'
 ) + @(1..16 | ForEach-Object { "M$_" })
 if ($recognizedMilestones -notcontains $normalizedMilestone) {
     Complete-ScopeCheck -Code 'UNKNOWN_MILESTONE' -Summary $normalizedMilestone
@@ -529,6 +529,16 @@ $milestoneAllowlists = @{
         'zta35g-runtime/tests/compatibility/test_minimal_inference.py'
         'zta35g-runtime/tests/compatibility/test_payload_and_resources.py'
         'backend/tests/contract/test_real_runtime_adapter.py'
+    )
+    P1B2 = @(
+        'zta35g-runtime/tests/unit/test_inference.py'
+        'zta35g-runtime/tests/unit/test_model_bundle.py'
+        'docs/superpowers/plans/2026-07-17-sem-mvp-phase-1-implementation-plan.md'
+        'docs/progress/phase-1-current-status.md'
+        'docs/acceptance/phase-1b-report.md'
+        'scripts/dev/check-scope.ps1'
+        'environments/materialsagent-zta35g.yml'
+        'zta35g-runtime/requirements-win-py38.lock.txt'
     )
 }
 

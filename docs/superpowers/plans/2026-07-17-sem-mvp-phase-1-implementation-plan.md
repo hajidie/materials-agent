@@ -875,7 +875,37 @@ M13–M16 继续作为阶段 1B 的历史能力分解和验收追溯基线；实
 
 **历史映射：** 执行 M13 的 Python 3.8 环境与四权重真实加载、M14 的固定参数最小推理和资源测量、M15 的真实 Runtime 人工运行验收，以及 M16 的真实 LLM + 真实 Runtime 浏览器 E2E。固定 `num_samples=1`、`guide_scale=2.0`、`timesteps=1000` 和全部真实验收暂停点保持不变。
 
-**当前状态：** `NOT STARTED / NOT AUTHORIZED`。
+**四门授权方案：**
+
+1. **门一：独立环境与依赖验证。** 项目负责人手工完成
+   `materialsagent-zta35g` 候选依赖安装并取得
+   `CUDA_BASIC_TEST_PASSED`；Codex 只读核对环境，修订两处测试兼容性后在
+   Python 3.8.20 和 Backend Python 3.11.15 完成 Runtime 离线测试，并生成无
+   本机绝对路径、包含精确官方 PyTorch CUDA 11.6 wheel 来源和 SHA-256 的依赖锁
+   与 Conda 环境记录。Base 原始开始／结束包数组快照没有持久化，不能逐字段复原
+   旧哈希差异；日志证明 `d53…` 与 `d446…` 来自不同的数组处理和 JSON 序列化
+   算法，而同一算法下的开始／结束 `d446…` 比较结果一致。后续只读诊断确认当前
+   Conda 语义投影连续三轮均为
+   `7e04c35067f4d257351063091a2d64a79d75c9497f08bf6ff7f008782a3b6d70`
+   （505 包），pip 语义投影连续三轮均为
+   `69bb3db228283bee065c030f3060c8200dcc2fb20c8879d9e32342d14ab9a937`
+   （437 包）；最后 Conda revision 为 `2025-11-14`，本轮无新 revision，
+   `conda-meta/history` 和 package JSON 本轮无写入，也无包身份变化证据。结论为
+   `BASE_PACKAGE_SET_UNCHANGED` / `AUDIT_FINGERPRINT_FALSE_POSITIVE`。状态为
+   `COMPLETE / PROJECT_OWNER_ACCEPTED`。
+2. **门二：真实权重加载兼容性。** 打开四份真实权重、调用真实
+   `torch.load` / `joblib.load` 并构造模型前必须取得新的项目负责人授权。状态为
+   `NOT STARTED / NOT AUTHORIZED`。
+3. **门三：真实 GPU 最小推理与资源测量。** 仅在门二验收和新的 GPU 推理授权后，
+   才允许按固定参数执行最小 DDPM/DenseNet/SVR 链路并记录资源事实。状态为
+   `NOT STARTED / NOT AUTHORIZED`。
+4. **门四：真实 Runtime 与综合验收。** 仅在前三门分别验收后，才允许启动真实
+   Runtime，并执行 Backend、MinIO、真实 Provider、浏览器和阶段 1 综合回归。
+   状态为 `NOT STARTED / NOT AUTHORIZED`。
+
+**当前状态：** P1B2 门一
+`COMPLETE / PROJECT_OWNER_ACCEPTED`；P1B2 门二
+`NOT STARTED / NOT AUTHORIZED`。
 
 ## M13：Python 3.8 模型环境与权重加载验证
 
@@ -912,7 +942,7 @@ M13–M16 继续作为阶段 1B 的历史能力分解和验收追溯基线；实
 
 **目标：** 用固定配置执行一条最小 SEM 生成和完整性能预测，验证图像/数值、耗时、显存、并发 1 和 Base64 `.npy`。
 
-**用户价值：** 证明模型不仅能加载，还能在当前 RTX 4060 Laptop 8GB 上产生可检查结果，并为 Runtime 超时提供数据。
+**用户价值：** 证明模型不仅能加载，还能在当前实际验收主机 RTX 3060 Laptop GPU / 6144 MiB 上产生可检查结果，并为 Runtime 超时提供数据。真实推理是否可承载必须由门三实测，不得依据旧 8 GB 候选硬件推断。
 
 **前置条件：** M13 项目负责人检查点通过。
 

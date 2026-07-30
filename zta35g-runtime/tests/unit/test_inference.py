@@ -100,6 +100,47 @@ def _decode_image(image):
     return array, npy_bytes
 
 
+def _is_name(node, expected):
+    return isinstance(node, ast.Name) and node.id == expected
+
+
+def _is_torch_nonfinite_any(node, function_name):
+    if not isinstance(node, ast.Call):
+        return False
+    if node.args or node.keywords:
+        return False
+
+    any_attribute = node.func
+    if not (
+        isinstance(any_attribute, ast.Attribute)
+        and any_attribute.attr == "any"
+    ):
+        return False
+
+    inner_call = any_attribute.value
+    if not isinstance(inner_call, ast.Call):
+        return False
+    if inner_call.keywords or len(inner_call.args) != 1:
+        return False
+
+    torch_function = inner_call.func
+    return (
+        isinstance(torch_function, ast.Attribute)
+        and torch_function.attr == function_name
+        and _is_name(torch_function.value, "torch")
+        and _is_name(inner_call.args[0], "values")
+    )
+
+
+def _is_no_argument_exception_call(node, exception_name):
+    return (
+        isinstance(node, ast.Call)
+        and _is_name(node.func, exception_name)
+        and node.args == []
+        and node.keywords == []
+    )
+
+
 def test_load_is_idempotent_and_close_is_idempotent():
     engine, components = _engine()
 
@@ -323,17 +364,31 @@ def test_production_sampling_loop_checks_nonfinite_values_after_every_step():
 
     assert len(sampling_loops) == 1
     sampling_loop = sampling_loops[0]
-    assert isinstance(sampling_loop.body[-2], ast.Assign)
-    assert ast.unparse(sampling_loop.body[-2].targets[0]) == "values"
+    assignment = sampling_loop.body[-2]
+    assert isinstance(assignment, ast.Assign)
+    assert len(assignment.targets) == 1
+    assert _is_name(assignment.targets[0], "values")
+
     guard = sampling_loop.body[-1]
     assert isinstance(guard, ast.If)
-    assert ast.unparse(guard.test) == (
-        "torch.isnan(values).any() or torch.isinf(values).any()"
+    assert isinstance(guard.test, ast.BoolOp)
+    assert isinstance(guard.test.op, ast.Or)
+    assert len(guard.test.values) == 2
+    assert _is_torch_nonfinite_any(
+        guard.test.values[0],
+        "isnan",
+    )
+    assert _is_torch_nonfinite_any(
+        guard.test.values[1],
+        "isinf",
     )
     assert guard.orelse == []
     assert len(guard.body) == 1
     assert isinstance(guard.body[0], ast.Raise)
-    assert ast.unparse(guard.body[0].exc) == "InvalidModelOutputError()"
+    assert _is_no_argument_exception_call(
+        guard.body[0].exc,
+        "InvalidModelOutputError",
+    )
 
 
 @pytest.mark.parametrize(

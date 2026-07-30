@@ -1,0 +1,27 @@
+# Generated from the verified materialsagent-zta35g Python 3.8 environment.
+# Local PyTorch wheel paths were normalized to their exact official HTTPS wheel references and verified SHA-256 hashes.
+# Do not edit manually; regenerate after a new compatibility acceptance.
+certifi==2026.7.22
+charset-normalizer==3.4.9
+colorama==0.4.6
+exceptiongroup==1.3.1
+idna==3.15
+iniconfig==2.1.0
+joblib==1.4.2
+numpy==1.22.3
+packaging==26.2
+pillow==10.4.0
+pip==24.2
+pluggy==1.5.0
+pytest==8.3.5
+requests==2.32.4
+scikit-learn==1.0.2
+scipy==1.10.1
+setuptools==75.1.0
+threadpoolctl==3.5.0
+tomli==2.4.1
+torch @ https://download.pytorch.org/whl/cu116/torch-1.13.1%2Bcu116-cp38-cp38-win_amd64.whl#sha256=1c33942d411d4dee25e56755cfd09538f53a497a6f0453d54ce96a5ca341627b
+torchvision @ https://download.pytorch.org/whl/cu116/torchvision-0.14.1%2Bcu116-cp38-cp38-win_amd64.whl#sha256=fefa6bee4c3019723320c6e554e400d6781ccecce99c1772a165efd0696b3462
+typing_extensions==4.13.2
+urllib3==2.2.3
+wheel==0.44.0

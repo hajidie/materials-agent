@@ -1,4 +1,7 @@
 import ast
+import io
+import json
+import tokenize
 from hashlib import sha256
 from pathlib import Path
 import sys
@@ -195,14 +198,42 @@ def _assigned_self_attributes(class_node):
     return attributes
 
 
-def _method_structure_digest(class_node, method_name):
+_IGNORED_TOKEN_NAMES = {
+    "ENCODING",
+    "NL",
+    "NEWLINE",
+    "INDENT",
+    "DEDENT",
+    "COMMENT",
+    "ENDMARKER",
+}
+
+
+def _method_structure_digest(source, class_node, method_name):
     method = next(
         node
         for node in class_node.body
         if isinstance(node, ast.FunctionDef) and node.name == method_name
     )
-    structure = ast.dump(method, include_attributes=False)
-    return sha256(structure.encode("utf-8")).hexdigest()
+
+    segment = ast.get_source_segment(source, method)
+    assert segment is not None
+
+    semantic_tokens = []
+    for token in tokenize.tokenize(
+        io.BytesIO(segment.encode("utf-8")).readline
+    ):
+        token_name = tokenize.tok_name[token.type]
+        if token_name in _IGNORED_TOKEN_NAMES:
+            continue
+        semantic_tokens.append((token_name, token.string))
+
+    payload = json.dumps(
+        semantic_tokens,
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    return sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _init_defaults(class_node):
@@ -227,7 +258,8 @@ def test_ddpm_architecture_preserves_original_state_dict_module_names():
         / "materialsagent_zta35g_runtime"
         / "model_architecture.py"
     )
-    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    source = source_path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
     classes = {
         node.name: node
         for node in ast.walk(tree)
@@ -281,78 +313,78 @@ def test_ddpm_architecture_preserves_original_state_dict_module_names():
             "dropout_rate": 0.0,
         },
     }
-    # These formatting-independent AST digests were reviewed line by line
+    # These formatting-independent semantic-token digests were reviewed
     # against the read-only original. They lock every layer constructor,
     # channel/kernel argument, loop, and forward mathematical operation/order.
     expected_method_structures = {
         "SinusoidalPositionEmbeddings": {
             "__init__": (
-                "529b4e73d767f456ffe1793cd47298ae707c2bf781308293f"
-                "c937404e6e078c3"
+                "5a5b43ecdb6db33e18690bb805b4706486356ce6e52fabe4"
+                "46782f8514236eac"
             ),
             "forward": (
-                "a3149629ae44bb6569605eb452007c765909de3822c161e074"
-                "7a06ac1797f75f"
+                "94886d86cef4d0ce2467b89acfc8446fd33fb38c28e41fff"
+                "6495d0e79518b89d"
             ),
         },
         "ConditionEmbeddings": {
             "__init__": (
-                "d70e7572ef642bb8597f4a97596d662d7e17200acc3a73a8"
-                "55f6fe4c0850d5a5"
+                "a1cbe9911c9c9abfd432cdf354862519d3bb827ba97dd19f"
+                "91e94de92854c974"
             ),
             "forward": (
-                "2900cef70b28158eb1335a9eaaae1dd3111823bf3e804ae2b"
-                "58c8fd4f564ad61"
+                "97ca0166902248d054938b0421cdcae8edc60208910380b70"
+                "e6076fc6c80e349"
             ),
         },
         "ResidualBlock": {
             "__init__": (
-                "d615123aaad519b368acbfa5447eeea661c2ae03fb4e873b3"
-                "4ec4216e3ebbd3b"
+                "dd841306ab5c0fc4ba804ff54af4efca2b34ca959c86a8f"
+                "878a3168519ff1942"
             ),
             "forward": (
-                "82330c77a2175207690c99f443e6225cb3a753e4f73bbb629"
-                "722b14dbef53eb5"
+                "510fd6f40bd93c61bf3a7e37b5d35f9d5dc4c602ab2bad9"
+                "1cea56b3b7714c1bf"
             ),
         },
         "SelfAttention": {
             "__init__": (
-                "2e4810bcc6c6f0f00c157420dbd120d888b923e978b6dbc5"
-                "e3001c1270acb3d9"
+                "4604925a4159736404f6329a3594d52b0a22be463e22dbd0"
+                "427bda3ec266a588"
             ),
             "forward": (
-                "e0e050c7f6a8c1cdc151fcc454c036bb87a120829f3c96706"
-                "20c1d2b93794168"
+                "9646d5abfeff36368e2b1070a70637ba3f8c5db18d9dc532"
+                "741b674ecd54a810"
             ),
         },
         "DownSample": {
             "__init__": (
-                "90f0e453b13793701765bf4d42aa65519c5509de9f0c193de"
-                "7de270a4919e7ac"
+                "aa380c550f93d93ed493c4f079fe325274579521fa44b4b7a"
+                "c145e5dca7ee117"
             ),
             "forward": (
-                "1b251b4ed25d21bc35a794bb252323d788ed43916fe524b95"
-                "4fa33413193a14f"
+                "e23c5f0afd6daf705306f9684d99ca14e9adfd642e9ad541"
+                "d3bc0e0507ce528d"
             ),
         },
         "UpSample": {
             "__init__": (
-                "252adfbc178c4615f2fd4414cc5e4d8d87cb95518ef69d3c"
-                "78f2fd84af38a917"
+                "4dc6d342a69b7763527e992142d9bfc71c017c87b4c9556e"
+                "2af272c10ed9a007"
             ),
             "forward": (
-                "1b251b4ed25d21bc35a794bb252323d788ed43916fe524b95"
-                "4fa33413193a14f"
+                "e23c5f0afd6daf705306f9684d99ca14e9adfd642e9ad541"
+                "d3bc0e0507ce528d"
             ),
         },
         "ConditionalUNet": {
             "__init__": (
-                "0a14751fb68360782efaf155cde83b64945a7bfbddbd3325b4"
-                "19a261ed1b2dd6"
+                "25859884856f50d10f4474ec3de71b4b00eb51191e713771"
+                "7745d51a4ec2c97c"
             ),
             "forward": (
-                "77c948afab948136a2f2ec2010e053f169251ec56b3e46cbc"
-                "44c84e139599f95"
+                "c2872e069a47b3b8d0093482128a25f40ceb7ed1ee7d3c73"
+                "dd2f65c1d997cb6d"
             ),
         },
     }
@@ -381,7 +413,9 @@ def test_ddpm_architecture_preserves_original_state_dict_module_names():
         ]
         assert {
             method_name: _method_structure_digest(
-                classes[class_name], method_name
+                source,
+                classes[class_name],
+                method_name,
             )
             for method_name in ("__init__", "forward")
         } == expected_method_structures[class_name]

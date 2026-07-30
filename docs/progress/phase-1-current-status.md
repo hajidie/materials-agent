@@ -7,10 +7,10 @@
 | 字段 | 当前值 |
 |---|---|
 | 当前阶段 | 真实能力接入 |
-| 当前里程碑 | P1B1 |
-| 当前工作单元 | P1B1：真实 ZTA35G Runtime 离线实现与契约接入 |
+| 当前里程碑 | P1B2 |
+| 当前工作单元 | P1B2 门一：独立环境与依赖验证 |
 | 状态 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
-| 上一已验收工作单元 | M12-B：真实浏览器验收与最终三路径收尾 |
+| 上一已验收工作单元 | P1B1：真实 ZTA35G Runtime 离线实现与契约接入 |
 | Pre-M8 stop-loss commit | `891714dd58cf069073a7d4037be43ef66304d0ac` |
 | M8 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M8 acceptance commit | `18005944982ca5191412e06154effc67465ca3a7` |
@@ -25,17 +25,20 @@
 | P1B1 验收提交 baseline branch / HEAD | `main` / `61a6a88db674cbd84990d6b5288d8db8eec480ed` |
 | P1B1 验收提交 baseline subject | `test: complete real DeepSeek provider acceptance` |
 | P1B1 验收提交 baseline parent | `ffd29353cb4682c74fd3455425822999444bb1d2` |
-| 暂存区 | 验收收尾开始时 empty；仅唯一 P1B1 条件性提交获授权，提交后必须 empty |
+| P1B2 门一恢复 baseline branch / HEAD | `main` / `7367b410f800b63efa9b9d4ba94095a3a45efb7a` |
+| P1B2 门一恢复 baseline subject | `feat: add offline zta35g runtime` |
+| 暂存区 | `empty`；P1B2 门一禁止暂存 |
 | P1B1 验收提交范围 | 精确 26 个 allowlist 路径；原 24 路径加 Phase 1A Runner 和 compatibility 共享授权门 |
+| P1B2 门一范围 | 精确 8 个 allowlist 路径；2 个测试兼容性修订路径加 6 个收尾路径 |
 | 已确认设计基线 | 五份均未修改 |
 | 历史 migration | `0001`–`0008` 均未修改；当前唯一 head/current 为 `0009_timeline_query_indexes` |
 | `SEM/` | 未修改、未加载或运行真实模型；`SEM_INTEGRITY_OK` |
 | Mock Runtime | 实现和协议未修改 |
 | Real Provider calls | `6 observed LLMCalls`：5 次计划验收调用 + 1 次额外人工知识问答 |
-| Commit | `ONE CONDITIONAL LOCAL COMMIT AUTHORIZED` |
+| Commit | `NO`；P1B2 门一未授权 commit |
 | Push | `NO` |
 | Amend | `NO` |
-| Git 外部动作 | 仅授权一次 P1B1 本地验收提交；push、amend、rebase、reset、restore、stash、clean、切换分支均禁止 |
+| Git 外部动作 | P1B2 门一禁止 add、commit、push、amend、rebase、reset、restore、stash、clean 和切换分支 |
 | M10-A | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M10-B | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M10 overall | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
@@ -47,14 +50,65 @@
 | M12-A | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M12-B | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | P1B1 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
-| P1B2 | `NOT STARTED / NOT AUTHORIZED` |
+| P1B2 | 门一 `COMPLETE / PROJECT_OWNER_ACCEPTED`；门二 `NOT STARTED / NOT AUTHORIZED` |
 | M13–M16 | `HISTORICAL DECOMPOSITION / MAPPED TO P1B1 AND P1B2` |
 | M11 start baseline | `main@f426e6f23703002a648991e5bb436929df19e8e2` |
 | M11-B start baseline | `main@4ed740222238433541fb31c993dd75610634d157` |
 | M12-A start baseline | `main@f5e24dcaab4801dbeffb8400f2960c33b60b4f00` |
 | M12-B start baseline | `main@ffd29353cb4682c74fd3455425822999444bb1d2` |
-| 是否处于项目负责人暂停点 | 是，P1B1 已验收并授权唯一条件性提交；P1B2、真实环境、依赖安装、权重加载、真实模型和 GPU 均未授权。 |
+| 是否处于项目负责人暂停点 | 是，P1B2 门一已由项目负责人验收；门二、真实权重加载、真实模型构造、DDPM 采样和 GPU 模型推理均未授权。 |
 | 更新时间 | `2026-07-30` |
+
+## P1B2 门一：独立环境与依赖验证
+
+- 正式审计环境为 `materialsagent-zta35g` / Python `3.8.20`。项目负责人在首轮安装
+  阻塞后手工完成候选依赖安装；Codex 本轮未创建、更新、删除或修复任何 Conda/Pip
+  环境。
+- 已只读核对 `torch==1.13.1+cu116`、`torchvision==0.14.1+cu116`、CUDA Runtime
+  `11.6`、`torch.cuda.is_available() == True`、NVIDIA GeForce RTX 3060 Laptop
+  GPU、Compute Capability `8.6`、`numpy==1.22.3`、`scipy==1.10.1`、
+  `joblib==1.4.2`、`scikit-learn==1.0.2`、Pillow `10.4.0` 和
+  `pytest==8.3.5`；目标环境 `pip check` 为 `No broken requirements found.`。
+- 实际 GPU 为 RTX 3060 Laptop GPU、`6144 MiB`，并非旧候选 RTX 4060 / 8 GB。
+  项目负责人既有极小 CUDA Tensor 证据为结果 `[2.0, 3.0]`、allocated
+  `1024 bytes`、reserved `2097152 bytes` 和 `CUDA_BASIC_TEST_PASSED`；这只证明
+  CUDA 基础可用，不是 DDPM、真实权重或真实模型验收。
+- Python 3.8 修订前 RED 为 `124 passed, 3 skipped, 2 failed`：一项因
+  `ast.unparse` 不存在，一项因解释器相关 `ast.dump` SHA-256 不一致。生产 Runtime
+  无需修改。
+- 仅修改两个单元测试：采样循环改为 Python 3.8 兼容的精确 AST 节点/字段断言；
+  模型方法保护改为忽略格式 token 的语义 Token 摘要。14 个方法摘要先由 Python
+  3.8 与 Python 3.11 只读脚本逐项确认完全一致，且继续保留 self 属性精确集合、
+  禁止属性、`__init__` 默认参数和全部关键方法结构保护。
+- GREEN 聚焦结果在 Python 3.8 和 Python 3.11 均为 `44 passed`；Runtime 全量在
+  两边均为 `126 passed, 3 skipped`。精确三项 skip 均来自 P1B2 真实模型授权门：
+  `test_minimal_inference.py`、`test_model_loading.py` 和
+  `test_payload_and_resources.py`，不是依赖导入、路径、收集或生产代码问题。
+- 两套解释器对 `zta35g-runtime/src` 的 `compileall -q` 均退出 0。生产 Runtime
+  源码、Backend、Frontend、Mock Runtime、`SEM/`、五份设计基线和 migration 均未修改。
+- `requirements-win-py38.lock.txt` 和 `materialsagent-zta35g.yml` 已将 torch /
+  torchvision 的本机 wheel 路径规范化为精确官方 CUDA 11.6 HTTPS wheel
+  direct references，并记录 SHA-256；使用 `packaging.requirements.Requirement`
+  校验名称、URL 和哈希，使用目标环境 `importlib.metadata` 确认 torch /
+  torchvision 版本及其余 22 个发行版。两文件均为 UTF-8/LF，不含本机绝对路径、
+  `file:///`、editable 或 `-e` 记录。本轮没有删除或从零重建现有环境。
+- 本轮真实 `torch.load` 权重调用 0、真实 `joblib.load` 权重调用 0、真实模型构造
+  0、DDPM 采样 0、GPU 模型推理 0；真实 Runtime 未启动，Backend、MinIO 和
+  DeepSeek 未调用，根 `.env` 未读取或修改。
+- 结束环境保护审计中，Backend 87 包规范 JSON 指纹与开始值一致。Base 原始开始／
+  结束包数组快照没有持久化，无法逐字段复原旧哈希差异；命令日志证明 `d53…` 与
+  `d446…` 来自不同的数组处理和 JSON 序列化算法，同一算法下的开始／结束
+  `d446…` 比较结果一致。
+- Base 当前 Conda 语义投影连续三轮均为
+  `7e04c35067f4d257351063091a2d64a79d75c9497f08bf6ff7f008782a3b6d70`
+  （505 包），pip 语义投影连续三轮均为
+  `69bb3db228283bee065c030f3060c8200dcc2fb20c8879d9e32342d14ab9a937`
+  （437 包）。最后 Conda revision 为 `2025-11-14`，本轮无新 revision，
+  `conda-meta/history` 和 package JSON 本轮无写入，也没有 Base 包身份变化证据。
+  结论为 `BASE_PACKAGE_SET_UNCHANGED` / `AUDIT_FINGERPRINT_FALSE_POSITIVE`；
+  此前阻塞属于跨实现审计指纹误报。
+- 当前门一状态为 `COMPLETE / PROJECT_OWNER_ACCEPTED`；P1B2 门二仍为
+  `NOT STARTED / NOT AUTHORIZED`。
 
 ## P1B1 第一轮代码审查修订与验证证据
 
@@ -970,9 +1024,12 @@ Runtime、MinIO 和 Explanation Provider 调用均不在数据库 UoW 内。Back
 
 ## 已知风险
 
-- P1B1 仍只完成离线 Fake/HTTP/Adapter 验证；Python 3.8 模型环境、四份权重真实
-  mismatch、CUDA/GPU、DDPM/DenseNet/SVR 推理和资源测量均属于未授权 P1B2，
-  本轮没有把离线通过表述为真实模型兼容性。
+- P1B2 门一只证明隔离环境、候选依赖、CUDA 基础可用性以及双解释器 Runtime 离线
+  测试通过；四份权重尚未打开，DDPM/DenseNet/SVR 尚未构造或运行，不能据此声明
+  真实模型兼容性或推理验收。
+- 原始 Base 审计未保留开始／结束包数组快照，无法逐字段复原旧哈希差异；后续已
+  通过日志、稳定语义投影、revision 和元数据时间确认其为审计算法误报，Base 包
+  集合未变化。
 - `npm ci` 仍报告既有 lockfile 的 6 个 high severity audit 项；P1B1 禁止修改
   Frontend 依赖，未执行 `npm audit fix`。
 - M12-B 浏览器验收已证明真实 Provider 正常业务链路；真实错误分类和幂等合同
@@ -982,18 +1039,20 @@ Runtime、MinIO 和 Explanation Provider 调用均不在数据库 UoW 内。Back
 - 阶段 1A Runner 依赖 Windows PowerShell、Docker Desktop/Compose 和本机
   Backend/Frontend 工具链；它不是生产守护进程。
 - start/stop 继续以严格 ownership 为先；不得宽泛终止进程或删除 volume。
-- P1B1 已通过最终代码审查和项目负责人验收；P1B2 未开始，真实 SEM 模型仍未加载
-  或运行。
+- P1B2 门一已由项目负责人验收；门二仍未开始、未授权，真实 SEM 模型
+  仍未加载或运行。
 
 ## 下一步
 
-P1B1 已完成最终代码审查和项目负责人验收，并仅授权本工作包的唯一条件性本地提交。
-不得进入 P1B2；不得读取或配置 API Key，不得打开真实权重、运行真实模型或使用 GPU，
-也不得 push 或 amend：
+停在 P1B2 门一项目负责人验收点。门一不再进行额外变更；Codex 不安装、回退或
+修复 Base。未经新的明确授权，
+不得开始门二，不得打开真实
+权重、调用真实 loader、构造或运行模型、执行 DDPM、启动真实 Runtime，也不得调用
+Backend、MinIO 或 DeepSeek；本工作单元不得暂存、commit、push 或 amend：
 
 ```text
-当前里程碑：P1B1
-当前工作单元：P1B1：真实 ZTA35G Runtime 离线实现与契约接入
+当前里程碑：P1B2
+当前工作单元：P1B2 门一：独立环境与依赖验证
 状态：COMPLETE / PROJECT_OWNER_ACCEPTED
 
 M11:
@@ -1021,14 +1080,17 @@ Real Provider calls:
 P1B1:
 COMPLETE / PROJECT_OWNER_ACCEPTED
 
-P1B2:
+P1B2 门一:
+COMPLETE / PROJECT_OWNER_ACCEPTED
+
+P1B2 门二:
 NOT STARTED / NOT AUTHORIZED
 
 Staging:
-ONLY FOR AUTHORIZED P1B1 ACCEPTANCE COMMIT
+EMPTY / NO STAGING AUTHORIZED
 
 Commit:
-ONE CONDITIONAL LOCAL COMMIT AUTHORIZED
+NO
 
 Push:
 NO
