@@ -8,9 +8,9 @@
 |---|---|
 | 当前阶段 | 真实能力接入 |
 | 当前里程碑 | P1B2 |
-| 当前工作单元 | P1B2 门一：独立环境与依赖验证 |
+| 当前工作单元 | P1B2 门二：真实权重加载兼容性 |
 | 状态 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
-| 上一已验收工作单元 | P1B1：真实 ZTA35G Runtime 离线实现与契约接入 |
+| 上一已验收工作单元 | P1B2 门二：真实权重加载兼容性 |
 | Pre-M8 stop-loss commit | `891714dd58cf069073a7d4037be43ef66304d0ac` |
 | M8 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M8 acceptance commit | `18005944982ca5191412e06154effc67465ca3a7` |
@@ -27,18 +27,20 @@
 | P1B1 验收提交 baseline parent | `ffd29353cb4682c74fd3455425822999444bb1d2` |
 | P1B2 门一恢复 baseline branch / HEAD | `main` / `7367b410f800b63efa9b9d4ba94095a3a45efb7a` |
 | P1B2 门一恢复 baseline subject | `feat: add offline zta35g runtime` |
-| 暂存区 | `empty`；P1B2 门一禁止暂存 |
+| P1B2 门一 acceptance commit | `c86c8eddfbb7a4b7354dd2299465cf352530623a` |
+| 暂存区 | 验收提交完成后 `empty`；只允许精确 5 路径暂存一次 |
 | P1B1 验收提交范围 | 精确 26 个 allowlist 路径；原 24 路径加 Phase 1A Runner 和 compatibility 共享授权门 |
 | P1B2 门一范围 | 精确 8 个 allowlist 路径；2 个测试兼容性修订路径加 6 个收尾路径 |
+| P1B2 当前 allowlist | 保留门一 8 路径并新增 `test_model_loading.py`，合计精确 9 路径 |
 | 已确认设计基线 | 五份均未修改 |
 | 历史 migration | `0001`–`0008` 均未修改；当前唯一 head/current 为 `0009_timeline_query_indexes` |
-| `SEM/` | 未修改、未加载或运行真实模型；`SEM_INTEGRITY_OK` |
+| `SEM/` | 未修改；前置和最终 `SEM_INTEGRITY_OK`；四份真实权重与完整 bundle 均仅在 CPU 受控加载，未执行推理 |
 | Mock Runtime | 实现和协议未修改 |
 | Real Provider calls | `6 observed LLMCalls`：5 次计划验收调用 + 1 次额外人工知识问答 |
-| Commit | `NO`；P1B2 门一未授权 commit |
+| Commit | 仅允许本轮唯一验收提交；实际 hash 不在提交前预填，由 Git 创建后报告 |
 | Push | `NO` |
 | Amend | `NO` |
-| Git 外部动作 | P1B2 门一禁止 add、commit、push、amend、rebase、reset、restore、stash、clean 和切换分支 |
+| Git 外部动作 | 只允许精确 5 路径 add 和唯一验收 commit；禁止 push、amend、第二提交、rebase、reset、restore、stash、clean 和切换分支 |
 | M10-A | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M10-B | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M10 overall | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
@@ -50,13 +52,13 @@
 | M12-A | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M12-B | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | P1B1 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
-| P1B2 | 门一 `COMPLETE / PROJECT_OWNER_ACCEPTED`；门二 `NOT STARTED / NOT AUTHORIZED` |
+| P1B2 | 门一 `COMPLETE / PROJECT_OWNER_ACCEPTED`；门二 `COMPLETE / PROJECT_OWNER_ACCEPTED`；门三、门四 `NOT STARTED / NOT AUTHORIZED` |
 | M13–M16 | `HISTORICAL DECOMPOSITION / MAPPED TO P1B1 AND P1B2` |
 | M11 start baseline | `main@f426e6f23703002a648991e5bb436929df19e8e2` |
 | M11-B start baseline | `main@4ed740222238433541fb31c993dd75610634d157` |
 | M12-A start baseline | `main@f5e24dcaab4801dbeffb8400f2960c33b60b4f00` |
 | M12-B start baseline | `main@ffd29353cb4682c74fd3455425822999444bb1d2` |
-| 是否处于项目负责人暂停点 | 是，P1B2 门一已由项目负责人验收；门二、真实权重加载、真实模型构造、DDPM 采样和 GPU 模型推理均未授权。 |
+| 是否处于项目负责人暂停点 | 是，停在 P1B2 门二验收提交完成点；门三和门四未开始、未授权。 |
 | 更新时间 | `2026-07-30` |
 
 ## P1B2 门一：独立环境与依赖验证
@@ -107,8 +109,64 @@
   `conda-meta/history` 和 package JSON 本轮无写入，也没有 Base 包身份变化证据。
   结论为 `BASE_PACKAGE_SET_UNCHANGED` / `AUDIT_FINGERPRINT_FALSE_POSITIVE`；
   此前阻塞属于跨实现审计指纹误报。
-- 当前门一状态为 `COMPLETE / PROJECT_OWNER_ACCEPTED`；P1B2 门二仍为
-  `NOT STARTED / NOT AUTHORIZED`。
+- 当前门一状态为 `COMPLETE / PROJECT_OWNER_ACCEPTED`；门一 acceptance commit 为
+  `c86c8eddfbb7a4b7354dd2299465cf352530623a`。门二经本轮项目负责人授权执行后，
+  状态为 `COMPLETE / PROJECT_OWNER_ACCEPTED`。
+
+## P1B2 门二：真实权重加载兼容性
+
+- 开始基线精确为 `main@c86c8eddfbb7a4b7354dd2299465cf352530623a`，
+  subject `test: verify zta35g environment compatibility`，parent
+  `7367b410f800b63efa9b9d4ba94095a3a45efb7a`；代码审查修订恢复门确认暂存区和
+  未跟踪文件为空，工作区精确为项目负责人声明的 5 个 P1B2 门二路径。
+- 主机物理内存的指定 CIM 查询被 Windows 拒绝访问；只读
+  `GlobalMemoryStatusEx` 替代测量为总计 `15.40 GiB`；代码审查真实重跑前空闲
+  `8.62 GiB`。RTX 3060 Laptop GPU 为 `6144 MiB`，
+  加载前显存使用 `0 MiB`、计算进程 `0`，资源门通过。
+- 前置 `SEM_INTEGRITY_OK` 为 57 文件、`2043071133` bytes、aggregate fingerprint
+  `62bbb0878ed5d659490755e401fba0e3e09f1f36e3a67667ea04227927546b4a`。
+  四个固定目标均为 manifest 唯一项，实际大小和 SHA-256 与 manifest 逐项一致。
+- compatibility 测试仅在目标 Python 3.8 子进程内设置
+  `ZTA35G_REAL_MODEL_ACCEPTANCE=P1B2_PROJECT_OWNER_AUTHORIZED`；GPU 授权保持未设置，
+  命令结束后授权、环境名和模型根进程变量均恢复。
+- DDPM 阶段完成 CPU `torch.load(map_location="cpu")`、正式 state 选择/清理、
+  `ConditionalUNet` 构造、missing/unexpected/shape mismatch 全零检查和
+  `load_state_dict(strict=False)`；模型与 checkpoint 随后释放，未调用 forward、
+  sample 或 CUDA 迁移。checkpoint/model key 均为 271，参数元素为 `124946629`。
+- DenseNet 的只读精确诊断确认转换后差异为 missing `121`、unexpected `0`、
+  shape mismatch `0`；121 个 missing 全部且仅为启用 running stats 的 121 个
+  BatchNorm 模块对应的 `.num_batches_tracked` 集合，没有其他参数或 buffer 差异。
+- 全新 DenseNet121 和独立转换 state 随后真正执行
+  `load_state_dict(strict=True)`；调用未抛错，返回 missing/unexpected 均为 0。
+  PyTorch 1.13.1 内置旧 BatchNorm 版本兼容逻辑在模块内部 state 副本中精确补入
+  121 个 counter，全部为 CPU `torch.int64` 标量 0；调用方 state 未被手工填充。
+  生产 `ModelBundleLoader` 保持 strict=True，生产源码未修改。
+- 两个固定 SVR 均受控加载为
+  `sklearn.compose._target.TransformedTargetRegressor`，最终 estimator 均为
+  `sklearn.svm._classes.SVR`。Yield Strength 的 Pipeline 步骤为
+  `prep, svr` 和嵌套 `scaler, pca`，PCA components 为 5，支持向量 shape
+  `[23, 9]`；Elongation 的 Pipeline 步骤为 `prep, svr`，无 PCA，支持向量
+  shape `[21, 8]`。两者暴露的 `n_features_in_` 均为 3076，与正式输入契约一致。
+  顶层类型、最终 estimator、全部 Pipeline、PCA 和 support vectors shape 均作为
+  固定硬断言通过，两个安全摘要均为 `exact_identity=true`。
+- 正式 `ModelBundleLoader(model_root).load()` 在 CPU 成功加载固定
+  `zta35g-sem-original-bundle`；四项 load summary 均为 0/0。loader 为无状态工厂，
+  为避免创建第二套完整对象未执行第二次 load。`LoadedModelBundle` 不提供
+  `is_loaded()` API；已验证 close 前后内部 `_closed` 为 `false → true`，并在
+  持有者释放后清理可验证弱引用。
+- 代码审查修订后真实 compatibility 为 `22 passed in 8.30s`。清除授权后，目标
+  Python 3.8 与 Backend Python 默认 Runtime 回归均为 `143 passed, 3 skipped`；
+  两套 `compileall -q` 均通过。分阶段 SVR 身份检查代码未显式调用 predict、
+  transform、fit 或 score；正式完整 bundle 加载路径由运行期 canary 保护，
+  predict、transform、fit 和 score 计数均为 0。整个测试的 Module `__call__`、
+  DDPM 动态类/DenseNet/Sequential 直接 forward、DDPM sample/采样循环和
+  Module/Tensor CUDA 迁移计数均为 0。
+- compatibility 负例使用小型 fake state/helper，覆盖精确 counter 集合、少一个、
+  多一个伪造 counter、缺 running_mean、unexpected、shape mismatch 和 strict 抛错；
+  SVR 负例覆盖错误类型、最终 estimator、Pipeline、PCA、support vectors shape
+  和 3076 正确但类型错误；canary 自测试分别触发 module-call 与直接 forward。
+  这些负例均不加载真实权重。Runtime 生产源码、Backend、Frontend、Mock Runtime、
+  `SEM/`、环境/锁文件、五份设计基线和 migration 均未修改。
 
 ## P1B1 第一轮代码审查修订与验证证据
 
@@ -1024,9 +1082,14 @@ Runtime、MinIO 和 Explanation Provider 调用均不在数据库 UoW 内。Back
 
 ## 已知风险
 
-- P1B2 门一只证明隔离环境、候选依赖、CUDA 基础可用性以及双解释器 Runtime 离线
-  测试通过；四份权重尚未打开，DDPM/DenseNet/SVR 尚未构造或运行，不能据此声明
-  真实模型兼容性或推理验收。
+- P1B2 门二只证明四份固定真实权重和完整 bundle 的 CPU 加载兼容性；没有证明
+  DDPM 采样、模型 forward、SVR predict、GPU 显存承载或真实性能预测。实际 GPU
+  仍为 6 GiB RTX 3060 Laptop，相关风险必须留到另行授权的门三验证。
+- DenseNet 的 121 个旧 BatchNorm counter 依赖 PyTorch 1.13.1 内置版本兼容路径；
+  compatibility 测试已锁定精确集合和 strict=True 结果，生产 loader 没有放宽。
+- 正式 loader 是无状态工厂；为遵守“不创建第二套完整模型对象”，本门未执行同一
+  loader 的第二次完整 load。`LoadedModelBundle` 没有 `is_loaded()` API；已验证
+  单个 bundle 的内部 `_closed` 在 close 后为 true，并在持有者释放后清理可验证弱引用。
 - 原始 Base 审计未保留开始／结束包数组快照，无法逐字段复原旧哈希差异；后续已
   通过日志、稳定语义投影、revision 和元数据时间确认其为审计算法误报，Base 包
   集合未变化。
@@ -1039,20 +1102,19 @@ Runtime、MinIO 和 Explanation Provider 调用均不在数据库 UoW 内。Back
 - 阶段 1A Runner 依赖 Windows PowerShell、Docker Desktop/Compose 和本机
   Backend/Frontend 工具链；它不是生产守护进程。
 - start/stop 继续以严格 ownership 为先；不得宽泛终止进程或删除 volume。
-- P1B2 门一已由项目负责人验收；门二仍未开始、未授权，真实 SEM 模型
-  仍未加载或运行。
+- P1B2 门二完整 CPU bundle 已成功加载和关闭；Module `__call__`、任何直接
+  forward、SVR predict、PCA transform、fit、score、DDPM 采样和 GPU 模型迁移
+  均未执行。
 
 ## 下一步
 
-停在 P1B2 门一项目负责人验收点。门一不再进行额外变更；Codex 不安装、回退或
-修复 Base。未经新的明确授权，
-不得开始门二，不得打开真实
-权重、调用真实 loader、构造或运行模型、执行 DDPM、启动真实 Runtime，也不得调用
-Backend、MinIO 或 DeepSeek；本工作单元不得暂存、commit、push 或 amend：
+停在 P1B2 门二验收提交完成点。未经新的项目负责人明确授权，不得开始门三，不得
+设置 GPU 授权变量，不得执行模型 forward、SVR predict、DDPM、真实 Runtime、
+Backend、MinIO、浏览器或 DeepSeek 综合验收。不得 push、amend 或创建第二个提交：
 
 ```text
 当前里程碑：P1B2
-当前工作单元：P1B2 门一：独立环境与依赖验证
+当前工作单元：P1B2 门二：真实权重加载兼容性
 状态：COMPLETE / PROJECT_OWNER_ACCEPTED
 
 M11:
@@ -1082,15 +1144,23 @@ COMPLETE / PROJECT_OWNER_ACCEPTED
 
 P1B2 门一:
 COMPLETE / PROJECT_OWNER_ACCEPTED
+acceptance commit:
+c86c8eddfbb7a4b7354dd2299465cf352530623a
 
 P1B2 门二:
+COMPLETE / PROJECT_OWNER_ACCEPTED
+
+P1B2 门三:
+NOT STARTED / NOT AUTHORIZED
+
+P1B2 门四:
 NOT STARTED / NOT AUTHORIZED
 
 Staging:
-EMPTY / NO STAGING AUTHORIZED
+EMPTY AFTER ACCEPTANCE COMMIT
 
 Commit:
-NO
+ONE ACCEPTANCE COMMIT AUTHORIZED / HASH REPORTED AFTER GIT CREATION
 
 Push:
 NO

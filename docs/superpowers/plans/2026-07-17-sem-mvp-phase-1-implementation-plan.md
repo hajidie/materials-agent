@@ -894,8 +894,23 @@ M13–M16 继续作为阶段 1B 的历史能力分解和验收追溯基线；实
    `BASE_PACKAGE_SET_UNCHANGED` / `AUDIT_FINGERPRINT_FALSE_POSITIVE`。状态为
    `COMPLETE / PROJECT_OWNER_ACCEPTED`。
 2. **门二：真实权重加载兼容性。** 打开四份真实权重、调用真实
-   `torch.load` / `joblib.load` 并构造模型前必须取得新的项目负责人授权。状态为
-   `NOT STARTED / NOT AUTHORIZED`。
+   `torch.load` / `joblib.load` 并构造模型前必须取得新的项目负责人授权。本轮
+   已在 CPU 依次验证 DDPM、DenseNet121、两个 SVR 和正式完整 bundle，只执行加载
+   与释放，不执行 forward、predict、transform、DDPM 采样或 CUDA 迁移。
+   DenseNet 预比较的 121 个 missing 精确等于全部 121 个旧版 BatchNorm
+   `num_batches_tracked` counter；PyTorch 1.13.1 内置兼容逻辑在真正
+   `strict=True` 下精确初始化 CPU `int64` 标量 0，strict 返回 0/0。没有忽略
+   其他 missing、没有手工填充参数，生产 loader 保持 `strict=True` 且生产源码
+   未修改。两个 SVR 的顶层类型、最终 estimator、全部 Pipeline steps、输入维度
+   及来源、PCA components 和 support vectors shape 均由固定身份门硬断言通过。
+   `zta35g-sem-original-bundle` CPU load/close 和引用释放通过。分阶段 SVR 身份
+   检查代码未显式调用 predict、transform、fit 或 score；正式完整 bundle 加载
+   路径由运行期 canary 保护，这四类调用计数均为 0。整个真实加载测试同时由
+   `Module.__call__` 和 DDPM 动态类/DenseNet/Sequential 直接 forward 两层 canary
+   保护，sample/CUDA canary 也全部为 0。
+   `ModelBundleLoader` 是无状态工厂；生命周期只以
+   `LoadedModelBundle._closed=false → true` 和弱引用清理为证据，不声称存在
+   `is_loaded()`。状态为 `COMPLETE / PROJECT_OWNER_ACCEPTED`。
 3. **门三：真实 GPU 最小推理与资源测量。** 仅在门二验收和新的 GPU 推理授权后，
    才允许按固定参数执行最小 DDPM/DenseNet/SVR 链路并记录资源事实。状态为
    `NOT STARTED / NOT AUTHORIZED`。
@@ -905,6 +920,7 @@ M13–M16 继续作为阶段 1B 的历史能力分解和验收追溯基线；实
 
 **当前状态：** P1B2 门一
 `COMPLETE / PROJECT_OWNER_ACCEPTED`；P1B2 门二
+`COMPLETE / PROJECT_OWNER_ACCEPTED`；门三、门四仍为
 `NOT STARTED / NOT AUTHORIZED`。
 
 ## M13：Python 3.8 模型环境与权重加载验证
