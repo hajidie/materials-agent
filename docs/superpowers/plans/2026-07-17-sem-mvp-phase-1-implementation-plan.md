@@ -950,12 +950,133 @@ M13–M16 继续作为阶段 1B 的历史能力分解和验收追溯基线；实
    须先形成独立验收提交并恢复干净工作区，再由项目负责人重新授权并从新的正式
    HEAD 完整重新开始，不沿用此前阻塞尝试的执行状态。
 
-**当前状态：** P1B2 门一
+   **门四综合验收重新授权尝试：** 2026-07-30 项目负责人从
+   `main@0db1c29f661313b10dac81c807f2649210046c1f` 重新授权。完整读取和
+   纯离线最小复现确认当前生产语义只允许失败 Explanation 重试：成功
+   Explanation 的 Frontend 卡片不显示重试按钮，Backend 也会对成功 Task 的新
+   Explanation retry 返回 `EXPLANATION_NOT_RETRYABLE`。这与重新授权方案中
+   场景 5“Task SUCCEEDED 且自动 Explanation 成功”后继续执行场景 7“点击重试
+   解释”冲突。按生产缺陷停止边界，未创建 Runner/Executor，未进入真实资源阶段，
+   真实 Runtime/Provider/DDPM 调用均为 0。门四综合验收状态为
+   `BLOCKED / AWAITING_PROJECT_OWNER_REVIEW`，需另行评审成功 Explanation 的
+   再生成语义，或把场景 7 明确改为失败 Explanation 的恢复路径。
+
+   **门四最终分阶段资源门修订：** 2026-07-31 项目负责人已把场景 5/7 确认为
+   “无效 Key 下自动 Explanation 认证失败，恢复真实 Key 后显式 Explanation
+   retry 成功”，并批准只修订资源门和当前 Git 状态规则。当前合法工作区精确为
+   4 个 tracked modified、4 个授权 untracked、unexpected 0、staging empty；
+   当前实施阶段不要求 `Untracked=0`，不得删除、暂存或提交这 8 个文件。统一
+   8 GiB、单点 6.75 GiB、五次采样中位数 6.70 GiB 和 Stage B 6.5 GiB /
+   Stage C 6.25 GiB 均为已废止历史规则。Stage B 当前唯一启动门为
+   `5905580032 bytes`（5.5 GiB），在设置真实模型授权、启动 Runtime 或打开
+   权重前，以 `GlobalMemoryStatusEx.ullAvailPhys` 实际字节判断，失败固定为
+   `P1B2_GATE4_STAGE_B_MEMORY_PREFLIGHT_FAILED` 且真实预算保持 0。
+
+   Stage B 必须分开记录 before-runtime-start、after-runtime-ready、pre-execute、
+   minimum-during-execute 和 post-execute 实际字节；ready 后无 execute 至少
+   等待 2 秒，after-ready 与 pre-execute 各取 3 次、间隔 250 ms 的中位数。
+   分别计算 `model_load_drop=max(0,before-start-after-ready)`、
+   `execute_drop=max(0,pre-execute-minimum-during-execute)` 和
+   `total_drop=max(0,before-start-minimum-during-execute)`。Stage C 只能使用
+   本轮 load/execute 两个增量，禁止使用总下降量或门三历史常量。
+
+   场景 1–3 后，浏览器和综合栈已运行、Runtime 尚未启动时，Stage C 启动门为
+   `before-runtime-start >= max(4831838208, model_load_drop+1610612736)`，
+   失败固定为 `P1B2_GATE4_STAGE_C_RUNTIME_START_MEMORY_FAILED`，不得打开
+   权重或增加预算。Runtime ready 且模型已加载后至少等待 2 秒，Tool retry 门为
+   `pre-tool-retry >= max(3758096384, execute_drop+1610612736)`；只有通过后
+   才输出 `P1B2_GATE4_TOOL_RETRY_RESOURCE_READY`，失败固定为
+   `P1B2_GATE4_STAGE_C_TOOL_RETRY_MEMORY_FAILED`，不得发送 retry 或增加
+   Runtime/DDPM/Provider 预算。浏览器及综合栈占用已包含在 Stage C 实时读数中。
+
+   运行期低于 2.0 GiB 记录 `HOST_MEMORY_LOW_WARNING` 的首次时间、最低值和
+   持续时间；低于 1.5 GiB 记录 `HOST_MEMORY_CRITICAL_LOW`。调用前命中
+   critical 不得 delegate；调用中命中则等待返回后立即停止 Runtime、禁止后续
+   场景并清理，不得 CPU fallback、降低尺寸/timesteps 或启用 AMP/半精度。
+   该规则仅为当前约 15.4 GiB 主机的验收配置，不是生产部署推荐，也不保证其他
+   硬件相同。GPU 门和调用预算未降低。当前最终规则离线验证为：PowerShell/
+   Python SelfTest 固定成功标记，helper/E2E `65 passed, 1 skipped`，compile、
+   Scope、SEM 与 tracked/cached/untracked whitespace 检查均通过。Phase2/
+   Stage C 尚未接线并保持 fail closed，不得进入 Tool retry。最终规则下第一次
+   Stage B 尝试在 GPU 只读门因清洗环境缺少 NVML DLL 发现所需的普通
+   `ProgramFiles`/`ProgramW6432` 路径而停止；补齐这两个非 Secret 系统变量后
+   最小诊断和完整离线回归均通过，该次未启动 Runtime/权重且三类预算保持 0。
+   第二次尝试 run id `g4b745bf4426744c6653b57b1d` 在模型加载阶段停止，safe
+   state 三类预算仍为 0；不打开权重的分层探针进一步定位 Python 二次角色清洗
+   遗漏 `USERPROFILE`，单变量恢复后 torch import 与 CUDA 检查正常。Runner 已
+   补齐该普通路径且 Key 仍隔离；确认 PID、端口、GPU、Secret 和 `.env` 全部
+   干净后精确删除了该 run 临时目录。另以 harmless owned-child 复现确认 cleanup
+   误报来自 Windows retained `Popen` handle；Runner 现用
+   `GetExitCodeProcess == STILL_ACTIVE` 判活动状态，查询失败继续 fail closed，
+   且只把 `ERROR_INVALID_PARAMETER(87)` 视为 PID 不存在；access denied 与其他
+   错误保持 indeterminate。ownership/taskkill 与错误注入回归均已通过。
+   第三次 Stage B 尝试 run id `g42ecb990e686728656bdf99e9` 仍在 model loading
+   阶段安全失败且三类预算保持 0；根因是 Runner 将 `ZTA35G_MODEL_ROOT` 错指向
+   `SEM/`，而 manifest 确认的精确 bundle root 是 `SEM/ZTA35G_lab/`。离线
+   RED/GREEN 已修正根目录并完成 Secret/端口/GPU/`.env`/临时目录清理。按三次
+   失败审计边界，本轮不执行第四次真实尝试，等待项目负责人复核。
+
+   **第四次且最终一次 Stage B：** 项目负责人随后单独授权本次 Runtime-only
+   尝试。run id `g452f78ce7e468dea983977272` 的 Runtime PID `5432` 从精确
+   bundle root 加载模型到 cuda，只监听 `127.0.0.1:8100`。Token/非法请求
+   负测未增加 delegate；唯一 combined execute 用时 `632.797 s` 并返回
+   `SUCCEEDED`，并发合法请求以 `503 / RUNTIME_BUSY / retryable=true` 拒绝。
+   Runtime/DDPM/Provider 最终预算为 `1/2`、`1/2`、`0/5`。模型加载、推理和
+   总内存下降分别为 `1453727744`、`2704375808`、`4138758144 bytes`，最低
+   主机可用内存 `2376253440 bytes`，GPU peak used 3085 MiB；warning 和
+   critical 均未触发。Runtime、端口、GPU、临时目录和环境均已完整清理。
+
+   执行进程已验证 Base64 NPY 的 hash、`allow_pickle=False`、`<f4`、
+   `[512,512]`、C contiguous、finite和值域边界，性能值为
+   `413.39765052163557 MPa` 与 `2.9387915447083017 %`。但现有安全 summary
+   未持久化精确 NPY/Base64/JSON 字节数、图片 SHA-256、实际 min/max，且未
+   显式保存非全常数证据；强制清理后无法在不执行被禁止的第二次 execute 的
+   前提下补采。相同固定输入、seed、bundle 和主机环境已经在门三独立验证这些
+   字段；项目负责人接受其为非阻塞证据限制，并决定不消耗第二次 Runtime 预算
+   重复 Stage B。Stage B 状态为 `COMPLETE / PROJECT_OWNER_ACCEPTED`，第五次
+   Stage B `NOT AUTHORIZED`。当时的 Stage C 授权在后述 Provider 隔离事故后
+   已整体作废；Runtime `1/2`、DDPM `1/2` 仍是 Stage B 历史事实，Provider
+   `0/5` 不具权威性，不得据此继续 Backend Tool retry。
+
+   **Stage C 初始综合栈执行：** Stage C run id
+   `g456aaa9615b3b4bd08bd1d9e9` 原计划从 Runtime `1/2`、DDPM `1/2`、
+   Provider `0/5` 快照开始；事故后该 Provider 快照已失效。离线 RED/GREEN 补齐预算恢复与跨 Backend/Runner
+   重启不归零；最终 SelfTest、helper/E2E `71 passed, 1 skipped`、compile、
+   Scope、SEM 和 Git checks 通过。
+
+   Phase1 先后暴露三项 Runner 接线缺陷：PowerShell 二次清洗遗漏
+   `PROGRAMFILES`/`PROGRAMW6432` 导致 Compose 不可发现；Frontend
+   PowerShell `-Command` 拆分含空格的 Node 路径；Phase1 回滚沿用 start-time
+   存在判断而误报 retained handle。三项均以单变量诊断和 RED/GREEN 修复，
+   Secret 角色隔离未放宽。
+
+   完整 Phase1 仍固定命中 `P1B2_GATE4_PROCESS_IDENTITY_FAILED`；Compose、
+   Backend、Vite 的单独边界均已通过，但集成 ownership 失败未能在批准边界内
+   进一步收敛。按系统化调试停止条件不再重复启动。浏览器 marker 未输出，真实
+   Runtime 始终停止，Provider/Runtime/DDPM 无新增调用。临时 database/bucket
+   已确认不存在，命名 volume fingerprint 不变，全部目标端口、GPU 和 `.env`
+   恢复。该次 Stage C 后续因 Provider 预算事故整体作废；现行状态为
+   `BLOCKED / SAFETY_REMEDIATION_REQUIRED`，事故记录标记为
+   `P1B2_GATE4_PROVIDER_BUDGET_INCIDENT_RECORDED`。
+
+   **清理后 Mock 回归事故：** 首次手工 Backend 回归没有在测试子进程显式覆盖
+   `LLM_ADAPTER=mock`，而根 `.env` 配置为 `deepseek`。单文件诊断明确观察到
+   至少 8 个本应为 Mock 503 的请求返回 200；此前同环境 Backend full 还运行了
+   300 秒后才终止。临时数据库已清理，无法精确恢复实际 Provider delegate
+   总数。Runner 持久账本仍为 Provider `0/5`，但它不再代表实际预算；至少
+   存在 8 次真实 Chat delegate，Provider 预算不可审计且不合规。显式强制
+   Mock 后的 fresh 回归为 Backend full `1063 passed, 1 skipped`、Mock
+   Runtime `11 passed`、Frontend `204 passed`，两套 pip/compile、
+   Frontend typecheck/build 与 Alembic head/current/check 均通过；这些通过
+   结果不消除预算事故。Stage C 继续保持 `P1B2_GATE4_BLOCKED`。
+
+**Provider 隔离事故发生后的历史状态（已由下文安全整改附录取代）：** P1B2 门一
 `COMPLETE / PROJECT_OWNER_ACCEPTED`；P1B2 门二
 `COMPLETE / PROJECT_OWNER_ACCEPTED`；门三
 `COMPLETE / PROJECT_OWNER_ACCEPTED`；门四 timeout 前置修订
+`COMPLETE / PROJECT_OWNER_ACCEPTED`；门四 Stage B
 `COMPLETE / PROJECT_OWNER_ACCEPTED`；门四综合验收
-`NOT STARTED / AWAITING_PROJECT_OWNER_RESTART_AUTHORIZATION`。
+`BLOCKED / SAFETY_REMEDIATION_REQUIRED`。
 
 ## M13：Python 3.8 模型环境与权重加载验证
 
@@ -1109,3 +1230,78 @@ git diff --name-only
 ## 计划执行位置
 
 本文件不在末尾固定当前执行到哪个里程碑。任何新 Codex 对话都必须先读取 `docs/progress/phase-1-current-status.md`，并以其中记录的当前 branch、HEAD、工作单元、状态和下一步为准。未经项目负责人验收，不得进入下一工作单元或里程碑。
+
+## P1B2 门四 Stage C 安全整改附录（2026-07-31）
+
+本附录覆盖门四 Stage C 当前安全边界，优先于上文历史 M16 执行步骤：
+
+- P1B2 门四 Stage C 安全整改为 `COMPLETE / PROJECT_OWNER_ACCEPTED`。项目负责人
+  最终代码审查结论为：
+
+  ```text
+  P1B2_GATE4_STAGE_C_SAFETY_REMEDIATION_CODE_REVIEW:
+  APPROVED
+  ```
+- Stage B 为 `COMPLETE / PROJECT_OWNER_ACCEPTED`，第五次 Stage B
+  `NOT AUTHORIZED`。
+- 当前 Stage C run 因 Mock Provider 隔离事故永久为
+  `INVALIDATED / PROVIDER_BUDGET_UNAUDITABLE`；已知计划外真实 Chat delegate
+  下界为 `>= 8`，精确总数不可恢复，旧 Runner Provider `0/5` 不具权威性。
+- 新的真实 Stage C 为
+  `NOT STARTED / AWAITING_PROJECT_OWNER_AUTHORIZATION`。除受控完整 Mock 回归
+  可复用 Phase 1A 的 owned Mock 栈外，不得启动 Docker、Backend、Frontend、
+  Runtime、数据库、MinIO 或浏览器，也不得打开权重、创建 CUDA Tensor 或调用
+  Provider。
+- 所有 Mock 回归必须通过受控 Runner；精确子进程环境显式强制
+  `LLM_ADAPTER=mock`、空白覆盖 `DEEPSEEK_API_KEY`，移除全部真实调用授权，并在
+  test collection 前验证 Mock settings、DeepSeek Adapter 构造 0 和 Provider
+  delegate 0。
+- 代码审查后将入口拆成 `MockHelperTests` 与 `MockFullRegression`；
+  `MockRegression` 兼容名必须映射到完整回归。完整回归复用
+  `scripts/acceptance/run-phase-1a.ps1`，在系统临时目录从固定 HEAD 创建只含
+  已跟踪文件的干净快照，不复制或链接根 `.env`，不修改真实 index/working
+  tree；临时配置只白名单读取 Phase 1A 非 Provider 基础设施字段，并强制 Mock
+  adapter、空 Provider Key 和空全部真实授权。
+- Provider 调用预算必须在真实 Adapter 外层由独立文件账本保护，并通过现有
+  `create_app()` 显式 Chat/Explanation port injection 接线。账本在 delegate 前
+  加锁、校验 run 与预算、先增加 attempt、fsync 临时文件、原子替换、重新读取
+  并与当前 run 的 `LLMCall` 数据库事实核对。三次 Backend 重启共享同一账本。
+- 账本只允许 `EXACT/UNKNOWN/INVALIDATED`；缺失、损坏、run 不匹配、字段缺失、
+  计数回退、数据库冲突、写入/读回失败均固定
+  `P1B2_GATE4_PROVIDER_CALL_COUNT_UNKNOWN`，禁止后续真实调用。
+- Provider 账本是 delegate 边界的权威保守计数：无崩溃流程中应与 DeepSeek
+  `LLMCall` 事实一致；attempt 预留后、Adapter 调用前异常退出时可以保守多计，
+  但不得少计或放行超预算调用，run 必须转为 `UNKNOWN/INVALIDATED`，不得写
+  `PASSED`。
+- 进程 ownership 必须同时验证 role/port、PID、start time、完整 executable
+  path SHA-256、`command_argument_count`、`command_arguments_sha256`、精确
+  command marker 和 port owner。参数摘要必须对保持顺序和完整 token 的
+  `argv[1:]` 进行 UTF-8 紧凑 JSON 数组序列化并计算 SHA-256；marker 不能代替
+  完整参数身份。role 由 record schema、精确 argv 和 marker 共同约束，port 的
+  独立证据是实际 LISTENING 与 owner PID。安全诊断不得包含完整命令行、环境或
+  Secret。
+- Phase1 启动任一步失败必须原子回滚本轮 owned processes、database、bucket、
+  ports 和环境，并把 run 标为 INVALIDATED；不得恢复成可沿用状态。未来重新
+  授权后必须生成不同 run id、ledger、database、bucket、Actor 和 Conversation。
+- 完整 Mock 回归在发送 start 命令前即承担 cleanup responsibility；start
+  非零、超时或缺 marker 也必须调用幂等 stop，并核对
+  3000/8000/8100、5432/9000/9001 和固定 `materialsagent` Compose 容器集合。
+  基线存在目标 listener/container 时启动前 fail closed，不得接管未知资源。
+- 代码审查修订验证：受控 helper `117 passed, 1 skipped`；完整
+  `MockFullRegression` 复用 Phase 1A，run id
+  `20260731T064439Z-c941e3f9aa0b`，Backend E2E `24 passed`、Backend full
+  `992 passed`、Mock Runtime `11 passed`、Frontend `204 passed`，typecheck、
+  build、Alembic、pip/compileall、SEM/M12A Scope、Secret 扫描与 cleanup
+  通过；DeepSeek `LLMCall` 增量和 Adapter 构造均为 0。
+- 干净快照及动态产物在成功清理后删除，最终审查包不保留原始 Phase 1A 动态
+  文件；保留的是受控 Runner 从实际日志解析、校验后输出的安全摘要。
+- Stage B 真实 Runtime 事实继续有效；新的 Stage C 不得执行第五次 Stage B，
+  不得复用旧 Provider 账本。完整 Mock 回归只能通过受控 Runner；任何 Provider
+  账本 `UNKNOWN/INVALIDATED` 状态均不得继续。
+
+事故记录固定标记：
+`P1B2_GATE4_PROVIDER_BUDGET_INCIDENT_RECORDED`。
+
+下一步固定为：创建安全整改唯一验收提交并恢复干净工作区。项目负责人重新授权
+后，使用全新的 `run_id`、Provider 账本、database、bucket、Actor 和
+Conversation 执行 Stage C 核心真实浏览器闭环；不得恢复或复用污染 run。

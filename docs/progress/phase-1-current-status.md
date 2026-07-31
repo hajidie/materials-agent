@@ -8,7 +8,7 @@
 |---|---|
 | 当前阶段 | 真实能力接入 |
 | 当前里程碑 | P1B2 |
-| 当前工作单元 | P1B2 门四 timeout 前置修订 |
+| 当前工作单元 | P1B2 门四 Stage C 安全整改验收提交 |
 | 状态 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | 上一已验收工作单元 | P1B2 门三：真实 GPU 最小推理与资源测量 |
 | Pre-M8 stop-loss commit | `891714dd58cf069073a7d4037be43ef66304d0ac` |
@@ -30,20 +30,20 @@
 | P1B2 门一 acceptance commit | `c86c8eddfbb7a4b7354dd2299465cf352530623a` |
 | P1B2 门二 acceptance commit | `62e0273ff32bd1a7462abf2e9f33d898b993eb43` |
 | P1B2 门三 acceptance commit | `5735384430a7556682993de8861d2a7d28889156` |
-| P1B2 门四恢复 baseline branch / HEAD | `main` / `5735384430a7556682993de8861d2a7d28889156` |
-| 暂存区 | 本轮只允许精确 7 路径验收暂存；提交后必须恢复 `empty` |
+| P1B2 门四恢复 baseline branch / HEAD | `main` / `0db1c29f661313b10dac81c807f2649210046c1f` |
+| 暂存区 | `empty`；本轮仅授权精确 8 路径暂存 |
 | P1B1 验收提交范围 | 精确 26 个 allowlist 路径；原 24 路径加 Phase 1A Runner 和 compatibility 共享授权门 |
 | P1B2 门一范围 | 精确 8 个 allowlist 路径；2 个测试兼容性修订路径加 6 个收尾路径 |
-| P1B2 当前 allowlist | 精确 7 个路径：既有 3 个门四阻塞文档、`check-scope.ps1`、Backend config、unit config test 和既有 Runtime contract test |
+| P1B2 当前 allowlist | 精确 8 个路径：4 个 tracked modified 与 4 个 authorized untracked；unexpected 0 |
 | 已确认设计基线 | 五份均未修改 |
 | 历史 migration | `0001`–`0008` 均未修改；当前唯一 head/current 为 `0009_timeline_query_indexes` |
 | `SEM/` | 未修改；门三前后 `SEM_INTEGRITY_OK`；固定 bundle 在 GPU 完成 A–D 精确 4 次受控推理并已释放 |
 | Mock Runtime | 实现和协议未修改 |
-| Real Provider calls | `6 observed LLMCalls`：5 次计划验收调用 + 1 次额外人工知识问答 |
-| Commit | timeout 前置修订唯一验收提交已授权；不得预填 hash |
+| Real Provider calls | 历史 M12-B 为 6；当前作废 Stage C run 已明确观察计划外真实 Chat delegate `>= 8`，精确总数不可恢复 |
+| Commit | 安全整改唯一验收提交已授权；本文件不预填提交 hash |
 | Push | `NO` |
 | Amend | `NO` |
-| Git 外部动作 | 只允许精确 7 路径 `git add` 和一个固定主题验收提交；禁止 push、amend、第二提交、rebase、reset、restore、stash、clean 和切换分支 |
+| Git 外部动作 | 仅允许精确 8 路径 `git add` 和一次固定主题 commit；禁止 push、amend、第二提交、reset、restore、stash、clean、switch、checkout 和 rebase |
 | M10-A | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M10-B | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M10 overall | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
@@ -55,14 +55,14 @@
 | M12-A | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M12-B | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | P1B1 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
-| P1B2 | 门一、门二、门三与门四 timeout 前置修订均 `COMPLETE / PROJECT_OWNER_ACCEPTED`；门四综合验收 `NOT STARTED / AWAITING_PROJECT_OWNER_RESTART_AUTHORIZATION` |
+| P1B2 | 门一、门二、门三、timeout 前置修订、门四 Stage B 及 Stage C 安全整改均 `COMPLETE / PROJECT_OWNER_ACCEPTED`；新的真实 Stage C `NOT STARTED / AWAITING_PROJECT_OWNER_AUTHORIZATION` |
 | M13–M16 | `HISTORICAL DECOMPOSITION / MAPPED TO P1B1 AND P1B2` |
 | M11 start baseline | `main@f426e6f23703002a648991e5bb436929df19e8e2` |
 | M11-B start baseline | `main@4ed740222238433541fb31c993dd75610634d157` |
 | M12-A start baseline | `main@f5e24dcaab4801dbeffb8400f2960c33b60b4f00` |
 | M12-B start baseline | `main@ffd29353cb4682c74fd3455425822999444bb1d2` |
-| 是否处于项目负责人暂停点 | 是，timeout 前置修订已验收；门四综合验收等待项目负责人重新授权。 |
-| 更新时间 | `2026-07-30` |
+| 是否处于项目负责人暂停点 | 是；当前污染 run 永久作废，新的真实 Stage C `NOT STARTED / AWAITING_PROJECT_OWNER_AUTHORIZATION`。 |
+| 更新时间 | `2026-07-31` |
 
 ## P1B2 门一：独立环境与依赖验证
 
@@ -1231,6 +1231,159 @@ Runtime、MinIO 和 Explanation Provider 调用均不在数据库 UoW 内。Back
   `SEM_INTEGRITY_OK`、精确 3 路径、空 staging、两项 diff check 与安全扫描
   均为 `PASS`；3000/8000/8100 无监听残留。
 
+## P1B2 门四综合验收重新授权尝试
+
+- 正式恢复基线精确为
+  `main@0db1c29f661313b10dac81c807f2649210046c1f`，subject
+  `fix: allow zta35g runtime timeout up to 900s`，parent
+  `5735384430a7556682993de8861d2a7d28889156`；开始 working tree clean、
+  staging empty、untracked 0，两项 Git diff check 均通过。
+- 完整读取门四指定文件后确认：真实 Runtime 入口为
+  `materialsagent_zta35g_runtime.main.run()`，固定 `127.0.0.1:8100`；
+  Backend 的 `ZTA35G_RUNTIME_TIMEOUT_SECONDS=900` 实际构造
+  `urllib3.Timeout(total=900.0)`，并使用 `retries=False`；DeepSeek timeout
+  独立为 60 秒；Vite `/api` 代理没有主动 timeout。Tool retry 与
+  Explanation retry 公共路由分别为
+  `POST /api/v1/tasks/{task_id}/tool-runs` 和
+  `POST /api/v1/tool-results/{result_id}/explanations`。
+- 进入实现和真实资源前发现场景 5/7 与生产语义冲突。场景 5 要求 Tool retry
+  后 Task=`SUCCEEDED` 且自动 Explanation 成功；此时
+  `ToolTaskCard.vue` 明确不显示 `retry-explanation`。Backend
+  `reserve_retry_attempt()` 还要求 Task 只能为 `PARTIALLY_SUCCEEDED` 或
+  `FAILED`、必须已有失败 Explanation、且同语言不能已有成功 Explanation。
+- 现有 Frontend 最小复现命令
+  `npm test -- --run tests/components/tool-task-card.test.ts -t
+  "offers Explanation retry only when Result exists and explanation needs it"`
+  结果为 1 个 test file、`1 passed | 16 skipped`，并明确断言成功 Explanation
+  不提供重试按钮。Backend 既有 API 测试也锁定成功 Explanation 后使用新 key
+  返回 `409 / EXPLANATION_NOT_RETRYABLE`。
+- 本轮禁止修改 `frontend/src/**` 和 `backend/src/**`，也不得在 Runner 或测试中
+  绕过生产缺陷，因此立即停止。未创建 Runner、Executor、真实 E2E 或运行手册；
+  未读取 Secret/权重，未启动 Docker 或任何服务，Provider delegate、
+  Runtime delegate、DDPM sampling 均为 `0`。
+- 当前状态：
+  `BLOCKED / AWAITING_PROJECT_OWNER_REVIEW`。
+
+## P1B2 门四最终分阶段资源门与 Git 状态修订
+
+- 2026-07-31 项目负责人批准：当前实施阶段的精确合法工作区为 4 个 tracked
+  modified 加 4 个授权 untracked，unexpected path 为 0、staging empty；不再
+  要求当前 `Untracked=0`，也不得删除、暂存或提交这 8 个文件。未来只有在项目
+  负责人批准并完成验收提交后才恢复 `Untracked=0` 要求。
+- 统一 8 GiB、单点 6.75 GiB、五次采样中位数 6.70 GiB、Stage B 6.5 GiB /
+  Stage C 6.25 GiB 均为已废止历史规则。此前所有资源门拒绝均发生在真实
+  delegate 前，Runtime/DDPM/Provider 预算仍为 0。
+- Stage B 当前唯一启动门为 `5905580032 bytes`（5.5 GiB），在设置真实模型
+  授权、启动 Runtime 或打开权重前，以 `GlobalMemoryStatusEx.ullAvailPhys`
+  实际字节判断；少 1 byte 固定失败为
+  `P1B2_GATE4_STAGE_B_MEMORY_PREFLIGHT_FAILED`。
+- Stage B 分开保存 before-runtime-start、after-runtime-ready、pre-execute、
+  minimum-during-execute 和 post-execute 实际字节，并分别计算本轮
+  `stage_b_model_load_drop_bytes`、`stage_b_execute_drop_bytes` 和
+  `stage_b_total_drop_bytes`。ready 后无 execute 至少等待 2 秒；after-ready 与
+  pre-execute 各使用 3 次、间隔 250 ms 的中位数。Stage C 只使用前两个增量，
+  不得使用总下降量或门三历史常量。
+- 浏览器、Frontend、Backend、PostgreSQL、MinIO 已运行而 Runtime 尚未启动时，
+  Stage C Runtime 启动门为
+  `max(4831838208, stage_b_model_load_drop_bytes+1610612736)`；失败固定为
+  `P1B2_GATE4_STAGE_C_RUNTIME_START_MEMORY_FAILED`，不得打开权重或增加预算。
+  Runtime ready 且模型加载后至少等待 2 秒，Tool retry 门为
+  `max(3758096384, stage_b_execute_drop_bytes+1610612736)`；通过后才输出
+  `P1B2_GATE4_TOOL_RETRY_RESOURCE_READY`，失败固定为
+  `P1B2_GATE4_STAGE_C_TOOL_RETRY_MEMORY_FAILED`，Runtime/DDPM/Provider 预算
+  不得增加。
+- 浏览器及综合栈占用已经包含在 Stage C 实时空闲内存读数中。Stage B 覆盖模型
+  加载、常驻模型和首次推理；Stage C 两道门分别只覆盖模型加载增量和模型已加载
+  后的单次推理增量，禁止把 Stage B 总下降量重复加入 Tool retry 门。
+- 运行期低于 `2147483648 bytes`（2.0 GiB）记录
+  `HOST_MEMORY_LOW_WARNING` 首次时间、最低值和持续时间；低于
+  `1610612736 bytes`（1.5 GiB）记录 `HOST_MEMORY_CRITICAL_LOW`。调用前命中
+  critical 不得 delegate；调用中命中则等待返回后立即停止 Runtime并清理，
+  不得 CPU fallback、降低尺寸/timesteps 或启用 AMP/半精度。
+- 该规则仅为当前约 15.4 GiB 物理内存主机的验收配置，不是生产部署推荐，也不
+  保证其他硬件表现相同。GPU 门、固定推理参数和真实调用预算均未降低。
+- 当前 fresh 离线结果：PowerShell/Python SelfTest 均输出固定成功标记，
+  helper/E2E `65 passed, 1 skipped`，Python compile、`SCOPE_OK P1B2`、
+  `SEM_INTEGRITY_OK`、tracked/cached/untracked whitespace 检查均通过。
+  Phase2/Stage C 尚未接线并保持 fail closed，当前不允许 Tool retry。
+- 最终规则下第一次 Stage B 尝试在 GPU 只读门失败；根因是清洗后的 Windows
+  子进程环境缺少 NVML DLL 发现所需的 `ProgramFiles`/`ProgramW6432`。单变量
+  诊断确认恢复后 `nvidia-smi` 正常，Runner 已在继续隔离 Key 的前提下补齐两个
+  普通系统变量和离线回归。该次未创建 run root、未启动 Runtime/权重，三类真实
+  预算仍为 0。
+- 第二次 Stage B 尝试 run id 为 `g4b745bf4426744c6653b57b1d`，Runtime 在模型
+  加载阶段失败，safe state 三类预算仍为 0。不打开权重的最小探针定位为 Python
+  二次角色清洗遗漏 `USERPROFILE`，导致 torch import RuntimeError；单变量恢复后
+  torch/CUDA 探针正常，Runner 已补齐且 Key 仍隔离。收尾最初报告 cleanup
+  incomplete；确认 PID 已退出、端口/GPU/Secret/`.env` 均干净后，只删除了该 run
+  临时目录，未触及正式资源。
+- harmless owned-child 复现确认 cleanup 误报来自 Windows retained `Popen`
+  handle：已终止进程仍可查询 creation time。Runner 已改为
+  `GetExitCodeProcess == STILL_ACTIVE` 的活动状态判定，查询失败继续 fail
+  closed；仅 `ERROR_INVALID_PARAMETER(87)` 作为 PID 不存在，access denied 与
+  其他错误均保持 indeterminate。retained-handle、错误注入和完整
+  ownership/taskkill 诊断均通过。
+- 第三次 Stage B 尝试 run id `g42ecb990e686728656bdf99e9` 在 model loading
+  阶段安全失败，三类预算仍为 0。根因是 Runner 将 `ZTA35G_MODEL_ROOT` 指向
+  `SEM/` 而非 manifest 确认的 `SEM/ZTA35G_lab/`。离线 RED/GREEN 已改为精确
+  bundle root；Secret 扫描、端口、GPU、`.env` 和精确 run-root 删除均完成。
+  按三次失败审计边界不再自动执行第四次真实 Stage B，等待项目负责人复核。
+- 项目负责人随后明确授权第四次且最终一次 Stage B。run id
+  `g452f78ce7e468dea983977272` 的 Runtime PID `5432` 在正式 Python 3.8
+  环境加载 `zta35g-sem-original-bundle` 到 cuda，并只监听
+  `127.0.0.1:8100`。Token/非法请求负测在 delegate 前通过；唯一 combined
+  execute 用时 `632.797 s` 并返回 `SUCCEEDED`，并发请求以
+  `503 / RUNTIME_BUSY / retryable=true` 拒绝。最终 Runtime/DDPM/Provider
+  预算为 `1/2`、`1/2`、`0/5`。
+- 本次内存实测为：before-start `6515011584 bytes`、after-ready
+  `5061283840 bytes`、pre-execute `5080629248 bytes`、minimum
+  `2376253440 bytes`、post-execute `3393437696 bytes`；model-load、
+  execute 和 total drop 分别为 `1453727744`、`2704375808` 和
+  `4138758144 bytes`。warning/critical 均未触发；GPU peak used 3085 MiB、
+  minimum free 2910 MiB。清理后 8100 无监听、GPU used 0 MiB、计算进程 0，
+  run root 已精确删除，`.env` 哈希未变，未创建数据库或 bucket。
+- 响应进程内合同检查通过 NPY hash、`allow_pickle=False`、`<f4`、
+  `[512,512]`、C contiguous、finite和值域边界；性能为
+  `413.39765052163557 MPa` 和 `2.9387915447083017 %`。但安全 summary 未
+  持久化精确 NPY/Base64/JSON 字节数、图片 SHA-256、实际 min/max，也未显式
+  保存非全常数证据。临时响应已按强制清理删除，第二次 execute 被禁止，不能
+  补采或猜测。相同固定输入、seed、bundle 和主机环境已经在门三独立验证这些
+  字段；项目负责人接受其为非阻塞证据限制，并决定不消耗第二次 Runtime 预算
+  重复 Stage B。
+- 清理后 fresh 验证：PowerShell/Python SelfTest 成功，helper/E2E
+  `65 passed, 1 skipped`，Python compile、Scope、SEM 和三类 whitespace
+  检查均通过。
+- 项目负责人审阅结论为 Stage B
+  `COMPLETE / PROJECT_OWNER_ACCEPTED`、第五次 Stage B `NOT AUTHORIZED`。
+  当时的 Stage C 授权已在 Provider 隔离事故后整体作废；原快照 Runtime
+  `1/2`、DDPM `1/2` 仍是 Stage B 事实，Provider `0/5` 不具权威性且不得用于
+  当前或未来 run。不得再次执行 Runtime direct。
+- Stage C 离线 RED/GREEN 已补齐已接受预算的恢复和跨 Backend/Runner 重启
+  不归零语义。PowerShell/Python SelfTest、helper/E2E
+  `71 passed, 1 skipped`、compile、Scope、SEM 与 Git checks 通过。
+- Stage C run id `g456aaa9615b3b4bd08bd1d9e9` 的初始综合栈未到达浏览器
+  marker。先后确认并修复 Phase1 包装器遗漏 `PROGRAMFILES`/`PROGRAMW6432`、
+  Frontend PowerShell `-Command` 拆分含空格 Node 路径，以及 retained-handle
+  回滚误判；三项均有 RED/GREEN。
+- 完整 Phase1 仍固定命中 `P1B2_GATE4_PROCESS_IDENTITY_FAILED`。Compose、
+  Backend、Vite 的单独边界均通过，继续重复启动只会叠加未经证实的假设，因此按
+  系统化调试停止条件收口。浏览器场景未开始，Runtime 始终停止，Provider 调用 0。
+- 清理后临时 database/bucket 不存在，六个命名 volume 的数量和 fingerprint
+  前后相同，目标端口均无监听，GPU used 0 MiB、计算进程 0，`.env` 哈希未变。
+  Runtime/DDPM 预算保持 `1/2`、`1/2`。
+- 清理后的完整 Mock 回归首次手工命令遗漏测试子进程
+  `LLM_ADAPTER=mock` 覆盖；根 `.env` 配置为 `deepseek`，该进程因而使用真实
+  Provider Adapter。明确观察到至少 8 个本应为 Mock 503 的请求返回 200，且此前
+  同环境 Backend full 运行 300 秒后才终止；临时数据库已删除，无法精确恢复
+  实际 delegate 总数。Runner 账本仍显示 Provider `0/5`，但真实 Provider
+  预算已不可审计且至少存在 8 次 Chat delegate，故不得把 `0/5` 当作实际预算
+  事实或宣称预算合规。
+- 显式覆盖 `LLM_ADAPTER=mock` 后的 fresh 回归为 Backend full
+  `1063 passed, 1 skipped`、Mock Runtime `11 passed`、Frontend
+  `204 passed`；两套 pip/compile、Frontend typecheck/build、Alembic
+  head/current/check 均通过。测试数据库最终为 0，Stage C database/bucket
+  仍不存在，Mock 栈和本轮 run root 已清理。通过结果不消除 Provider 预算事故。
+
 ## 已知风险
 
 - P1B2 门三只是在当前单机、固定输入、4 次串行样本上证明 6 GiB RTX 3060
@@ -1258,18 +1411,132 @@ Runtime、MinIO 和 Explanation Provider 调用均不在数据库 UoW 内。Back
 - 开始空闲主机内存仅约 `8.610 GiB`，低于 9 GiB 推荐值；虽然本次最低仍有约
   `4.797 GiB`，后续门四若资源背景不同必须重新做自己的授权前置门。
 
+## P1B2 门四 Stage C Provider 隔离事故与安全整改
+
+- 当前 Stage C run 永久为
+  `INVALIDATED / PROVIDER_BUDGET_UNAUDITABLE`。清理后的手工 Mock 回归没有
+  显式强制 `LLM_ADAPTER=mock`，测试进程读取根 `.env` 的 deepseek 模式并构造
+  真实 Adapter；已明确观察计划外真实 Chat delegate `>= 8`。同环境另有一次约
+  300 秒运行，临时数据库已清理，因此精确总数不可恢复。不得把该下界改写为
+  精确 8 次，也不得继续采用旧 Runner 的 Provider `0/5`。
+- 当前 run 整体作废且不能并入任何未来预算。Secret 精确扫描无命中；`.env`
+  SHA-256 仍为
+  `11ef1a30f325ad5cc3c25538971301ec4b16bb75a4720bdc066c8035758a935c`。
+  Stage B 已接受的真实 Runtime direct、Runtime `1/2`、DDPM `1/2` 证据继续
+  有效。
+- 所有 Mock 回归改由受控 Runner 启动。每个测试子进程获得显式
+  `LLM_ADAPTER=mock` 和空白 `DEEPSEEK_API_KEY` 覆盖，并移除
+  `M12B_REAL_CALLS_AUTHORIZED`、`P1B2_GATE4_AUTHORIZED` 及门四全部真实授权。
+  同一精确子进程环境在 pytest collection 前验证
+  `AppSettings().llm_adapter == "mock"`，同时验证两个 DeepSeek Adapter 构造
+  与 Provider delegate 均为 0；否则固定
+  `P1B2_GATE4_MOCK_PROVIDER_ISOLATION_FAILED`。
+- 安全整改初次代码审查为
+  `P1B2_GATE4_STAGE_C_SAFETY_REMEDIATION_CODE_REVIEW: CHANGES_REQUESTED`：
+  原 `MockRegression` 只覆盖 helper，未保护完整 Mock 回归；原进程身份只检查
+  marker，未锁定精确 argv。现已拆分 `MockHelperTests` 与
+  `MockFullRegression`，兼容 `MockRegression` 固定指向完整回归。完整入口复用
+  `run-phase-1a.ps1`，在系统临时目录的固定 HEAD 干净快照运行，不复制根
+  `.env`，不修改真实 index/working tree。
+- 聚焦 RED 为 `10 failed, 103 passed, 1 skipped`，直接证明完整回归入口缺失、
+  marker-only 会放过错误脚本/action 与参数增删重排、账本崩溃窗口仍可恢复成
+  `EXACT`；失败不是 fixture、import 或语法错误。
+- 独立只读复核发现完整 Mock 栈若部分启动后返回失败，外层原先尚未取得 cleanup
+  responsibility。新增 RED 精确证明该缺口；现已在 start 命令前承担清理责任，
+  所有返回路径执行幂等 stop，并核对六个目标端口及固定
+  `materialsagent` Compose 容器集合。另一个 RED 锁定永久 `INVALIDATED` 账本
+  不得被降级成 `UNKNOWN`；两项聚焦 GREEN 为 `2 passed`。
+- Provider 计数已与 Runtime/DDPM 内存账本分离。未来 fresh run 的账本只保存
+  固定 schema、run id、Chat/Explanation/total attempts、maximum、state 和
+  updated time；`state` 仅允许 `EXACT/UNKNOWN/INVALIDATED`。每次真实 Adapter
+  delegate 前均在锁内读取、核对 run/budget/数据库事实、先增加 attempt、fsync
+  后原子替换、重新读取确认，再释放到真实 Adapter。三次 Backend 重启共享同一
+  文件；第 6 次在 delegate 前拒绝。
+- 该账本的准确语义是“Provider delegate 边界的权威保守计数”。正常且无进程
+  崩溃时应与当前 run 的 DeepSeek `LLMCall` 数据库事实一致；若进程在预留
+  attempt 后、Adapter 调用前异常退出，计数可能保守多计但不会少计或放行
+  超预算调用，该 run 必须为 `UNKNOWN` 或 `INVALIDATED`，不得继续或写
+  `PASSED`。
+- 账本缺失、损坏、run id 不匹配、计数回退、与 `LLMCall` 数据库事实冲突、
+  原子替换失败或子进程结束后无法读取，均固定进入
+  `P1B2_GATE4_PROVIDER_CALL_COUNT_UNKNOWN`，禁止继续真实调用和浏览器场景。
+  现有 `create_app()` 的 Chat/Explanation 显式注入 seam 已验证可用；真实
+  DeepSeek Adapter 外层由两个预算 wrapper 包装，生产 Backend 代码未修改。
+- 进程身份记录增加 `command_argument_count` 和
+  `command_arguments_sha256`。`argv[1:]` 保持顺序和完整 token，以 UTF-8
+  紧凑 JSON 数组规范化后计算 SHA-256，不保存完整参数。路径含空格、引号
+  参数、retained handle 正例通过；退出、PID 重用、start time、executable、
+  参数增删/重排、脚本/action、marker 与监听 owner 不匹配均拒绝。marker
+  存在但脚本或 action 错误时固定因 `command_arguments` 拒绝。role 由 record
+  schema、精确 argv 和 marker 共同约束；port 独立证据为实际 LISTENING 与
+  owner PID。安全诊断只含
+  `role/pid/expected/actual/failure_field`，没有放宽所有权边界。
+- Phase1 启动失败不再回退成可复用 `STAGEB_COMPLETE`。Backend、Frontend 或
+  ownership 任一失败都停止本轮 owned process、删除精确 database/bucket、
+  恢复环境并把 run 标成 `INVALIDATED`；未来只有项目负责人重新授权后，先安全
+  删除已清理的旧 run root，再创建不同 run id、ledger、database、bucket、
+  Actor 和 Conversation。
+- Python 与 PowerShell 的 `--stage-b`/`StageB` 已固定拒绝第五次尝试；
+  `--phase-1`/`Phase1` 已固定拒绝新的真实 Stage C。当前只允许 SelfTest、
+  受控 Mock helper/E2E、受控完整 Mock 回归和静态检查。
+- 代码审查修订后的受控 helper 为 `117 passed, 1 skipped`。完整
+  `MockFullRegression` 复用 Phase 1A 并输出
+  `P1B2_GATE4_MOCK_FULL_REGRESSION_OK`；run id
+  `20260731T064439Z-c941e3f9aa0b`，Backend E2E `24 passed`、Backend full
+  `992 passed`、Mock Runtime `11 passed`、Frontend `204 passed`，
+  typecheck/build、Alembic、pip/compileall、SEM/M12A Scope、Secret 扫描与
+  cleanup 均通过。DeepSeek `LLMCall` 增量 0、Adapter 构造 0、真实 Provider
+  账本无增量，根 `.env` SHA-256 前后一致。
+- 独立只读复审在部分启动清理和 `INVALIDATED` 状态保持修复后返回
+  `NO_BLOCKING_FINDINGS`；本轮三项代码审查要求均已关闭，但 Stage C 状态和
+  新真实 run 授权边界不变。
+- 项目负责人最终代码审查结论为：
+
+  ```text
+  P1B2_GATE4_STAGE_C_SAFETY_REMEDIATION_CODE_REVIEW:
+  APPROVED
+  ```
+
+  P1B2 门四 Stage C 安全整改现为
+  `COMPLETE / PROJECT_OWNER_ACCEPTED`。污染 run 仍永久为
+  `INVALIDATED / PROVIDER_BUDGET_UNAUDITABLE`，已知计划外真实 Chat delegate
+  仅能确定为 `>= 8`，精确总数不可恢复，旧 Provider `0/5` 不具权威性。
+- 最终受控 Mock 证据 run id 为 `20260731T064439Z-c941e3f9aa0b`：
+  Backend E2E `24 passed`、Backend full `992 passed`、Mock Runtime
+  `11 passed`、Frontend `204 passed`，DeepSeek `LLMCall` delta 0、
+  DeepSeek Adapter constructions 0、Secret scan PASS、cleanup PASS。
+  干净快照及动态产物在成功清理后删除；最终审查包保留的是受控 Runner 从实际
+  日志解析和校验后输出的安全摘要，不包含原始 Phase 1A 动态文件。
+
+事故记录标记：
+`P1B2_GATE4_PROVIDER_BUDGET_INCIDENT_RECORDED`。
+
+当前状态：
+
+```text
+P1B2 门四 Stage B:
+COMPLETE / PROJECT_OWNER_ACCEPTED
+
+P1B2 门四 Stage C 安全整改:
+COMPLETE / PROJECT_OWNER_ACCEPTED
+
+当前 Provider 预算:
+UNAUDITABLE / CURRENT_RUN_INVALIDATED
+
+新的真实 Stage C:
+NOT STARTED / AWAITING_PROJECT_OWNER_AUTHORIZATION
+```
+
 ## 下一步
 
-创建 timeout 前置修订唯一验收提交并恢复干净工作区。
-
-项目负责人重新授权门四综合验收后，从新的正式 HEAD 完整重新执行门四，不得沿用
-此前阻塞尝试的执行状态。未经新的明确指令，不得进入门四阶段 A/B/C/D，不得启动
-真实 Runtime、Backend、PostgreSQL、MinIO、Frontend，不得调用 DeepSeek 或执行
-真实模型推理。不得 push、amend 或创建第二提交：
+创建安全整改唯一验收提交并恢复干净工作区。项目负责人重新授权后，使用全新的
+`run_id`、Provider 账本、database、bucket、Actor 和 Conversation 执行
+Stage C 核心真实浏览器闭环；不得恢复或复用污染 run。当前不得重跑 Phase1、
+执行第五次 Stage B、进入 Runtime/Provider 调用、push 或 amend：
 
 ```text
 当前里程碑：P1B2
-当前工作单元：P1B2 门四 timeout 前置修订
+当前工作单元：P1B2 门四 Stage C 安全整改验收提交
 状态：COMPLETE / PROJECT_OWNER_ACCEPTED
 
 M11:
@@ -1313,14 +1580,76 @@ COMPLETE / PROJECT_OWNER_ACCEPTED
 P1B2 门四 timeout 前置修订:
 COMPLETE / PROJECT_OWNER_ACCEPTED
 
-P1B2 门四综合验收:
-NOT STARTED / AWAITING_PROJECT_OWNER_RESTART_AUTHORIZATION
+P1B2 门四 Stage C 安全整改:
+COMPLETE / PROJECT_OWNER_ACCEPTED
+
+新的真实 Stage C:
+NOT STARTED / AWAITING_PROJECT_OWNER_AUTHORIZATION
+
+P1B2 门四 Stage B:
+COMPLETE / PROJECT_OWNER_ACCEPTED
+
+Runtime direct:
+SUCCEEDED
+
+Runtime budget:
+1 / 2
+
+DDPM budget:
+1 / 2
+
+Provider budget:
+UNAUDITABLE / CURRENT_RUN_INVALIDATED
+
+Runner provider ledger:
+NOT AUTHORITATIVE FOR INVALIDATED RUN
+
+Fifth Stage B:
+NOT AUTHORIZED
+
+Stage C run id:
+g456aaa9615b3b4bd08bd1d9e9
+
+Stage C marker:
+P1B2_GATE4_PROVIDER_BUDGET_INCIDENT_RECORDED
+
+New real Stage C:
+NOT STARTED / AWAITING_PROJECT_OWNER_AUTHORIZATION
+
+Safety remediation verification:
+Python SelfTest PASS
+PowerShell SelfTest PASS
+Controlled Mock helper/E2E 117 passed, 1 skipped
+Controlled Mock full PASS
+Phase 1A run id 20260731T064439Z-c941e3f9aa0b
+Backend E2E 24 passed
+Backend full 992 passed
+Mock Runtime 11 passed
+Frontend 204 passed
+DeepSeek LLMCall delta 0
+DeepSeek Adapter constructions 0
+Python compile PASS
+SCOPE_OK P1B2
+SEM_INTEGRITY_OK
+Git whitespace checks PASS
+
+Safety remediation marker:
+P1B2_GATE4_STAGE_C_SAFETY_REMEDIATION_CODE_REVIEW_APPROVED
 
 Staging:
-EXACT SEVEN-PATH ACCEPTANCE STAGING ONLY
+EMPTY
 
-Commit:
-SOLE ACCEPTANCE COMMIT AUTHORIZED / HASH NOT PREFILLED
+Tracked modified:
+EXACT 4
+
+Authorized untracked:
+EXACT 4
+
+Unexpected:
+0
+
+Acceptance commit:
+AUTHORIZED / HASH NOT PREFILLED
 
 Push:
 NO
