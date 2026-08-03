@@ -1366,3 +1366,32 @@ Stage C。
 暂存上述 7 个路径并创建一个由 Git 生成 hash 的唯一验收提交；提交后必须恢复
 working tree clean、staging empty、untracked 0 并停止。该验收不改变离线证据边界：
 真实 DeepSeek Prompt 质量仍未验证，也未授权真实 Provider、Runtime 或 GPU。
+
+## P1B2 门四-A 路线调整：正式 Stage C Runner 暂缓（2026-08-04）
+
+项目负责人确认，首次真实 DeepSeek 与真实 ZTA35G Runtime 同时启用的浏览器闭环
+已经完成，当前平台已经能够支撑本地开发和人工体验。该人工闭环事实不等同于正式
+Stage C Runner 的生产级安全验收，也不改变既有真实资源调用必须单独授权的边界。
+
+正式 Stage C 五阶段 Runner 的继续开发和修复自本节起暂停。未完成实现不进入 Git
+历史；其精确 8 路径 diff 仅仓库外保存供未来重新设计时参考，仓库内对应路径恢复到
+当前 HEAD。当前提交版本继续保持既有公开入口的安全拒绝，不以手工拼装服务替代
+正式 Runner，也不把未完成实现描述为可用的生产控制面。
+
+后续阶段优先顺序调整为：
+
+1. 扩展材料智能体的对话、任务协作和结果使用能力；
+2. 持续完善 Chat Orchestration Harness 与离线评测覆盖；
+3. 改善 Frontend 的交互、时间线、错误呈现和人工体验；
+4. 在现有 Tool Registry 和确定性 Application 边界内推进多 Tool 接入；
+5. 仅在本地 MVP 的功能价值和使用方式稳定后，再单独评估是否需要恢复正式 Stage C
+   Runner 及其进程、Secret、预算、审计和清理安全验收。
+
+未来若恢复该 Runner，必须创建新的独立计划和授权边界，不得直接应用本次参考 diff，
+不得复用历史污染 run、旧账本或临时资源。本路线调整本身不授权真实 Provider、真实
+Runtime、GPU、模型、根 `.env`、数据库/MinIO 数据删除或任何外部资源变更。
+
+本路线调整和工作区恢复结果已经项目负责人验收通过。收尾只允许精确暂存阶段计划、
+当前进度和 Phase 1B 报告并创建主题为 `docs: defer formal stage c runner` 的唯一
+文档提交；提交后必须确认 working tree clean、staging empty、untracked 0，并停止。
+该授权不包含 push、amend、第二提交或恢复正式 Runner 开发。

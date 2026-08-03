@@ -1111,3 +1111,34 @@ NOT STARTED / AWAITING_PROJECT_OWNER_AUTHORIZATION
   所有 pytest 从 fixture 导入前隔离根 `.env`，真实 DeepSeek、Runtime 和 GPU
   使用均为 0。本轮唯一 tmpfs PostgreSQL 容器已精确删除；Docker 在数据库门之前
   已为外部预存运行状态，因此验收收尾保留其运行，不改变既有容器和命名卷。
+
+## 十五、P1B2 门四-A 路线调整与当前结论
+
+### 15.1 已完成的本地人工闭环
+
+- 项目负责人确认，首次真实 DeepSeek 与真实 ZTA35G Runtime 同时启用的浏览器
+  闭环已经完成。
+- 该结果表明当前平台能够用于本地开发、功能探索和人工体验。它是项目负责人对
+  本地使用价值的确认，不是正式 Stage C Runner 的生产级进程、Secret、预算、
+  审计和原子清理验收。
+
+### 15.2 正式 Runner 暂缓
+
+- 正式 Stage C 五阶段 Runner 的安全复杂度已经超出本地科研 MVP 当前需求，停止
+  继续开发和修复；其生产级安全验收状态为 `DEFERRED`。
+- 未完成 Runner 实现的精确 8 路径 diff 已仓库外保存供未来参考，仓库内对应路径
+  已恢复到当前 HEAD。该实现未暂存、未提交，也不构成当前正式入口或历史验收
+  证据。
+- 当前提交版本继续保留既有 Mock 回归、Chat Orchestration Harness 和公开入口的
+  安全拒绝能力。不得通过手工拼装服务绕过既有 Provider、Runtime 和资源边界。
+
+### 15.3 后续方向与本轮边界
+
+- 后续优先推进智能体功能、Chat Orchestration Harness、Frontend 人工体验和多
+  Tool 接入；正式 Runner 仅在未来需求重新成立后以新的独立工作单元评估。
+- 本路线调整没有调用真实 Provider 或 Runtime，没有启动 GPU/模型，没有读取根
+  `.env`，没有删除或修改 SEM、数据库 volume、MinIO volume 或用户已有数据。
+- 路线调整和工作区恢复结果已经项目负责人验收通过。本轮只允许将阶段计划、当前
+  进度和本报告精确纳入主题为 `docs: defer formal stage c runner` 的唯一收尾提交；
+  提交后必须保持 working tree clean、staging empty、untracked 0，不得 push、
+  amend、创建第二提交或恢复正式 Runner 开发。

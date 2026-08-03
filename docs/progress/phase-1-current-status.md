@@ -8,9 +8,9 @@
 |---|---|
 | 当前阶段 | 真实能力接入 |
 | 当前里程碑 | P1B2 |
-| 当前工作单元 | P1B2 门四-A 前置 Chat Orchestration Harness 完善 |
-| 状态 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
-| 上一已验收工作单元 | P1B2 门四 Stage C 安全整改验收提交 |
+| 当前工作单元 | P1B2 门四-A 正式 Runner 暂缓与路线调整 |
+| 状态 | `FORMAL STAGE C RUNNER DEFERRED / LOCAL MVP AVAILABLE / PROJECT_OWNER_ACCEPTED` |
+| 上一已验收工作单元 | P1B2 门四-A 前置 Chat Orchestration Harness 完善 |
 | Pre-M8 stop-loss commit | `891714dd58cf069073a7d4037be43ef66304d0ac` |
 | M8 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M8 acceptance commit | `18005944982ca5191412e06154effc67465ca3a7` |
@@ -35,16 +35,16 @@
 | 暂存区 | `empty`；本轮禁止暂存 |
 | P1B1 验收提交范围 | 精确 26 个 allowlist 路径；原 24 路径加 Phase 1A Runner 和 compatibility 共享授权门 |
 | P1B2 门一范围 | 精确 8 个 allowlist 路径；2 个测试兼容性修订路径加 6 个收尾路径 |
-| P1B2 当前 allowlist | 精确 7 个 Harness 路径；其余路径禁止修改 |
+| P1B2 当前 allowlist | 精确 3 个文档路径：阶段计划、当前进度、Phase 1B 报告 |
 | 已确认设计基线 | 五份均未修改 |
 | 历史 migration | `0001`–`0008` 均未修改；当前唯一 head/current 为 `0009_timeline_query_indexes` |
 | `SEM/` | 未修改；门三前后 `SEM_INTEGRITY_OK`；固定 bundle 在 GPU 完成 A–D 精确 4 次受控推理并已释放 |
 | Mock Runtime | 实现和协议未修改 |
-| Real Provider calls | 历史 M12-B 为 6；作废 Stage C run 已明确观察计划外真实 Chat delegate `>= 8`；本 Harness 工作单元真实调用 0 |
-| Commit | 唯一验收提交已授权；本文件由该提交固化，hash 以 Git 实际结果为准 |
+| Real Provider calls | 历史 M12-B 为 6；作废 Stage C run 已明确观察计划外真实 Chat delegate `>= 8`；项目负责人确认首次真实 DeepSeek + 真实 ZTA35G Runtime 浏览器闭环已完成；本工作单元真实调用 0 |
+| Commit | 精确 3 文档唯一收尾提交已授权；hash 以 Git 实际结果为准 |
 | Push | `NO` |
 | Amend | `NO` |
-| Git 外部动作 | 仅允许精确 7 路径暂存和一个验收提交；禁止 push、amend、第二提交、reset、restore、stash、clean、switch、checkout 和 rebase |
+| Git 外部动作 | 未完成 Runner 的 8 路径 diff 已仓库外归档并精确恢复到 HEAD；仅允许精确暂存 3 个文档并创建一个收尾提交，禁止 push 和 amend |
 | M10-A | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M10-B | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M10 overall | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
@@ -56,14 +56,14 @@
 | M12-A | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M12-B | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | P1B1 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
-| P1B2 | 门一、门二、门三、timeout 前置修订、门四 Stage B、Stage C 安全整改及门四-A 前置 Harness 均为 `COMPLETE / PROJECT_OWNER_ACCEPTED`；新的真实 Stage C 未授权 |
+| P1B2 | 首次真实 DeepSeek + 真实 ZTA35G Runtime 浏览器闭环已由项目负责人确认完成；平台可用于本地开发和人工体验；正式 Stage C Runner 及生产级安全验收暂缓 |
 | M13–M16 | `HISTORICAL DECOMPOSITION / MAPPED TO P1B1 AND P1B2` |
 | M11 start baseline | `main@f426e6f23703002a648991e5bb436929df19e8e2` |
 | M11-B start baseline | `main@4ed740222238433541fb31c993dd75610634d157` |
 | M12-A start baseline | `main@f5e24dcaab4801dbeffb8400f2960c33b60b4f00` |
 | M12-B start baseline | `main@ffd29353cb4682c74fd3455425822999444bb1d2` |
-| 是否处于项目负责人暂停点 | 是；Harness 已验收，唯一验收提交后停止，不得据此进入新的真实 Stage C。 |
-| 更新时间 | `2026-08-03` |
+| 是否处于项目负责人暂停点 | 是；路线调整已验收，仅完成唯一文档提交后停止。 |
+| 更新时间 | `2026-08-04` |
 
 ## P1B2 门一：独立环境与依赖验证
 
@@ -1728,6 +1728,28 @@ NO
 
 ## 下一步
 
-本文件随项目负责人授权的唯一验收提交固化；提交后必须保持 working tree clean、
-staging empty、untracked 0 并停止。不得 push、amend、创建第二提交，也不得进入
-新的真实 Stage C、启动真实 Runtime/GPU 或调用真实 Provider。
+正式 Stage C 五阶段 Runner 及其生产级安全验收暂缓。后续优先推进智能体功能、
+Chat Orchestration Harness、前端人工体验和多 Tool 接入；如未来恢复正式 Runner，
+必须作为新的独立工作单元重新确认安全目标、范围和授权，不能直接恢复本次未完成
+实现。本轮只允许精确暂存三份文档并创建主题为
+`docs: defer formal stage c runner` 的唯一收尾提交；提交后必须确认 working tree
+clean、staging empty、untracked 0，禁止 push 或 amend，并停止。
+
+## P1B2 门四-A 正式 Runner 暂缓与路线调整（2026-08-04）
+
+- 项目负责人确认，首次真实 DeepSeek 与真实 ZTA35G Runtime 同时启用的浏览器
+  闭环已经完成。该事实证明当前平台可用于本地开发和人工体验；它不等同于正式
+  Stage C Runner 的生产级安全验收。
+- 正式 Stage C 五阶段 Runner 的进程树、资源 ownership、持久化恢复、Secret-free
+  preflight 和全事实链审计复杂度已经超出本地科研 MVP 当前需求，因此停止继续
+  开发和修复，状态调整为 `DEFERRED`。
+- 未完成 Runner 工作单元的精确 8 路径 diff 已保存到仓库外供未来参考；8 路径
+  随后全部恢复到当前 HEAD。本次实验实现未暂存、未提交，也不得作为当前正式入口
+  或验收证据。
+- 当前仓库继续保留已验收的本地开发栈、Chat Orchestration Harness、Mock 回归和
+  既有安全拒绝行为。后续优先级调整为智能体能力、Harness、前端体验和多 Tool
+  接入。
+- 本路线调整工作单元没有读取根 `.env`、调用真实 Provider、启动真实 Runtime/GPU
+  或模型，也没有删除或修改 SEM、数据库 volume、MinIO volume 和用户已有数据。
+- 项目负责人已验收路线调整和工作区恢复结果；后续动作仅限精确三文档的唯一收尾
+  提交，提交后不得 push、amend 或继续正式 Runner 工作。
