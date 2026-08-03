@@ -1305,3 +1305,64 @@ git diff --name-only
 下一步固定为：创建安全整改唯一验收提交并恢复干净工作区。项目负责人重新授权
 后，使用全新的 `run_id`、Provider 账本、database、bucket、Actor 和
 Conversation 执行 Stage C 核心真实浏览器闭环；不得恢复或复用污染 run。
+
+## P1B2 门四-A 前置 Chat Orchestration Harness 完善（2026-08-03）
+
+本工作单元由项目负责人从干净基线
+`main@b074a89563e94bf18419d5bff865636b71326885` 独立授权。它只修复真实浏览器
+体验已经暴露的 Chat Harness 输出意图遗漏，不授权新的真实 Stage C、真实
+DeepSeek、真实 Runtime、GPU、权重或 `.env` 操作。
+
+**根因与最小架构方案：** 当前 Chat 使用 `json_mode`，Provider 实际只接收
+messages 与 JSON response format，不接收 Pydantic 字段 description；旧 system
+message 的 Tool/NEEDS_INPUT 示例又都只包含 `requested_outputs=["sem_image"]`，没有
+完整解释普通用户用语、并列请求、明确排除与中间 SEM 的交付语义。Tool Registry
+已知的能力和限制也没有进入模型上下文。Application 会确定性校验和去重，
+但不允许重新猜测 LLM 已遗漏的输出。修订只在 DeepSeek Chat Adapter 的单次调用
+Harness 内补齐以下内容：
+
+1. 明确唯一 Tool 能生成 SEM 图像，并能预测由屈服强度和延伸率组成的力学性能；
+2. 明确 `requested_outputs` 只表示用户要求的交付项，不表示 Tool 内部计算；
+3. 对只图像、只性能、图像与性能、自然表达、明确排除和缺参场景提供对称说明；
+4. 将 route、Tool、material、四维候选参数、输出集合与追问字段的 JSON 合同直接
+   写入 Provider 实际接收的 system message；Pydantic Schema 只负责本地解析校验，
+   不把 `json_mode` 下不会发送给 Provider 的字段 description 当作 Prompt；
+5. 缺参时保留已经理解的输出意图并返回 `NEEDS_INPUT`，不得猜参数；
+6. 保持一次 `CHAT_ORCHESTRATION` LLM 调用，不增加规则路由、关键词补丁、judge、
+   repair、retry、fallback 或新的 Application 决策。
+
+**精确允许路径：**
+
+- `backend/src/materialsagent/infrastructure/llm/deepseek_chat.py`
+- `backend/tests/contract/test_deepseek_adapters.py`
+- `backend/tests/contract/test_chat_orchestration_harness.py`
+- `scripts/dev/check-scope.ps1`
+- `docs/superpowers/plans/2026-07-17-sem-mvp-phase-1-implementation-plan.md`
+- `docs/progress/phase-1-current-status.md`
+- `docs/acceptance/phase-1b-report.md`
+
+**TDD 与验收顺序：**
+
+1. 先建立离线合同矩阵，验证 Provider 可见 messages、本地 Pydantic 严格解析、
+   route/domain 映射和单次 invoke；在生产 Harness 未修订时保存预期 RED；
+2. 最小修订 Chat system message 内的 Tool 描述、结构化输出说明和模板版本，运行
+   聚焦 GREEN；不切换既有 `json_mode`；
+3. 运行 DeepSeek Adapter 合同、Chat Orchestration 相关单元/合同回归、Backend
+   全量 Mock 回归、Mock Runtime 全量回归、`compileall`、`pip check`、Scope、SEM
+   与 Git whitespace 检查；所有 Mock 子进程必须显式强制 `LLM_ADAPTER=mock`、
+   空 Provider Key 和空真实授权，不读取根 `.env`；
+4. 自审最终 diff，删除不能直接支撑输出意图完整性的抽象、规则或文档扩张；更新
+   当前进度和 Phase 1B 验收报告。
+
+离线 fake Runnable 直接回放预置 payload，只证明 Provider 可见消息的组成、本地
+Pydantic 解析、Adapter/domain 映射和一次调用合同；即使输入采用自然语言样例，也
+不得写成真实 DeepSeek 自然语言理解或 Prompt 质量通过证据。真实 Provider Prompt
+质量评测需要后续单独授权。完整回归不得启动真实 Runtime 或 GPU。结束时保持
+staging empty，不 push、不 amend，并停在本工作单元边界；不得据此进入新的真实
+Stage C。
+
+独立复审结论为 `APPROVED`，Critical、Important、Minor 均为 0；项目负责人据此
+验收，本工作单元状态为 `COMPLETE / PROJECT_OWNER_ACCEPTED`。验收收尾只允许精确
+暂存上述 7 个路径并创建一个由 Git 生成 hash 的唯一验收提交；提交后必须恢复
+working tree clean、staging empty、untracked 0 并停止。该验收不改变离线证据边界：
+真实 DeepSeek Prompt 质量仍未验证，也未授权真实 Provider、Runtime 或 GPU。

@@ -44,7 +44,7 @@ from materialsagent.infrastructure.llm.deepseek_common import (
 
 
 PROMPT_TEMPLATE_ID: Final = "chat-orchestration"
-PROMPT_TEMPLATE_VERSION: Final = "2"
+PROMPT_TEMPLATE_VERSION: Final = "4"
 GENERATION_PARAMETERS: Final = {
     "temperature": 0,
     "max_tokens": 1024,
@@ -134,9 +134,38 @@ def _render_messages(
     value: ChatOrchestrationInput,
 ) -> list[dict[str, str]]:
     system = (
-        "Return exactly one JSON object and no other text. JSON is required. "
-        "Do not use a Markdown code fence and do not explain the JSON. "
-        "Use only one of these schema examples: "
+        "You are the single-call chat orchestrator for a materials research "
+        "application. Interpret the entire message in ordinary user language; "
+        "do not require users to know internal field or output names. Return "
+        "exactly one JSON object and no other text. JSON is required. Do not "
+        "use a Markdown code fence and do not explain the JSON. "
+        "The only available tool is zta35g_sem_virtual_lab. It supports only "
+        "ZTA35G and consumes solution temperature, solution time, aging "
+        "temperature, and aging time. It can generate a user-visible SEM "
+        "image, predict mechanical properties consisting of yield strength "
+        "and elongation, or deliver both in one run. "
+        "Do not infer ZTA35G merely because it is the only supported material. "
+        "If the user does not identify the material, set material to null, "
+        "choose NEEDS_INPUT, include material in missing_fields, and preserve "
+        "the requested_outputs intent already expressed. "
+        "requested_outputs means user-requested deliverables, not internal "
+        "computations. Map a requested SEM, microstructure, morphology, or "
+        "image to sem_image. Map requested yield strength, elongation, "
+        "strength, ductility, or mechanical performance to "
+        "mechanical_properties. Include both values when both deliverables "
+        "are requested, including when one is expressed indirectly. A "
+        "mechanical-only run creates an intermediate SEM internally, but that "
+        "does not make sem_image a requested deliverable. Apply explicit "
+        "exclusions to the excluded deliverable and do not add outputs the "
+        "user did not request. Consider all conjunctions and exclusions before "
+        "choosing the complete output list. "
+        "Use TOOL_EXECUTION only when the tool request has the material and all "
+        "four parameter candidates. Use NEEDS_INPUT when tool intent is clear "
+        "but a required value is missing or ambiguous; keep the complete "
+        "requested_outputs intent already expressed, ask only for the missing "
+        "or ambiguous values, and never guess. Use KNOWLEDGE_ANSWER only when "
+        "the user is asking for knowledge rather than a tool result. "
+        "Use only one of these route shapes and output-intent examples: "
         '{"route":"KNOWLEDGE_ANSWER","answer_text":"schema text"}; '
         '{"route":"TOOL_EXECUTION","tool_id":"zta35g_sem_virtual_lab",'
         '"material":"ZTA35G","candidate_parameters":{'
@@ -145,14 +174,29 @@ def _render_messages(
         '"aging_temperature":{"value":730,"unit":"°C"},'
         '"aging_time":{"value":3,"unit":"h"}},'
         '"requested_outputs":["sem_image"]}; '
-        '{"route":"NEEDS_INPUT","tool_id":"zta35g_sem_virtual_lab",'
+        '{"route":"TOOL_EXECUTION","tool_id":"zta35g_sem_virtual_lab",'
         '"material":"ZTA35G","candidate_parameters":{'
-        '"solution_temperature":null,"solution_time":null,'
-        '"aging_temperature":null,"aging_time":null},'
-        '"missing_fields":["field_name"],"ambiguous_fields":[],'
-        '"follow_up_suggestion":"ask for the missing field",'
-        '"requested_outputs":["sem_image"]}. '
-        "When a parameter is unknown, use NEEDS_INPUT; never guess it."
+        '"solution_temperature":{"value":1000,"unit":"°C"},'
+        '"solution_time":{"value":3,"unit":"h"},'
+        '"aging_temperature":{"value":730,"unit":"°C"},'
+        '"aging_time":{"value":3,"unit":"h"}},'
+        '"requested_outputs":["mechanical_properties"]}; '
+        '{"route":"TOOL_EXECUTION","tool_id":"zta35g_sem_virtual_lab",'
+        '"material":"ZTA35G","candidate_parameters":{'
+        '"solution_temperature":{"value":1000,"unit":"°C"},'
+        '"solution_time":{"value":3,"unit":"h"},'
+        '"aging_temperature":{"value":730,"unit":"°C"},'
+        '"aging_time":{"value":3,"unit":"h"}},'
+        '"requested_outputs":["sem_image","mechanical_properties"]}; '
+        '{"route":"NEEDS_INPUT","tool_id":"zta35g_sem_virtual_lab",'
+        '"material":null,"candidate_parameters":{'
+        '"solution_temperature":{"value":1000,"unit":"°C"},'
+        '"solution_time":{"value":3,"unit":"h"},'
+        '"aging_temperature":{"value":730,"unit":"°C"},'
+        '"aging_time":{"value":3,"unit":"h"}},'
+        '"missing_fields":["material"],"ambiguous_fields":[],'
+        '"follow_up_suggestion":"ask for the material",'
+        '"requested_outputs":["sem_image","mechanical_properties"]}.'
     )
     return [
         {"role": "system", "content": system},

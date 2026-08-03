@@ -351,7 +351,7 @@ def test_chat_metadata_is_pure_and_matches_invoked_prompt() -> None:
 
     assert first == second
     assert first.prompt_template_id == "chat-orchestration"
-    assert first.prompt_template_version == "2"
+    assert first.prompt_template_version == "4"
     assert first.prompt_digest != changed.prompt_digest
     assert first.generation_parameters == {
         "temperature": 0,

@@ -548,6 +548,9 @@ $milestoneAllowlists = @{
         'backend/tests/unit/test_config.py'
         'backend/tests/contract/test_runtime_contract.py'
         'backend/tests/e2e/test_real_zta35g_journey.py'
+        'backend/src/materialsagent/infrastructure/llm/deepseek_chat.py'
+        'backend/tests/contract/test_deepseek_adapters.py'
+        'backend/tests/contract/test_chat_orchestration_harness.py'
         'environments/materialsagent-zta35g.yml'
         'zta35g-runtime/requirements-win-py38.lock.txt'
     )

@@ -985,3 +985,129 @@ NOT STARTED / AWAITING_PROJECT_OWNER_AUTHORIZATION
 
 安全整改审查状态：
 `P1B2_GATE4_STAGE_C_SAFETY_REMEDIATION_CODE_REVIEW_APPROVED`。
+
+## 十四、P1B2 门四-A 前置 Chat Orchestration Harness 完善
+
+### 14.1 基线、现象与根因
+
+- 本工作单元从干净基线
+  `main@b074a89563e94bf18419d5bff865636b71326885` 开始；staging、tracked
+  diff 和 untracked 均为空。项目负责人只授权 Chat Orchestration Harness
+  完善，不授权新的真实 Stage C、真实 DeepSeek、真实 Runtime、GPU 或权重操作。
+- 真实浏览器体验中，普通用户同时要求生成 SEM 图像并预测屈服强度和延伸率，
+  Chat Orchestration 却只产生 `requested_outputs=["sem_image"]`；把同一意图改写
+  成明确内部字段后，图像和性能均成功。既有 Runtime、性能模型和确定性校验因此
+  不是该遗漏的根因。
+- 旧 Chat system prompt 主要说明 JSON shape；唯一完整 Tool 示例和唯一
+  `NEEDS_INPUT` 示例都只使用 `sem_image`。当前 `json_mode` 不会把本地 Pydantic
+  字段 description 发送给 Provider，因此模型消息中没有获得屈服强度/延伸率、
+  并列请求、明确排除与中间 SEM 的完整交付语义。Tool Registry 已知的能力与限制
+  也没有进入模型消息。
+- Adapter 原样把 Provider 输出映射为 `ToolCandidate`；Application 只负责单位、
+  范围、精度、Schema、完整性和输出允许值/去重，不允许重新猜测 LLM 已遗漏的
+  输出。缺口因此定位在单次 Chat Harness 的模型输入边界。
+
+### 14.2 最小 Harness 方案与离线评测
+
+- Prompt template 从 `chat-orchestration/v2` 升为 `v4`。system context 明确唯一
+  Tool 只适用于 ZTA35G，使用四维热处理参数，可交付 SEM 图像、由屈服强度与
+  延伸率组成的力学性能，或两者同时交付。
+- `requested_outputs` 被定义为“用户要求的交付项”，不是 Tool 内部计算步骤：
+  只请求性能时仍会内部生成中间 SEM，但不得因此把 `sem_image` 加入用户交付；
+  同时请求时必须保留两项；明确排除优先作用于被排除的交付项。
+- 已核验当前 LangChain `with_structured_output(..., method="json_mode")` 路径：
+  Pydantic Schema 用于本地 `PydanticOutputParser`，Provider 侧只获得 JSON mode
+  response format，不会获得字段 description。因此 route、Tool、material、四维
+  候选参数、requested outputs、missing/ambiguous 和 follow-up 的关键语义及 JSON
+  示例均直接写入实际发送的 system message；未切换 Tool Calling 或其他 Provider
+  模式。Pydantic 继续只负责本地严格解析和 route shape 校验。
+- 离线合同矩阵覆盖：只图像、只性能、图像+性能、非内部字段的自然表达、明确排除
+  性能、明确排除图像、缺少时效时间，以及材料缺失。所有 Tool 执行正例的用户文本
+  都明确包含 `ZTA35G`；材料缺失例保持 `material=null`、进入 `NEEDS_INPUT`，并保留
+  `requested_outputs=["sem_image","mechanical_properties"]`。
+- fake Runnable 会按 fixture 直接回放预置 payload。它只证明 Provider 可见 messages
+  的组成、本地 Pydantic 解析、`DeepSeekChatAdapter -> Domain` 映射和一次 invoke
+  合同，不能证明自然语言样例被模型正确理解，也不能证明真实 Provider Prompt
+  质量。该质量评测需要后续单独授权。生产代码没有关键词路由、规则补丁、judge、
+  repair、retry、fallback 或第二次 LLM 调用。
+
+### 14.3 RED、GREEN 与回归
+
+- 初版修订曾记录 `3 failed, 7 passed -> 10 passed in 1.47s`；其中把 Pydantic
+  description 当作模型可见 Harness 的断言经独立审查确认不成立，因此该组结果不再
+  作为 Provider Prompt 合同证据，只保留为审查前历史。
+- 独立审查修订 RED 为 `2 failed, 8 passed`：Provider 可见 message 缺少材料不得
+  猜测/材料缺失 JSON 示例，且 metadata 仍为 v3。最小修订后同一隔离命令为
+  `10 passed in 1.34s`。原先依赖 Pydantic description 的测试已删除，替换为直接
+  检查 Provider 实际接收 messages 的合同测试。
+- 独立审查修订后的新鲜相关回归为：Backend Unit+Contract 全量
+  `639 passed in 8.23s`；消息编排、消息幂等、Chat 持久化、Provider 幂等与
+  DeepSeek wiring 共 `52 passed in 31.11s`；Mock Runtime 全量
+  `11 passed in 1.07s`。Backend `pip check` 无破损依赖，Backend/测试/Mock
+  Runtime `compileall -q` 通过。
+- Chat/DeepSeek/ZTA35G 输入相关回归为 `205 passed in 1.93s`；Backend Contract
+  全量为 `164 passed in 3.80s`；Backend Unit 全量为
+  `475 passed in 6.47s`。最终完整回归只采用下述隔离分组证据，不重复累计这些
+  中间结果。
+- 首次 Backend full 以基础设施变量污染整个 pytest 进程，得到
+  `1107 passed, 1 skipped, 11 failed`；11 项全部是配置负例被父环境补齐，不是
+  Harness 断言失败。随后把 Unit/Contract 与 integration/llm 错分为无基础设施
+  组，得到 `644 passed, 2 setup errors`；两项错误来自 provider idempotency
+  用例实际依赖 API PostgreSQL fixture。两次失败命令均不计入最终通过证据。
+- 最终启动器在 pytest 导入 fixture 前，把进程内 `ROOT_ENV_FILE` 指向确认不存在
+  的普通临时路径；完整集合按互斥环境分组执行：Unit+Contract
+  `639 passed in 8.46s`，API+Integration+E2E
+  `478 passed, 1 skipped, 1 deselected in 173.19s`，被分离的唯一配置负例
+  `1 passed in 0.03s`。合计 `1118 passed, 1 skipped`，覆盖本轮收集的全部
+  1119 个 Backend 用例；唯一 skip 是未授权真实 P1B2 旅程。
+- Mock Runtime 全量 `11 passed in 0.94s`；Backend `pip check` 为
+  `No broken requirements found.`；Backend/Backend tests/Mock Runtime
+  `compileall -q` 通过。临时数据库从空库 upgrade 到
+  `0009_timeline_query_indexes (head)`，current 为 head，Alembic check 输出
+  `No new upgrade operations detected.`。
+
+### 14.4 真实调用、安全边界与资源恢复
+
+- 本工作单元真实 DeepSeek/Provider 调用 0，真实 Runtime 启动 0、真实权重打开
+  0、GPU/CUDA 使用 0；没有启动 Frontend 或浏览器。测试中的 DeepSeek Adapter
+  均注入 fake Runnable/model，Provider socket 调用没有发生。
+- 完整 Mock 回归使用两个本轮唯一命名、数据目录为 tmpfs 的临时 PostgreSQL/
+  MinIO 容器，以及一个明确显示 `device.kind=cpu` 的 Mock Runtime 进程。没有
+  使用 Compose、命名卷、真实 Runtime 或 GPU。
+- 起始 Docker daemon 未运行；回归后精确停止 Mock Runtime PID，检查并删除两个
+  本轮容器，再通过 Docker 自带 shutdown 恢复 daemon 未运行。既有六个命名卷
+  及停止容器未修改，3000/8000/8100/5432/9000/9001 均恢复无监听。本轮临时
+  stdout/stderr 文件逐文件删除后移除空临时目录。
+- 本轮没有直接打开、显示或修改根 `.env`。但最初两次普通 pytest 编排中，代码
+  走到无参 `load_settings()` 时 Pydantic 可能按生产默认路径只读解析过根 `.env`；
+  没有输出其内容，也没有修改文件。这是回归编排边界错误。最终完整证据全部通过
+  导入前覆盖 `ROOT_ENV_FILE` 的隔离启动器获得，不再访问根 `.env`。
+- 独立审查修订的所有 pytest 命令从首次 RED 开始都在导入 fixture 前把
+  `ROOT_ENV_FILE` 指向确认不存在的路径，未读取或修改根 `.env`。
+- 独立审查修订的 52 项数据库相关回归只启动一个唯一命名、PostgreSQL 数据目录为
+  tmpfs 的临时容器；未启动 MinIO、Frontend、Mock/真实 Runtime、Provider 或 GPU。
+  容器经名称与 `HostConfig.Tmpfs` 所有权校验后精确停止删除，Docker 恢复到起始
+  未运行状态；既有停止容器和六个命名卷未修改。
+
+### 14.5 独立复审、项目负责人验收与停止点
+
+- 精确允许范围为 DeepSeek Chat Adapter、既有 DeepSeek 合同、独立 Harness
+  评测、P1B2 Scope 以及阶段计划/进度/Phase 1B 报告共 7 个路径。
+- Frontend、真实/Mock Runtime 实现、migration、模型、权重、五份设计基线和
+  Application/Domain 均无 diff。独立复审结论为 `APPROVED`，Critical、Important、
+  Minor 均为 0；项目负责人据此验收本工作单元。
+- `SCOPE_OK P1B2`；`SEM_INTEGRITY_OK` 为 57 files、`2043071133` bytes、
+  aggregate fingerprint
+  `62bbb0878ed5d659490755e401fba0e3e09f1f36e3a67667ea04227927546b4a`。
+- 状态为 `COMPLETE / PROJECT_OWNER_ACCEPTED`。验收只授权将精确 7 个路径纳入一个
+  由 Git 生成 hash 的唯一验收提交，不授权 push、amend、第二提交或新的真实
+  Stage C。本报告中的离线 fixture replay 仍只证明 Harness 消息结构、本地解析、
+  Adapter/domain 映射与单次 invoke 合同；真实 DeepSeek Prompt 质量尚未验证，
+  需要未来单独授权。
+- 验收收尾新鲜复验：聚焦合同 `10 passed in 1.48s`；Backend Unit+Contract
+  `639 passed in 9.44s`；消息编排/幂等、Chat 持久化、Provider 幂等和 DeepSeek
+  wiring `52 passed in 24.64s`；Mock Runtime `11 passed in 1.12s`；`pip check`
+  无破损依赖，`compileall -q`、`SCOPE_OK P1B2` 和 `SEM_INTEGRITY_OK` 通过。
+  所有 pytest 从 fixture 导入前隔离根 `.env`，真实 DeepSeek、Runtime 和 GPU
+  使用均为 0。本轮唯一 tmpfs PostgreSQL 容器已精确删除；Docker 在数据库门之前
+  已为外部预存运行状态，因此验收收尾保留其运行，不改变既有容器和命名卷。

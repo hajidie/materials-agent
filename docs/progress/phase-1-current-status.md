@@ -8,9 +8,9 @@
 |---|---|
 | 当前阶段 | 真实能力接入 |
 | 当前里程碑 | P1B2 |
-| 当前工作单元 | P1B2 门四 Stage C 安全整改验收提交 |
+| 当前工作单元 | P1B2 门四-A 前置 Chat Orchestration Harness 完善 |
 | 状态 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
-| 上一已验收工作单元 | P1B2 门三：真实 GPU 最小推理与资源测量 |
+| 上一已验收工作单元 | P1B2 门四 Stage C 安全整改验收提交 |
 | Pre-M8 stop-loss commit | `891714dd58cf069073a7d4037be43ef66304d0ac` |
 | M8 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M8 acceptance commit | `18005944982ca5191412e06154effc67465ca3a7` |
@@ -31,19 +31,20 @@
 | P1B2 门二 acceptance commit | `62e0273ff32bd1a7462abf2e9f33d898b993eb43` |
 | P1B2 门三 acceptance commit | `5735384430a7556682993de8861d2a7d28889156` |
 | P1B2 门四恢复 baseline branch / HEAD | `main` / `0db1c29f661313b10dac81c807f2649210046c1f` |
-| 暂存区 | `empty`；本轮仅授权精确 8 路径暂存 |
+| P1B2 门四-A 前置 Harness baseline branch / HEAD | `main` / `b074a89563e94bf18419d5bff865636b71326885` |
+| 暂存区 | `empty`；本轮禁止暂存 |
 | P1B1 验收提交范围 | 精确 26 个 allowlist 路径；原 24 路径加 Phase 1A Runner 和 compatibility 共享授权门 |
 | P1B2 门一范围 | 精确 8 个 allowlist 路径；2 个测试兼容性修订路径加 6 个收尾路径 |
-| P1B2 当前 allowlist | 精确 8 个路径：4 个 tracked modified 与 4 个 authorized untracked；unexpected 0 |
+| P1B2 当前 allowlist | 精确 7 个 Harness 路径；其余路径禁止修改 |
 | 已确认设计基线 | 五份均未修改 |
 | 历史 migration | `0001`–`0008` 均未修改；当前唯一 head/current 为 `0009_timeline_query_indexes` |
 | `SEM/` | 未修改；门三前后 `SEM_INTEGRITY_OK`；固定 bundle 在 GPU 完成 A–D 精确 4 次受控推理并已释放 |
 | Mock Runtime | 实现和协议未修改 |
-| Real Provider calls | 历史 M12-B 为 6；当前作废 Stage C run 已明确观察计划外真实 Chat delegate `>= 8`，精确总数不可恢复 |
-| Commit | 安全整改唯一验收提交已授权；本文件不预填提交 hash |
+| Real Provider calls | 历史 M12-B 为 6；作废 Stage C run 已明确观察计划外真实 Chat delegate `>= 8`；本 Harness 工作单元真实调用 0 |
+| Commit | 唯一验收提交已授权；本文件由该提交固化，hash 以 Git 实际结果为准 |
 | Push | `NO` |
 | Amend | `NO` |
-| Git 外部动作 | 仅允许精确 8 路径 `git add` 和一次固定主题 commit；禁止 push、amend、第二提交、reset、restore、stash、clean、switch、checkout 和 rebase |
+| Git 外部动作 | 仅允许精确 7 路径暂存和一个验收提交；禁止 push、amend、第二提交、reset、restore、stash、clean、switch、checkout 和 rebase |
 | M10-A | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M10-B | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M10 overall | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
@@ -55,14 +56,14 @@
 | M12-A | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M12-B | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | P1B1 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
-| P1B2 | 门一、门二、门三、timeout 前置修订、门四 Stage B 及 Stage C 安全整改均 `COMPLETE / PROJECT_OWNER_ACCEPTED`；新的真实 Stage C `NOT STARTED / AWAITING_PROJECT_OWNER_AUTHORIZATION` |
+| P1B2 | 门一、门二、门三、timeout 前置修订、门四 Stage B、Stage C 安全整改及门四-A 前置 Harness 均为 `COMPLETE / PROJECT_OWNER_ACCEPTED`；新的真实 Stage C 未授权 |
 | M13–M16 | `HISTORICAL DECOMPOSITION / MAPPED TO P1B1 AND P1B2` |
 | M11 start baseline | `main@f426e6f23703002a648991e5bb436929df19e8e2` |
 | M11-B start baseline | `main@4ed740222238433541fb31c993dd75610634d157` |
 | M12-A start baseline | `main@f5e24dcaab4801dbeffb8400f2960c33b60b4f00` |
 | M12-B start baseline | `main@ffd29353cb4682c74fd3455425822999444bb1d2` |
-| 是否处于项目负责人暂停点 | 是；当前污染 run 永久作废，新的真实 Stage C `NOT STARTED / AWAITING_PROJECT_OWNER_AUTHORIZATION`。 |
-| 更新时间 | `2026-07-31` |
+| 是否处于项目负责人暂停点 | 是；Harness 已验收，唯一验收提交后停止，不得据此进入新的真实 Stage C。 |
+| 更新时间 | `2026-08-03` |
 
 ## P1B2 门一：独立环境与依赖验证
 
@@ -1527,7 +1528,74 @@ UNAUDITABLE / CURRENT_RUN_INVALIDATED
 NOT STARTED / AWAITING_PROJECT_OWNER_AUTHORIZATION
 ```
 
-## 下一步
+## P1B2 门四-A 前置 Chat Orchestration Harness 完善
+
+- 开始基线为干净的
+  `main@b074a89563e94bf18419d5bff865636b71326885`；staging、tracked diff 和
+  untracked 均为空。本轮只授权精确 7 个 Harness/测试/Scope/计划/进度/验收报告
+  路径，不授权新的真实 Stage C。
+- 根因定位为模型输入 Harness：旧 Prompt 的 Tool 与 `NEEDS_INPUT` 示例均只使用
+  `sem_image`；`json_mode` 下本地 Pydantic 字段 description 不进入 Provider
+  message，因此模型没有获得屈服强度/延伸率、并列请求、明确排除或
+  mechanical-only 时中间 SEM 不属于用户交付的完整说明。Adapter/Application
+  不会也不应通过确定性规则补猜遗漏的输出。
+- `chat-orchestration` template 升为 v4；已核验当前 LangChain `json_mode` 不把
+  Pydantic 字段 description 发送给 Provider，因此唯一 Tool、material、四维候选
+  参数、两类输出及交付语义和 JSON 示例均直接写入实际发送的 system message；
+  Pydantic 只承担本地严格解析，未切换 Tool Calling 或其他 Provider 模式。
+  所有 Tool 执行正例均在用户文本中明确包含 `ZTA35G`；材料缺失例保持
+  `material=null`、进入 `NEEDS_INPUT` 并保留图像+性能输出意图。每个用例仍只
+  invoke 一次；没有关键词路由、judge、repair、retry、fallback 或第二次 LLM
+  调用，Application/Domain 决策边界未修改。
+- fake Runnable 直接回放 fixture payload；离线矩阵只证明 Provider 可见 message
+  组成、本地解析、Adapter/domain 映射和单调用合同，不证明自然语言理解或真实
+  Provider Prompt 质量。后者需要后续单独授权。
+- 初版曾记录 `3 failed, 7 passed -> 10 passed in 1.47s`，但其中 Pydantic
+  description 断言并不是 Provider 可见 Prompt 证据；该组仅保留为审查前历史。
+  当前有效 RED/GREEN 以后述独立审查修订证据为准。相关历史回归为
+  `205 passed`，中间 Contract/Unit 分别为 `164/475 passed`。
+- 最终完整 Backend 只采用隔离分组证据：Unit+Contract `639 passed`；
+  API+Integration+E2E `478 passed, 1 skipped, 1 deselected`；被分离的唯一配置
+  负例 `1 passed`。合计 `1118 passed, 1 skipped`，覆盖 1119 个收集用例，唯一
+  skip 是未授权真实 P1B2 旅程。Mock Runtime 为 `11 passed`，`pip check`、
+  compileall、Alembic `0009` head/current/check 均通过。
+- 首次 Backend full 因基础设施变量污染配置负例，结果为
+  `1107 passed, 1 skipped, 11 failed`；第一次隔离分组又把两个依赖 PostgreSQL
+  的 integration/llm 用例误放到干净组，结果为 `644 passed, 2 setup errors`。
+  两次失败均为回归编排错误，不计入最终通过证据，也没有通过修改生产/测试规避。
+- 没有直接打开、输出或修改根 `.env`；但最初普通 pytest 中无参
+  `load_settings()` 可能按生产默认路径只读解析过根 `.env`。最终完整证据在导入
+  fixture 前把 `ROOT_ENV_FILE` 指向不存在的普通临时路径，不再访问根 `.env`。
+- 本轮真实 DeepSeek/Provider 调用、真实 Runtime、权重打开、GPU/CUDA、Frontend
+  和浏览器均为 0。完整 Mock 回归只使用两个 tmpfs 临时容器与 CPU Mock Runtime；
+  全部精确移除后 Docker 恢复未运行，六个既有命名卷与停止容器未改，六个目标
+  端口均无监听，临时日志目录已删除。
+- `SCOPE_OK P1B2`；`SEM_INTEGRITY_OK` 为 57 files、`2043071133` bytes、
+  fingerprint
+  `62bbb0878ed5d659490755e401fba0e3e09f1f36e3a67667ea04227927546b4a`。
+  五份设计基线、Frontend、Runtime、migration、模型和权重均无 diff。
+- 独立审查修订 RED 为 `2 failed, 8 passed`，聚焦 GREEN 为 `10 passed in 1.34s`；
+  原“Schema description 模型可见”测试已替换为 Provider 实际接收 messages 合同。
+- 修订后新鲜相关回归：Backend Unit+Contract `639 passed in 8.23s`；消息编排、
+  消息幂等、Chat 持久化、Provider 幂等与 DeepSeek wiring
+  `52 passed in 31.11s`；Mock Runtime `11 passed in 1.07s`；`pip check` 和
+  compileall 通过。全部 pytest 从导入 fixture 前隔离根 `.env`，真实 Provider、
+  Runtime 和 GPU 使用均为 0。
+- 数据库相关回归只使用一个唯一命名、数据目录为 tmpfs 的 PostgreSQL 临时容器；
+  精确删除后 Docker 恢复起始未运行状态，既有停止容器和命名卷未修改。
+- 独立复审结论为 `APPROVED`，Critical、Important、Minor 均为 0；项目负责人据此
+  验收，当前状态为 `COMPLETE / PROJECT_OWNER_ACCEPTED`。唯一验收提交由 Git 生成
+  hash；不得预填、push、amend 或创建第二提交。离线证据仍只证明 Harness 消息
+  结构、本地解析、Adapter/domain 映射和单次 invoke 合同，不证明真实 DeepSeek
+  Prompt 质量。
+- 验收收尾新鲜复验为：聚焦合同 `10 passed in 1.48s`；Backend Unit+Contract
+  `639 passed in 9.44s`；相关 Application/DB `52 passed in 24.64s`；Mock Runtime
+  `11 passed in 1.12s`；`pip check`、compileall、`SCOPE_OK P1B2` 和
+  `SEM_INTEGRITY_OK` 通过。所有 pytest 从 fixture 导入前隔离根 `.env`；真实
+  DeepSeek、Runtime、GPU 使用均为 0。本轮唯一 tmpfs PostgreSQL 容器已精确删除；
+  Docker 为数据库门之前的外部预存运行状态，未关闭或接管，既有容器和命名卷未改。
+
+## 安全整改验收提交时的历史停止点（已被本工作单元授权取代）
 
 创建安全整改唯一验收提交并恢复干净工作区。项目负责人重新授权后，使用全新的
 `run_id`、Provider 账本、database、bucket、Actor 和 Conversation 执行
@@ -1657,3 +1725,9 @@ NO
 Amend:
 NO
 ```
+
+## 下一步
+
+本文件随项目负责人授权的唯一验收提交固化；提交后必须保持 working tree clean、
+staging empty、untracked 0 并停止。不得 push、amend、创建第二提交，也不得进入
+新的真实 Stage C、启动真实 Runtime/GPU 或调用真实 Provider。
