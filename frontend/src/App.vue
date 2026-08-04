@@ -92,8 +92,6 @@ function ignoreRejected(operation: Promise<unknown>): void {
         :supplement-target="agent.supplementTarget.value"
         :mutation-status="agent.mutationStatus.value"
         :write-busy="writeBusy"
-        :task-details-by-id="agent.taskDetailsById.value"
-        :task-details-loading-by-id="agent.taskDetailsLoadingById.value"
         @submit-new-task="ignoreRejected(agent.submitNewTask($event))"
         @submit-supplement="ignoreRejected(agent.submitSupplement($event))"
         @set-supplement-target="agent.setSupplementTarget($event)"
@@ -101,9 +99,6 @@ function ignoreRejected(operation: Promise<unknown>): void {
         @retry-tool="ignoreRejected(agent.retryTool($event))"
         @retry-explanation="
           ignoreRejected(agent.retryExplanation($event))
-        "
-        @load-task-history="
-          ignoreRejected(agent.loadTaskHistory($event))
         "
         @refresh="ignoreRejected(agent.refreshTimeline())"
       />

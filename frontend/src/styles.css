@@ -195,17 +195,15 @@ textarea:focus-visible {
 
 .tool-card > .section-heading,
 .tool-card__section,
-.result-panel,
 .asset-gallery,
-.task-history,
+.research-result-summary,
 .tool-card__actions {
   padding: 1rem 1.25rem;
 }
 
 .tool-card__section,
-.result-panel,
 .asset-gallery,
-.task-history,
+.research-result-summary,
 .tool-card__actions {
   border-top: 1px solid #e2e8e4;
 }
@@ -213,10 +211,8 @@ textarea:focus-visible {
 .tool-card h2,
 .tool-card h3,
 .tool-card h4,
-.result-panel h3,
-.result-panel h4,
 .asset-gallery h3,
-.task-history h3 {
+.research-result-summary h3 {
   margin-top: 0;
 }
 
@@ -239,57 +235,45 @@ textarea:focus-visible {
   font-weight: 700;
 }
 
-.status-badge[data-status="FAILED"],
-.status-badge[data-status="NEEDS_INPUT"] {
+.status-badge[data-tone="error"],
+.status-badge[data-tone="attention"] {
   color: #79362d;
   background: #f9e8e4;
 }
 
-.status-badge[data-status="RUNNING"],
-.status-badge[data-status="PENDING"] {
+.status-badge[data-tone="pending"] {
   color: #755716;
   background: #fff1c9;
 }
 
-.status-badge[data-status="PARTIALLY_SUCCEEDED"] {
+.status-badge[data-tone="partial"] {
   color: #6b501c;
   background: #f7ecd4;
 }
 
-.summary-grid,
-.structured-value__object {
+.summary-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
   gap: 0.75rem;
   margin: 0;
 }
 
-.summary-grid > div,
-.structured-value__field {
+.summary-grid > div {
   min-width: 0;
 }
 
-.summary-grid dt,
-.structured-value__field dt {
+.summary-grid dt {
   color: #63736c;
   font-size: 0.78rem;
   font-weight: 700;
 }
 
-.summary-grid dd,
-.structured-value__field dd {
+.summary-grid dd {
   margin: 0.25rem 0 0;
   overflow-wrap: anywhere;
 }
 
-.structured-value__object {
-  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
-}
-
-.structured-value__array,
-.input-thread,
-.history-list,
-.diagnostic-list {
+.input-thread {
   margin-bottom: 0;
   padding-left: 1.25rem;
 }
@@ -320,6 +304,11 @@ textarea:focus-visible {
   gap: 1rem;
 }
 
+.asset-gallery__grid--images {
+  grid-template-columns: minmax(0, 512px);
+  justify-content: center;
+}
+
 .asset-card {
   margin: 0;
   overflow: hidden;
@@ -328,9 +317,16 @@ textarea:focus-visible {
   background: #f8faf8;
 }
 
-.asset-card img {
+.asset-card--image {
+  width: 100%;
+  max-width: 512px;
+  margin-inline: auto;
+}
+
+.asset-card__image {
   display: block;
   width: 100%;
+  max-width: 512px;
   height: auto;
   background: #dce5df;
 }
@@ -338,7 +334,7 @@ textarea:focus-visible {
 .asset-card figcaption {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: center;
   gap: 0.75rem;
   padding: 0.75rem;
   font-size: 0.8rem;
@@ -359,28 +355,71 @@ textarea:focus-visible {
   text-align: center;
 }
 
-.history-list {
+.research-result-summary {
+  display: grid;
+  gap: 1rem;
+}
+
+.research-result-summary > section + section {
+  padding-top: 1rem;
+  border-top: 1px solid #e2e8e4;
+}
+
+.research-result-summary h3 {
+  margin-bottom: 0.75rem;
+}
+
+.research-result-summary dl {
   display: grid;
   gap: 0.75rem;
-  padding-left: 0;
-  list-style: none;
+  margin: 0;
 }
 
-.history-attempt {
-  padding: 0.9rem;
-  border: 1px solid #dce5df;
+.research-result-summary [data-section="conditions"] dl {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.research-result-summary [data-section="metrics"] dl {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.research-result-summary dl > div {
+  min-width: 0;
+  padding: 0.85rem;
+  border: 1px solid #d5dfd9;
   border-radius: 0.7rem;
+  background: #f8faf8;
 }
 
-.history-attempt--selected {
-  border-color: #79a58e;
+.research-result-summary dt {
+  color: #63736c;
+  font-size: 0.78rem;
+  font-weight: 700;
 }
 
-.history-attempt > header {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  margin-bottom: 0.75rem;
+.research-result-summary dd {
+  margin: 0.35rem 0 0;
+  color: #244a39;
+  font-size: 1.05rem;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.tool-card__result-notice,
+.tool-card__safe-errors {
+  margin: 1rem 1.25rem;
+}
+
+.explanation-panel .notice {
+  margin-top: 0.75rem;
+}
+
+.explanation-panel .notice h4,
+.explanation-panel .notice p,
+.tool-card__safe-errors p,
+.tool-card__safe-errors ul {
+  margin-top: 0;
+  margin-bottom: 0;
 }
 
 .tool-card__actions,
@@ -565,5 +604,10 @@ textarea:focus-visible {
   .composer__form button[type="submit"] {
     grid-column: 1;
     grid-row: auto;
+  }
+
+  .research-result-summary [data-section="conditions"] dl,
+  .research-result-summary [data-section="metrics"] dl {
+    grid-template-columns: 1fr;
   }
 }

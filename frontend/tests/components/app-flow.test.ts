@@ -296,7 +296,7 @@ describe("App flow", () => {
     const wrapper = mount(App);
     await flushPromises();
 
-    expect(wrapper.text()).toContain("材料智能体");
+    expect(wrapper.text()).toContain("高端金属材料组织图像智能体");
     expect(wrapper.text()).toContain("初始化读取失败");
     expect(wrapper.text()).not.toContain("private");
     expect(agent.startPolling).toHaveBeenCalledTimes(1);
@@ -331,7 +331,7 @@ describe("App flow", () => {
     expect(agent.setSupplementTarget).toHaveBeenCalledWith({
       conversationId: "conversation-1",
       taskId: "task-tool",
-      summary: "待补充：aging_temperature",
+      summary: "待补充：时效温度",
     });
     expect(wrapper.text()).toContain("正在为指定任务补充信息");
 
@@ -359,18 +359,18 @@ describe("App flow", () => {
     expect(agent.refreshTimeline).toHaveBeenCalledTimes(1);
   });
 
-  it("maps Tool retry, Explanation retry, and lazy Task history", async () => {
+  it("maps Tool and Explanation retries without exposing Task history", async () => {
     refs.timeline.value = [toolItem("PARTIALLY_SUCCEEDED")];
     const wrapper = mount(App);
     await flushPromises();
 
     await wrapper.get("[data-action=retry-tool]").trigger("click");
     await wrapper.get("[data-action=retry-explanation]").trigger("click");
-    await wrapper.get("[data-action=load-history]").trigger("click");
 
     expect(agent.retryTool).toHaveBeenCalledWith("task-tool");
     expect(agent.retryExplanation).toHaveBeenCalledWith("result-1");
-    expect(agent.loadTaskHistory).toHaveBeenCalledWith("task-tool");
+    expect(wrapper.find("[data-action=load-history]").exists()).toBe(false);
+    expect(agent.loadTaskHistory).not.toHaveBeenCalled();
   });
 
   it("shows safe global error details without raw objects", async () => {
@@ -584,10 +584,6 @@ describe("App flow", () => {
     expect(
       wrapper.get("[data-conversation-id]").attributes(),
     ).not.toHaveProperty("disabled");
-    expect(
-      wrapper.get("[data-action=load-history]").attributes(),
-    ).not.toHaveProperty("disabled");
-
     await wrapper.get("[data-action=create-conversation]").trigger("click");
     await wrapper.get("form").trigger("submit");
     await wrapper.get("[data-action=supplement]").trigger("click");

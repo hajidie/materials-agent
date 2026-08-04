@@ -87,25 +87,20 @@ function imageRenderKey(assetId: string): string {
   return `${assetId}:${renderGenerationById.value[assetId] ?? 0}`;
 }
 
-function formatBytes(size: number): string {
-  if (size < 1024) {
-    return `${size} B`;
-  }
-  if (size < 1024 * 1024) {
-    return `${(size / 1024).toFixed(1)} KiB`;
-  }
-  return `${(size / (1024 * 1024)).toFixed(1)} MiB`;
-}
 </script>
 
 <template>
-  <section v-if="displayAssets.length > 0" class="asset-gallery">
-    <h3>生成图片</h3>
-    <div class="asset-gallery__grid">
+  <section
+    v-if="displayAssets.length > 0"
+    class="asset-gallery"
+    data-section="image"
+  >
+    <h3>组织图像</h3>
+    <div class="asset-gallery__grid asset-gallery__grid--images">
       <figure
         v-for="entry in displayAssets"
         :key="entry.asset.asset_id"
-        class="asset-card"
+        class="asset-card asset-card--image"
       >
         <template v-if="entry.inlineUrl && entry.attachmentUrl">
           <p
@@ -120,7 +115,7 @@ function formatBytes(size: number): string {
             class="notice notice--error"
             role="alert"
           >
-            <p>图片加载失败。结构化结果仍可查看。</p>
+            <p>图片加载失败。其他结果仍可查看。</p>
             <button
               type="button"
               class="button button--secondary"
@@ -132,6 +127,7 @@ function formatBytes(size: number): string {
           </div>
           <img
             :key="imageRenderKey(entry.asset.asset_id)"
+            class="asset-card__image"
             v-show="!failedById[entry.asset.asset_id]"
             :src="entry.inlineUrl"
             alt="生成的 SEM 图像"
@@ -139,16 +135,11 @@ function formatBytes(size: number): string {
             @error="markFailed(entry.asset.asset_id)"
           />
           <figcaption>
-            <span>
-              {{ entry.asset.width }} × {{ entry.asset.height }} px ·
-              {{ entry.asset.bit_depth }} bit ·
-              {{ formatBytes(entry.asset.size_bytes) }}
-            </span>
             <a :href="entry.attachmentUrl" download>下载图片</a>
           </figcaption>
         </template>
         <p v-else class="notice notice--error" role="alert">
-          图片地址不可用。结构化结果仍可查看。
+          图片地址不可用。其他结果仍可查看。
         </p>
       </figure>
     </div>

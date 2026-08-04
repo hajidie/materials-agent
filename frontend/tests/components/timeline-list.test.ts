@@ -96,8 +96,6 @@ function mountTimeline(items: TimelineItem[]) {
       items,
       conversationId: "conversation-1",
       mutationBusy: false,
-      taskDetailsById: {},
-      taskDetailsLoadingById: {},
     },
   });
 }
@@ -123,6 +121,15 @@ describe("TimelineList", () => {
     expect(wrapper.findComponent({ name: "ToolTaskCard" }).exists()).toBe(
       true,
     );
+  });
+
+  it("does not inherit removed Task history attributes on a Tool card", () => {
+    const wrapper = mountTimeline([toolItem("task-without-history")]);
+    const card = wrapper.get(".tool-card");
+
+    expect(card.attributes()).not.toHaveProperty("task-detail");
+    expect(card.attributes()).not.toHaveProperty("history-loading");
+    expect(card.attributes()).not.toHaveProperty("onloadhistory");
   });
 
   it("keeps the Backend array order when timestamps disagree", () => {

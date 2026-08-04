@@ -8,9 +8,9 @@
 |---|---|
 | 当前阶段 | 真实能力接入 |
 | 当前里程碑 | P1B2 |
-| 当前工作单元 | P1B2 门四-A 正式 Runner 暂缓与路线调整 |
-| 状态 | `FORMAL STAGE C RUNNER DEFERRED / LOCAL MVP AVAILABLE / PROJECT_OWNER_ACCEPTED` |
-| 上一已验收工作单元 | P1B2 门四-A 前置 Chat Orchestration Harness 完善 |
+| 当前工作单元 | 本地 MVP v1.1.0 收口 |
+| 状态 | `COMPLETE / PROJECT_OWNER_BROWSER_ACCEPTED / LOCAL_MVP_V1.1.0` |
+| 上一已验收工作单元 | P1B2 门四-A 正式 Runner 暂缓与路线调整 |
 | Pre-M8 stop-loss commit | `891714dd58cf069073a7d4037be43ef66304d0ac` |
 | M8 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M8 acceptance commit | `18005944982ca5191412e06154effc67465ca3a7` |
@@ -32,19 +32,19 @@
 | P1B2 门三 acceptance commit | `5735384430a7556682993de8861d2a7d28889156` |
 | P1B2 门四恢复 baseline branch / HEAD | `main` / `0db1c29f661313b10dac81c807f2649210046c1f` |
 | P1B2 门四-A 前置 Harness baseline branch / HEAD | `main` / `b074a89563e94bf18419d5bff865636b71326885` |
-| 暂存区 | `empty`；本轮禁止暂存 |
+| 暂存区 | 提交授权前为 `empty`；项目负责人已授权精确 22 路径一次性暂存与提交 |
 | P1B1 验收提交范围 | 精确 26 个 allowlist 路径；原 24 路径加 Phase 1A Runner 和 compatibility 共享授权门 |
 | P1B2 门一范围 | 精确 8 个 allowlist 路径；2 个测试兼容性修订路径加 6 个收尾路径 |
-| P1B2 当前 allowlist | 精确 3 个文档路径：阶段计划、当前进度、Phase 1B 报告 |
+| 本工作单元范围 | 精确 22 路径：既有 9 个本地开发入口、文档和侧栏标题路径，加 13 个图像优先结果页组件、样式与测试路径 |
 | 已确认设计基线 | 五份均未修改 |
 | 历史 migration | `0001`–`0008` 均未修改；当前唯一 head/current 为 `0009_timeline_query_indexes` |
 | `SEM/` | 未修改；门三前后 `SEM_INTEGRITY_OK`；固定 bundle 在 GPU 完成 A–D 精确 4 次受控推理并已释放 |
 | Mock Runtime | 实现和协议未修改 |
 | Real Provider calls | 历史 M12-B 为 6；作废 Stage C run 已明确观察计划外真实 Chat delegate `>= 8`；项目负责人确认首次真实 DeepSeek + 真实 ZTA35G Runtime 浏览器闭环已完成；本工作单元真实调用 0 |
-| Commit | 精确 3 文档唯一收尾提交已授权；hash 以 Git 实际结果为准 |
+| Commit | `AUTHORIZED`；精确 22 路径一次本地提交，主题 `mvp-v1.1.0` |
 | Push | `NO` |
 | Amend | `NO` |
-| Git 外部动作 | 未完成 Runner 的 8 路径 diff 已仓库外归档并精确恢复到 HEAD；仅允许精确暂存 3 个文档并创建一个收尾提交，禁止 push 和 amend |
+| Git 外部动作 | 项目负责人已授权精确暂存并创建一次本地 commit；仍禁止 push 和 amend |
 | M10-A | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M10-B | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M10 overall | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
@@ -62,8 +62,96 @@
 | M11-B start baseline | `main@4ed740222238433541fb31c993dd75610634d157` |
 | M12-A start baseline | `main@f5e24dcaab4801dbeffb8400f2960c33b60b4f00` |
 | M12-B start baseline | `main@ffd29353cb4682c74fd3455425822999444bb1d2` |
-| 是否处于项目负责人暂停点 | 是；路线调整已验收，仅完成唯一文档提交后停止。 |
+| 是否处于项目负责人暂停点 | 否；项目负责人已确认浏览器正常使用并授权 MVP v1.1.0 收口提交。提交后停止。 |
 | 更新时间 | `2026-08-04` |
+
+## 本地开发模式启动与停止入口
+
+- 开始基线精确为
+  `main@9c9f8613913667499b6121532a12640bd5ffdb5c`，开始时工作区和暂存区均为空。
+- 新增单一入口 `scripts/dev/local-dev.ps1`，支持 `-Action Start|Stop`、
+  `-Runtime Mock|Real` 和 `-Llm Mock|DeepSeek`。默认是 Mock Runtime + Mock LLM；
+  真实模式只形成可由项目负责人手工执行的本地启动路径，本工作单元没有实际启动。
+- 启动前固定检查 3000/5432/8000/8100/9000/9001；冲突时在创建资源前停止。
+  正常顺序为 PostgreSQL/MinIO、Alembic 与既有 bucket 准备、Runtime ready、Backend
+  ready、Frontend ready，并显示 Frontend 地址、六项服务状态、状态与日志路径。
+- ownership 状态只保存在忽略目录 `tmp/local-dev/state.json`，字段限于 run/mode、
+  PID、启动时间、可执行文件、精确命令标记、端口和 Docker context/engine；Stop
+  在 PID 树终止前核对这些身份，只对本轮记录为 `started_by_this_run` 的 Compose
+  服务执行 `stop`。不执行 `down -v`，不删除 database、volume、bucket、object
+  或用户数据。
+- DeepSeek 模式通过 Backend 既有配置加载器从根 `.env` 静默预检和读取 Key；入口
+  不自行解析、复制、打印或修改 `.env`。每次启动在内存中生成独立 Runtime token，
+  只注入 Backend/Runtime 子进程且不落状态；真实模型根固定为已确认的
+  `SEM\ZTA35G_lab`，不再要求调用者手动填写三个变量。Mock LLM 继续显式覆盖
+  `LLM_ADAPTER=mock`/空白 Key，Runtime、Frontend 与 Compose 移除不需要的 Secret。
+- TDD 首轮 RED 精确为 `local-dev.ps1 is missing`；一条命令修订的新增 RED 为
+  `A parameter cannot be found that matches parameter name 'RuntimeToken'.`；实现后的
+  离线 GREEN 为 `LOCAL_DEV_OFFLINE_TESTS_OK tests=18`。新增覆盖每次随机 Token、
+  Backend/Runtime 精确注入、固定模型根、根 `.env` 安全错误映射和重复启动通过
+  Backend 代验 Runtime ready；原有六端口、Backend Python 3.11、Windows argv、
+  无 Secret 状态、PID reuse、精确 marker、owned stop、重复 stop 和 ready 状态
+  诚实性覆盖继续通过。第 17 项使用真实 `cmd.exe` 复现 Windows PowerShell 5.1
+  将 native stderr 进度误升格为 `NativeCommandError` 的行为，并验证 Stop 临时使用
+  `ErrorActionPreference=Continue`、等待命令结束、按真实退出码判定且恢复调用者设置。
+  第 18 项从 Compose Start 调用点执行同一真实 stderr/exit-0 行为，防止启动路径绕过
+  安全 native 包装。两个
+  PowerShell 文件解析错误均为 0，实际无状态 Stop 返回
+  `LOCAL_DEV_NOT_RUNNING`。
+- 实现与离线测试未读取或修改根 `.env`，未启动 Docker、Backend、Frontend、Mock/真实
+  Runtime，未加载权重、使用 GPU 或调用 DeepSeek。项目负责人随后已按
+  `docs/local-development.md` 完成真实组合启动和浏览器体验，并于 `2026-08-04`
+  确认平台可正常使用。
+- 机器状态审计曾发现一份入口外部执行留下的未完成记录：创建于
+  `2026-08-03T17:28:49Z`，`runtime=real`、`llm=deepseek`、`phase=starting`、
+  `process_count=0`。项目负责人首次执行 Stop 时，MinIO 实际停止成功，但 Windows
+  PowerShell 5.1 将 Docker 的正常 stderr 进度误判为终止错误，循环未继续到
+  PostgreSQL，状态也未更新；修复后项目负责人再次执行 Stop 已成功完成清理。
+- 项目负责人随后执行真实组合 Start，入口在 `compose_start` 返回
+  `LOCAL_DEV_START_FAILED` 并完成安全清理。只读证据显示 PostgreSQL/MinIO 最终均为
+  `Exited (0)`、state 不存在、最新 run 目录无文件，证明失败发生在 Compose 正常
+  stderr 进度被直接调用点误判时，尚未进入数据库准备或任何 App 进程。Start 现已
+  复用同一 native 退出码包装；修复只做无 Docker 副作用的离线验证，Codex 未再次
+  执行 Start。database、volume、bucket 与用户数据均保留。
+- 项目负责人在人工浏览器体验中指定侧栏标题修订：删除“本地材料研究平台”，并将
+  “材料智能体”改为“高端金属材料组织图像智能体”。只修改
+  `ConversationSidebar.vue` 的展示文案，并同步 2 个既有前端测试；聚焦 TDD RED
+  精确为 8 项中的 1 项失败，GREEN 为 8/8，全量前端回归为 9 files / 205 passed，
+  typecheck 和 production build 均成功。Codex 的浏览器控制运行时因本机
+  `failed to write kernel assets: 系统找不到指定的路径` 无法连接当前页面；项目负责人
+  已在其打开的页面完成最终视觉确认并确认正常使用。本次修订未启动或停止服务，也未
+  调用 DeepSeek、真实 Runtime 或 GPU。
+
+## 图像优先的工具结果页
+
+- 项目负责人确认采用 B 方案：Tool 卡从运行审计视图改为材料研究结果页，固定阅读
+  顺序为中文状态、SEM 图像与下载、实验条件、关键性能、Backend 原始结果说明。
+  成功结果不再重复完整初始请求；等待补充、执行中和失败仍保留请求上下文。
+- 新增 `ResearchResultSummary.vue`，只白名单读取固溶温度/时间、时效温度/时间、
+  延伸率和屈服强度；性能统一显示两位小数。未知字段、非法对象、私有内容和原始 JSON
+  不展开。SEM 图像居中且最大为原生 `512 × 512`，隐藏 bit depth、文件大小等技术
+  元数据；图片加载失败与性能、说明展示相互隔离。
+- `ToolTaskCard.vue` 已移除 ToolRun、英文状态码、尝试次数、耗时、diagnostics、请求
+  输出集合、版本、provenance、“结构化结果”和运行历史等用户界面概念，并覆盖完整
+  成功、仅图片、仅性能、部分成功、说明失败、整体失败、执行中和等待补充。部分结果
+  保留可用内容并提供“重新生成结果”；仅说明失败提供“重新生成说明”。
+- 删除不可达的 `StructuredResult.vue` 和 `TaskHistory.vue`，同时移除 App、Conversation
+  与 Timeline 层的历史详情 props/event 透传；`useMaterialsAgent` 和 API 内部历史查询
+  能力保持不变，公共 API、ResultSummary、Asset、Explanation、Backend、数据模型和
+  持久化语义均未修改。
+- TDD 证据：研究摘要从缺失组件 RED 到 `4 passed`；安全复核进一步以
+  `1 failed, 4 passed` 证明未知 warnings 会泄露，收紧为完全隐藏 warnings、Result error
+  仅接受非空 `safe_message` 后为 `5 passed`。图片区域从 `4 failed` 到 `4 passed`。
+- Tool 卡首轮 `10 failed, 1 passed` 到 GREEN，代码复核补充 raw enum 与五项补参保护
+  后为 `12 passed`；最终整体复核又以 `1 failed, 12 passed` 复现成功 Result 提前覆盖
+  活动 Task 状态，再以 `2 failed, 13 passed` 复现 `explanation=null` 被误判为失败，
+  修订后聚焦测试为 `15 passed`。上层历史链 RED 为 `4 failed, 2 passed`，修订后相关
+  三组件为 `20 passed`、上层集成为 `21 passed`。最终只读复核为 APPROVED，
+  Critical / Important / Minor 均为 0。
+- 最终全量前端离线回归为 11 files / `213 passed`，typecheck 与 production build
+  通过；本轮未读取或修改根 `.env`，未启动或停止服务，未调用真实 DeepSeek、真实
+  Runtime、权重、GPU 或 CUDA。项目负责人已使用现有本地数据完成浏览器体验并确认
+  正常使用，本地材料智能体 MVP v1.1.0 功能和人工验收均完成。
 
 ## P1B2 门一：独立环境与依赖验证
 

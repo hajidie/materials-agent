@@ -1,10 +1,7 @@
 <script setup lang="ts">
 import type { DeepReadonly } from "vue";
 
-import type {
-  TaskDetail,
-  TimelineItem,
-} from "../api/types";
+import type { TimelineItem } from "../api/types";
 import AssistantMessageItem from "./AssistantMessageItem.vue";
 import ToolTaskCard from "./ToolTaskCard.vue";
 import UserMessageItem from "./UserMessageItem.vue";
@@ -15,10 +12,6 @@ defineProps<{
   items: readonly (TimelineItem | DeepReadonly<TimelineItem>)[];
   conversationId: string;
   mutationBusy: boolean;
-  taskDetailsById: Readonly<
-    Record<string, TaskDetail | DeepReadonly<TaskDetail>>
-  >;
-  taskDetailsLoadingById: Readonly<Record<string, boolean>>;
 }>();
 
 defineEmits<{
@@ -31,7 +24,6 @@ defineEmits<{
   ];
   "retry-tool": [taskId: string];
   "retry-explanation": [resultId: string];
-  "load-task-history": [taskId: string];
 }>();
 </script>
 
@@ -62,12 +54,9 @@ defineEmits<{
           :item="item"
           :conversation-id="conversationId"
           :mutation-busy="mutationBusy"
-          :task-detail="taskDetailsById[item.task_id]"
-          :history-loading="taskDetailsLoadingById[item.task_id] ?? false"
           @supplement="$emit('set-supplement-target', $event)"
           @retry-tool="$emit('retry-tool', $event)"
           @retry-explanation="$emit('retry-explanation', $event)"
-          @load-history="$emit('load-task-history', $event)"
         />
       </div>
     </template>

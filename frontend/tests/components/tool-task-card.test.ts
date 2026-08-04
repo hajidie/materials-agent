@@ -6,123 +6,93 @@ import type {
   AssetSummary,
   ExplanationSummary,
   ResultSummary,
-  TaskDetail,
   TaskStatus,
   TimelineToolTaskItem,
   ToolRunSummary,
 } from "../../src/api/types";
 
-const timestamp = "2026-07-24T12:00:00Z";
+const timestamp = "2026-08-04T00:00:00Z";
+const rawStatusPattern =
+  /SUCCEEDED|PARTIALLY_SUCCEEDED|FAILED|PENDING|RUNNING|NEEDS_INPUT/;
 
-function run(
-  attemptNo: number,
+function toolRun(
   status: ToolRunSummary["status"] = "SUCCEEDED",
-  selected = false,
 ): ToolRunSummary {
   return {
-    tool_run_id: `run-${attemptNo}`,
-    attempt_no: attemptNo,
+    tool_run_id: "private-tool-run-id",
+    attempt_no: 2,
     tool_id: "zta35g_sem_virtual_lab",
-    tool_version: "0.1.0",
-    schema_version: "1.0",
+    tool_version: "private-tool-version",
+    schema_version: "private-schema-version",
     status,
     requested_outputs: ["sem_image", "mechanical_properties"],
-    completed_outputs:
-      status === "SUCCEEDED"
-        ? ["sem_image", "mechanical_properties"]
-        : ["sem_image"],
-    failed_outputs:
-      status === "SUCCEEDED" ? [] : ["mechanical_properties"],
+    completed_outputs: status === "SUCCEEDED" ? ["sem_image", "mechanical_properties"] : [],
+    failed_outputs: status === "SUCCEEDED" ? [] : ["sem_image", "mechanical_properties"],
     created_at: timestamp,
     started_at: timestamp,
     completed_at: timestamp,
-    duration_ms: attemptNo * 100,
+    duration_ms: 1234,
     diagnostics_summary: [
       {
-        step: "sem_generation",
-        status: "SUCCEEDED",
-        duration_ms: 42,
-        error_code: null,
-        safe_error_message: null,
+        step: "private-diagnostic-step",
+        status: "FAILED",
+        duration_ms: 999,
+        error_code: "PRIVATE_DIAGNOSTIC_CODE",
+        safe_error_message: "不应显示的 ToolRun 诊断。",
       },
     ],
-    error:
-      status === "SUCCEEDED"
-        ? null
-        : {
-            code: "SAFE_TOOL_FAILURE",
-            message: "工具未完成全部输出。",
-          },
-    is_selected: selected,
+    error: {
+      code: "PRIVATE_TOOL_RUN_CODE",
+      message: "不应显示的 ToolRun 错误。",
+    },
+    is_selected: true,
   };
 }
 
-function result(
-  status: ResultSummary["status"] = "SUCCEEDED",
-): ResultSummary {
+function result(overrides: Partial<ResultSummary> = {}): ResultSummary {
   return {
     result_id: "result-1",
-    tool_run_id: "run-2",
-    status,
+    tool_run_id: "private-tool-run-id",
+    status: "SUCCEEDED",
     requested_outputs: ["sem_image", "mechanical_properties"],
-    completed_outputs:
-      status === "SUCCEEDED"
-        ? ["sem_image", "mechanical_properties"]
-        : ["sem_image"],
-    failed_outputs:
-      status === "SUCCEEDED" ? [] : ["mechanical_properties"],
+    completed_outputs: ["sem_image", "mechanical_properties"],
+    failed_outputs: [],
     data: {
-      yield_strength: {
-        value: 650,
-        unit: "MPa",
-      },
-      elongation: 3.2,
-      verified: true,
-      optional: null,
-      series: [1, 2, 3],
+      elongation: { value: 3.456, unit: "%" },
+      yield_strength: { value: 650.1, unit: "MPa" },
+      raw_json: { private_payload: "不应显示的原始结果" },
     },
-    warnings: [
-      {
-        code: "MODEL_EVALUATION_INCOMPLETE",
-        message: "模型评价仍需补充。",
-        private_payload: "不得显示",
-      },
-      { arbitrary: "unknown warning body" },
-    ],
+    warnings: [],
     provenance: {
-      task_id: "task-1",
-      tool_run_id: "run-2",
-      input_revision: 2,
+      normalized_process_parameters: {
+        solution_temperature: { value: 1020, unit: "°C" },
+        solution_time: { value: 1.5, unit: "h" },
+        aging_temperature: { value: 480, unit: "°C" },
+        aging_time: { value: 8, unit: "h" },
+      },
+      private_payload: "不应显示的来源数据",
     },
-    error:
-      status === "SUCCEEDED"
-        ? null
-        : {
-            code: "MECHANICAL_PROPERTY_PREDICTION_FAILED",
-            safe_message: "力学性能预测未完成。",
-            private_detail: "不得显示",
-          },
+    error: null,
     tool_id: "zta35g_sem_virtual_lab",
-    tool_version: "0.1.0",
-    schema_version: "1.0",
+    tool_version: "private-tool-version",
+    schema_version: "private-schema-version",
     created_at: timestamp,
+    ...overrides,
   };
 }
 
-function asset(
-  contentUrl = "/api/v1/assets/asset-1/content",
-): AssetSummary {
+function asset(): AssetSummary {
   return {
     asset_id: "asset-1",
     status: "AVAILABLE",
-    role: "requested_output",
+    role: "sem_image",
     media_type: "image/png",
     width: 512,
     height: 512,
     bit_depth: 8,
-    size_bytes: 2048,
+    size_bytes: 262144,
     sha256: "a".repeat(64),
-    content_url: contentUrl,
+    content_url: "/api/v1/assets/asset-1/content",
   };
 }
 
@@ -135,18 +105,15 @@ function explanation(
     attempt_no: attemptNo,
     status,
     language: "zh-CN",
-    text: status === "SUCCEEDED" ? "这是已持久化的成功解释。" : null,
+    text: status === "SUCCEEDED" ? "这是已持久化的成功说明。" : null,
     completed_at: timestamp,
     duration_ms: 80,
-    error_code: status === "FAILED" ? "EXPLANATION_FAILED" : null,
-    safe_error_message:
-      status === "FAILED" ? "解释服务暂时不可用。" : null,
+    error_code: status === "FAILED" ? "PRIVATE_EXPLANATION_CODE" : null,
+    safe_error_message: status === "FAILED" ? "说明服务暂时不可用。" : null,
   };
 }
 
-function item(
-  taskStatus: TaskStatus = "SUCCEEDED",
-): TimelineToolTaskItem {
+function item(taskStatus: TaskStatus = "SUCCEEDED"): TimelineToolTaskItem {
   return {
     item_type: "TOOL_TASK",
     item_id: "task-1",
@@ -155,14 +122,14 @@ function item(
     initial_user_message: {
       message_id: "message-initial",
       role: "USER",
-      content_text: "生成 SEM 图像并预测性能",
+      content_text: "生成组织图像并预测性能",
       created_at: timestamp,
     },
     task: {
       task_id: "task-1",
       task_type: "TOOL_EXECUTION",
       status: taskStatus,
-      selected_tool_run_id: "run-2",
+      selected_tool_run_id: "private-tool-run-id",
       selected_result_id: "result-1",
       created_at: timestamp,
       started_at: timestamp,
@@ -171,12 +138,19 @@ function item(
       error_code: null,
       safe_error_message: null,
     },
-    input_thread: [],
-    input_thread_count: 0,
+    input_thread: [
+      {
+        message_id: "message-follow-up",
+        role: "ASSISTANT",
+        content_text: "请补充时效时间",
+        created_at: timestamp,
+      },
+    ],
+    input_thread_count: 1,
     input_thread_truncated: false,
     tool_runs: {
       attempt_count: 2,
-      selected_tool_run: run(2, "SUCCEEDED", true),
+      selected_tool_run: toolRun(),
       has_history: true,
     },
     result: result(),
@@ -188,394 +162,341 @@ function item(
   };
 }
 
-function detail(toolRuns: ToolRunSummary[]): TaskDetail {
-  return {
-    task_id: "task-1",
-    conversation_id: "conversation-1",
-    task_type: "TOOL_EXECUTION",
-    status: "SUCCEEDED",
-    anchor_at: timestamp,
-    selected_tool_run_id: "run-2",
-    selected_result_id: "result-1",
-    created_at: timestamp,
-    started_at: timestamp,
-    updated_at: timestamp,
-    completed_at: timestamp,
-    error_code: null,
-    safe_error_message: null,
-    needs_input: null,
-    tool_run_count: toolRuns.length,
-    tool_runs: toolRuns,
-    selected_result_summary: {
-      result_id: "result-1",
-      status: "SUCCEEDED",
-      requested_outputs: ["sem_image"],
-      completed_outputs: ["sem_image"],
-      failed_outputs: [],
-    },
-    assets: [asset()],
-    explanation_summary: explanation(),
-    latest_explanation_failure: null,
+function withoutResult(taskStatus: TaskStatus): TimelineToolTaskItem {
+  const taskItem = item(taskStatus);
+  taskItem.task.selected_tool_run_id = null;
+  taskItem.task.selected_result_id = null;
+  taskItem.result = null;
+  taskItem.assets = [];
+  taskItem.explanation = null;
+  taskItem.tool_runs = {
+    attempt_count: 0,
+    selected_tool_run: null,
+    has_history: false,
   };
+  return taskItem;
 }
 
 function mountCard(
   taskItem: TimelineToolTaskItem,
-  overrides: Partial<{
-    mutationBusy: boolean;
-    taskDetail: TaskDetail;
-    historyLoading: boolean;
-  }> = {},
+  mutationBusy = false,
 ) {
   return mount(ToolTaskCard, {
     props: {
       item: taskItem,
       conversationId: "conversation-1",
-      mutationBusy: false,
-      historyLoading: false,
-      ...overrides,
+      mutationBusy,
     },
   });
 }
 
+function expectNoRawStatus(wrapper: ReturnType<typeof mountCard>): void {
+  expect(wrapper.html()).not.toMatch(rawStatusPattern);
+  expect(
+    Object.values(wrapper.get(".status-badge").attributes()).join(" "),
+  ).not.toMatch(rawStatusPattern);
+}
+
 describe("ToolTaskCard", () => {
-  it("shows NEEDS_INPUT facts and emits only the explicitly clicked target", async () => {
-    const needsInput = item("NEEDS_INPUT");
-    needsInput.task.selected_tool_run_id = null;
-    needsInput.task.selected_result_id = null;
-    needsInput.tool_runs = {
-      attempt_count: 0,
-      selected_tool_run: null,
-      has_history: false,
-    };
-    needsInput.result = null;
-    needsInput.assets = [];
-    needsInput.explanation = null;
-    needsInput.needs_input = {
-      missing_fields: ["aging_temperature", "aging_time"],
+  it("presents a complete image result in user-facing order without request or technical facts", () => {
+    const wrapper = mountCard(item());
+    const html = wrapper.html();
+
+    expect(wrapper.attributes("aria-label")).toBe("材料实验结果");
+    expect(wrapper.get(".eyebrow").text()).toBe("实验结果");
+    expect(wrapper.get("h2").text()).toBe("组织图像已生成");
+    expect(wrapper.get(".status-badge").text()).toBe("已完成");
+    expect(html.indexOf("<header")).toBeLessThan(html.indexOf('data-section="image"'));
+    expect(html.indexOf('data-section="image"')).toBeLessThan(html.indexOf('data-section="conditions"'));
+    expect(html.indexOf('data-section="conditions"')).toBeLessThan(html.indexOf('data-section="metrics"'));
+    expect(html.indexOf('data-section="metrics"')).toBeLessThan(html.indexOf('data-section="explanation"'));
+    expect(wrapper.text()).toContain("1020 °C");
+    expect(wrapper.text()).toContain("3.46 %");
+    expect(wrapper.text()).toContain("650.10 MPa");
+    expect(wrapper.text()).toContain("这是已持久化的成功说明。");
+    expect(wrapper.text()).not.toContain("初始请求");
+    expect(wrapper.text()).not.toContain("生成组织图像并预测性能");
+    expect(wrapper.text()).not.toContain("补充与追问");
+    expect(wrapper.text()).not.toMatch(/SUCCEEDED|ToolRun|diagnostic|attempt|duration/i);
+    expectNoRawStatus(wrapper);
+  });
+
+  it("presents a mechanical-only result without an image section", () => {
+    const taskItem = item();
+    taskItem.result = result({
+      requested_outputs: ["mechanical_properties"],
+      completed_outputs: ["mechanical_properties"],
+    });
+    taskItem.assets = [];
+    const wrapper = mountCard(taskItem);
+
+    expect(wrapper.get("h2").text()).toBe("性能预测已完成");
+    expect(wrapper.find('[data-section="image"]').exists()).toBe(false);
+    expect(wrapper.get('[data-section="metrics"]').text()).toContain("屈服强度");
+  });
+
+  it("keeps a successful Result in progress while its Explanation is being generated", () => {
+    const taskItem = item("RUNNING");
+    taskItem.explanation = null;
+    const wrapper = mountCard(taskItem);
+
+    expect(wrapper.get("h2").text()).toBe("正在生成组织图像…");
+    expect(wrapper.get(".status-badge").text()).toBe("生成中");
+    expect(wrapper.get(".status-badge").attributes("data-tone")).toBe("pending");
+    expect(wrapper.find('[data-section="image"]').exists()).toBe(true);
+    expect(wrapper.find('[data-section="metrics"]').exists()).toBe(true);
+    expect(wrapper.get('[data-section="explanation"]').text()).toContain("结果说明生成中…");
+    expect(wrapper.get('[data-section="explanation"]').text()).not.toContain("结果说明暂不可用。");
+    expect(wrapper.find('[data-action="retry-explanation"]').exists()).toBe(false);
+    expectNoRawStatus(wrapper);
+  });
+
+  it.each([
+    {
+      name: "partial",
+      taskStatus: "PARTIALLY_SUCCEEDED" as const,
+      resultValue: result({
+        status: "PARTIALLY_SUCCEEDED",
+        completed_outputs: ["sem_image"],
+        failed_outputs: ["mechanical_properties"],
+      }),
+      title: "部分结果已生成",
+    },
+    {
+      name: "complete",
+      taskStatus: "SUCCEEDED" as const,
+      resultValue: result(),
+      title: "组织图像已生成",
+    },
+  ])(
+    "treats a missing Explanation without failure evidence as pending for a $name Result",
+    ({ taskStatus, resultValue, title }) => {
+      const taskItem = item(taskStatus);
+      taskItem.result = resultValue;
+      taskItem.explanation = null;
+      taskItem.latest_explanation_failure = null;
+      const wrapper = mountCard(taskItem);
+
+      expect(wrapper.get("h2").text()).toBe(title);
+      expect(wrapper.get('[data-section="explanation"]').text()).toContain(
+        "结果说明生成中…",
+      );
+      expect(wrapper.get('[data-section="explanation"]').text()).not.toContain(
+        "结果说明暂不可用。",
+      );
+      expect(
+        wrapper.find('[data-action="retry-explanation"]').exists(),
+      ).toBe(false);
+    },
+  );
+
+  it.each<TaskStatus>(["PENDING", "RUNNING"])(
+    "keeps the initial request visible while %s without exposing the enum",
+    (status) => {
+      const wrapper = mountCard(withoutResult(status));
+
+      expect(wrapper.get("h2").text()).toBe("正在生成组织图像…");
+      expect(wrapper.get(".status-badge").text()).toBe("生成中");
+      expect(wrapper.text()).toContain("初始请求");
+      expect(wrapper.text()).toContain("生成组织图像并预测性能");
+      expect(wrapper.text()).not.toContain(status);
+      expectNoRawStatus(wrapper);
+    },
+  );
+
+  it("localizes NEEDS_INPUT fields and emits a localized supplement summary", async () => {
+    const taskItem = withoutResult("NEEDS_INPUT");
+    taskItem.needs_input = {
+      missing_fields: [
+        "material",
+        "solution_temperature",
+        "aging_temperature",
+        "aging_time",
+      ],
       ambiguous_fields: [
         {
           field: "solution_time",
           message: "请确认单位。",
-          private_value: "不得显示",
+          private_value: "不应显示",
         },
       ],
       normalized_input: {
-        solution_temperature: "1000 °C",
+        solution_temperature: { value: 1020, unit: "°C" },
+        private_payload: "不应显示的 normalized_input",
       },
     };
-    const wrapper = mountCard(needsInput);
+    const wrapper = mountCard(taskItem);
 
-    expect(wrapper.text()).toContain("等待补充");
-    expect(wrapper.text()).toContain("aging_temperature");
-    expect(wrapper.text()).toContain("请确认单位");
-    expect(wrapper.text()).toContain("solution_temperature");
-    expect(wrapper.emitted("supplement")).toBeUndefined();
+    expect(wrapper.get("h2").text()).toBe("需要补充信息");
+    expect(wrapper.get(".status-badge").text()).toBe("待补充");
+    expect(wrapper.text()).toContain("材料");
+    expect(wrapper.text()).toContain("固溶温度");
+    expect(wrapper.text()).toContain("时效温度");
+    expect(wrapper.text()).toContain("时效时间");
+    expect(wrapper.text()).toContain("固溶时间：请确认单位。");
+    expect(wrapper.text()).not.toMatch(/NEEDS_INPUT|material|aging_temperature|aging_time|solution_time/);
+    expect(wrapper.text()).not.toContain("normalized_input");
+    expect(wrapper.text()).not.toContain("1020");
+    expect(wrapper.text()).not.toContain("不应显示");
+    expectNoRawStatus(wrapper);
 
-    await wrapper.get("[data-action=supplement]").trigger("click");
+    await wrapper.get('[data-action="supplement"]').trigger("click");
     expect(wrapper.emitted("supplement")).toEqual([
       [
         {
           conversationId: "conversation-1",
           taskId: "task-1",
-          summary: "待补充：aging_temperature、aging_time",
+          summary: "待补充：材料、固溶温度、时效温度、时效时间",
         },
       ],
     ]);
   });
 
-  it("renders bounded nested normalized input values instead of hiding plain records", () => {
-    const needsInput = item("NEEDS_INPUT");
-    needsInput.task.selected_tool_run_id = null;
-    needsInput.task.selected_result_id = null;
-    needsInput.tool_runs = {
-      attempt_count: 0,
-      selected_tool_run: null,
-      has_history: false,
-    };
-    needsInput.result = null;
-    needsInput.assets = [];
-    needsInput.explanation = null;
-    needsInput.needs_input = {
-      missing_fields: ["composition"],
+  it("uses a concise localized supplement summary when no missing field is listed", async () => {
+    const taskItem = withoutResult("NEEDS_INPUT");
+    taskItem.needs_input = {
+      missing_fields: [],
       ambiguous_fields: [],
-      normalized_input: {
-        process_parameters: {
-          solution_temperature: {
-            value: 1000,
-            unit: "°C",
-          },
-          aging_time: {
-            value: 3,
-            unit: "h",
-          },
-          too_deep: {
-            level_two: {
-              level_three: {
-                private_value: "不得展开",
-              },
-            },
-          },
-        },
-        requested_outputs: ["sem_image", "mechanical_properties"],
-        unsupported_function: () => "不得调用",
-        unsupported_special_object: new Date("2026-07-24T00:00:00Z"),
-      },
+      normalized_input: null,
     };
-
-    const wrapper = mountCard(needsInput);
-
-    expect(wrapper.text()).toContain("process_parameters");
-    expect(wrapper.text()).toContain("solution_temperature");
-    expect(wrapper.text()).toContain("1000");
-    expect(wrapper.text()).toContain("°C");
-    expect(wrapper.text()).toContain("aging_time");
-    expect(wrapper.text()).toContain("3");
-    expect(wrapper.text()).toContain("h");
-    expect(wrapper.text()).toContain("sem_image");
-    expect(wrapper.text()).toContain("mechanical_properties");
-    expect(wrapper.text()).toContain("嵌套内容未展开");
-    expect(wrapper.text()).not.toContain("不得展开");
-    expect(wrapper.text()).not.toContain("不得调用");
-    expect(wrapper.text()).not.toContain("已提供结构化值");
-    expect(wrapper.find("pre").exists()).toBe(false);
-  });
-
-  it("keeps input thread Backend order and marks truncation", () => {
-    const taskItem = item();
-    taskItem.input_thread = [
-      {
-        message_id: "later-time-first",
-        role: "ASSISTANT",
-        content_text: "第一条追问",
-        created_at: "2026-07-24T18:00:00Z",
-      },
-      {
-        message_id: "earlier-time-second",
-        role: "USER",
-        content_text: "第二条补充",
-        created_at: "2026-07-24T08:00:00Z",
-      },
-    ];
-    taskItem.input_thread_count = 8;
-    taskItem.input_thread_truncated = true;
     const wrapper = mountCard(taskItem);
 
-    const messages = wrapper.findAll("[data-input-message]");
-    expect(messages.map((entry) => entry.text())).toEqual([
-      expect.stringContaining("第一条追问"),
-      expect.stringContaining("第二条补充"),
+    await wrapper.get('[data-action="supplement"]').trigger("click");
+    expect(wrapper.emitted("supplement")).toEqual([
+      [
+        {
+          conversationId: "conversation-1",
+          taskId: "task-1",
+          summary: "需要补充信息",
+        },
+      ],
     ]);
-    expect(wrapper.text()).toContain(
-      "较早的部分补充记录未在当前卡片中展开",
-    );
   });
 
-  it("renders structured Result fields without dumping unknown objects", () => {
-    const wrapper = mountCard(item());
-
-    expect(wrapper.text()).toContain("650");
-    expect(wrapper.text()).toContain("MPa");
-    expect(wrapper.text()).toContain("模型评价仍需补充");
-    expect(wrapper.text()).toContain("结果包含一项附加提示");
-    expect(wrapper.text()).toContain("zta35g_sem_virtual_lab");
-    expect(wrapper.text()).not.toContain("private_payload");
-    expect(wrapper.text()).not.toContain("unknown warning body");
-    expect(wrapper.find("pre").exists()).toBe(false);
-  });
-
-  it("uses public inline and attachment URLs and isolates image failure", async () => {
-    const wrapper = mountCard(item());
-    const image = wrapper.get("img");
-    const download = wrapper.get("a[download]");
-
-    expect(image.attributes("src")).toBe(
-      "/api/v1/assets/asset-1/content",
-    );
-    expect(image.attributes("alt")).toBe("生成的 SEM 图像");
-    expect(download.attributes("href")).toBe(
-      "/api/v1/assets/asset-1/content?disposition=attachment",
-    );
-    expect(wrapper.text()).toContain("650");
-    expect(wrapper.text()).toContain("这是已持久化的成功解释");
-
-    await image.trigger("error");
-    expect(wrapper.text()).toContain("图片加载失败");
-    expect(wrapper.text()).toContain("650");
-    expect(wrapper.text()).toContain("这是已持久化的成功解释");
-  });
-
-  it("remounts the same public image URL after an explicit local reload", async () => {
-    const wrapper = mountCard(item());
-    const firstImage = wrapper.get("img");
-    const firstElement = firstImage.element;
-
-    await firstImage.trigger("error");
-    expect(wrapper.text()).toContain("图片加载失败");
-    expect(wrapper.text()).toContain("650");
-    expect(wrapper.text()).toContain("这是已持久化的成功解释");
-
-    await wrapper.get("[data-action=reload-image]").trigger("click");
-    const reloadedImage = wrapper.get("img");
-    expect(reloadedImage.element).not.toBe(firstElement);
-    expect(reloadedImage.attributes("src")).toBe(
-      "/api/v1/assets/asset-1/content",
-    );
-    expect(wrapper.text()).toContain("图片加载中");
-
-    await reloadedImage.trigger("load");
-    expect(wrapper.text()).not.toContain("图片加载失败");
-    expect(wrapper.text()).not.toContain("图片加载中");
-    expect(wrapper.text()).toContain("650");
-    expect(wrapper.text()).toContain("这是已持久化的成功解释");
-  });
-
-  it("does not render an image or download link for an invalid public URL", () => {
-    const taskItem = item();
-    taskItem.assets = [asset("https://storage.invalid/private/image.png")];
+  it("keeps a partial image result and offers a localized Tool retry", async () => {
+    const taskItem = item("PARTIALLY_SUCCEEDED");
+    taskItem.result = result({
+      status: "PARTIALLY_SUCCEEDED",
+      completed_outputs: ["sem_image"],
+      failed_outputs: ["mechanical_properties"],
+      error: { safe_message: "性能预测暂不可用。", code: "PRIVATE_RESULT_CODE" },
+    });
     const wrapper = mountCard(taskItem);
 
-    expect(wrapper.find("img").exists()).toBe(false);
-    expect(wrapper.find("a[download]").exists()).toBe(false);
-    expect(wrapper.find("[data-action=reload-image]").exists()).toBe(false);
-    expect(wrapper.text()).toContain("图片地址不可用");
-    expect(wrapper.text()).toContain("650");
+    expect(wrapper.get("h2").text()).toBe("部分结果已生成");
+    expect(wrapper.get(".status-badge").text()).toBe("部分完成");
+    expect(wrapper.find('[data-section="image"]').exists()).toBe(true);
+    expect(wrapper.text()).toContain("未能生成：力学性能");
+    expect(wrapper.text()).toContain("性能预测暂不可用。");
+    expect(wrapper.text()).not.toContain("PRIVATE_RESULT_CODE");
+    expect(wrapper.get('[data-action="retry-tool"]').text()).toBe("重新生成结果");
+    expectNoRawStatus(wrapper);
+
+    await wrapper.get('[data-action="retry-tool"]').trigger("click");
+    expect(wrapper.emitted("retry-tool")).toEqual([["task-1"]]);
   });
 
-  it("keeps a successful Explanation above the latest retry failure", () => {
-    const taskItem = item();
-    taskItem.latest_explanation_failure = explanation("FAILED", 2);
+  it("keeps a complete result successful when only its explanation failed", async () => {
+    const taskItem = item("PARTIALLY_SUCCEEDED");
+    taskItem.explanation = explanation("FAILED");
     const wrapper = mountCard(taskItem);
 
-    expect(wrapper.text()).toContain("这是已持久化的成功解释");
-    expect(wrapper.text()).toContain("最近一次解释重试失败");
-    expect(wrapper.text()).toContain("解释服务暂时不可用");
+    expect(wrapper.get("h2").text()).toBe("组织图像已生成");
+    expect(wrapper.get(".status-badge").text()).toBe("已完成");
+    expect(wrapper.find('[data-section="image"]').exists()).toBe(true);
+    expect(wrapper.find('[data-section="metrics"]').exists()).toBe(true);
+    expect(wrapper.get('[data-section="explanation"]').text()).toContain("结果说明暂不可用。");
+    expect(wrapper.get('[data-section="explanation"]').text()).toContain("说明服务暂时不可用。");
+    expect(wrapper.find('[data-action="retry-tool"]').exists()).toBe(false);
+    expect(wrapper.get('[data-action="retry-explanation"]').text()).toBe("重新生成说明");
+    expectNoRawStatus(wrapper);
+
+    await wrapper.get('[data-action="retry-explanation"]').trigger("click");
+    expect(wrapper.emitted("retry-explanation")).toEqual([["result-1"]]);
   });
 
-  it.each<TaskStatus>([
-    "PENDING",
-    "RUNNING",
-    "NEEDS_INPUT",
-    "SUCCEEDED",
-  ])("does not offer Tool retry for Task status %s", (status) => {
-    const taskItem = item(status);
-    taskItem.result = status === "SUCCEEDED" ? result() : null;
+  it("shows only safe errors and the request when a Task failed without a result", async () => {
+    const taskItem = withoutResult("FAILED");
+    taskItem.task.error_code = "PRIVATE_TASK_CODE";
+    taskItem.task.safe_error_message = "组织图像生成暂时失败。";
+    taskItem.errors = [
+      { code: "PRIVATE_ITEM_CODE", message: "请稍后重新生成。" },
+    ];
+    taskItem.tool_runs = {
+      attempt_count: 1,
+      selected_tool_run: toolRun("FAILED"),
+      has_history: true,
+    };
     const wrapper = mountCard(taskItem);
 
-    expect(wrapper.find("[data-action=retry-tool]").exists()).toBe(false);
+    expect(wrapper.get("h2").text()).toBe("生成失败");
+    expect(wrapper.get(".status-badge").text()).toBe("失败");
+    expect(wrapper.text()).toContain("初始请求");
+    expect(wrapper.text()).toContain("组织图像生成暂时失败。");
+    expect(wrapper.text()).toContain("请稍后重新生成。");
+    expect(wrapper.text()).not.toMatch(/FAILED|PRIVATE_TASK_CODE|PRIVATE_ITEM_CODE|PRIVATE_TOOL_RUN_CODE/);
+    expect(wrapper.text()).not.toContain("不应显示的 ToolRun 错误。");
+    expect(wrapper.get('[data-action="retry-tool"]').text()).toBe("重新生成结果");
+    expectNoRawStatus(wrapper);
+
+    await wrapper.get('[data-action="retry-tool"]').trigger("click");
+    expect(wrapper.emitted("retry-tool")).toEqual([["task-1"]]);
   });
 
-  it("offers Tool retry only for failed or partial result paths", async () => {
-    const failedWithoutResult = item("FAILED");
-    failedWithoutResult.result = null;
-    failedWithoutResult.assets = [];
-    failedWithoutResult.explanation = null;
-    failedWithoutResult.task.selected_result_id = null;
-    const failed = mountCard(failedWithoutResult);
-    await failed.get("[data-action=retry-tool]").trigger("click");
-    expect(failed.emitted("retry-tool")).toEqual([["task-1"]]);
+  it("disables every visible mutation action while another mutation is active", () => {
+    const needsInput = withoutResult("NEEDS_INPUT");
+    needsInput.needs_input = {
+      missing_fields: ["material"],
+      ambiguous_fields: [],
+      normalized_input: null,
+    };
+    expect(mountCard(needsInput, true).get('[data-action="supplement"]').attributes()).toHaveProperty("disabled");
 
     const partial = item("PARTIALLY_SUCCEEDED");
-    partial.result = result("PARTIALLY_SUCCEEDED");
-    const partialWrapper = mountCard(partial);
-    expect(partialWrapper.find("[data-action=retry-tool]").exists()).toBe(
-      true,
-    );
-
-    const explanationOnlyFailure = item("PARTIALLY_SUCCEEDED");
-    explanationOnlyFailure.result = result("SUCCEEDED");
-    explanationOnlyFailure.explanation = explanation("FAILED");
-    const explanationOnly = mountCard(explanationOnlyFailure);
-    expect(explanationOnly.find("[data-action=retry-tool]").exists()).toBe(
-      false,
-    );
-  });
-
-  it("offers Explanation retry only when Result exists and explanation needs it", async () => {
-    const missing = item("PARTIALLY_SUCCEEDED");
-    missing.explanation = null;
-    const missingWrapper = mountCard(missing);
-    await missingWrapper
-      .get("[data-action=retry-explanation]")
-      .trigger("click");
-    expect(missingWrapper.emitted("retry-explanation")).toEqual([
-      ["result-1"],
-    ]);
-
-    const successful = mountCard(item());
-    expect(
-      successful.find("[data-action=retry-explanation]").exists(),
-    ).toBe(false);
-
-    const latestFailure = item();
-    latestFailure.latest_explanation_failure = explanation("FAILED", 2);
-    expect(
-      mountCard(latestFailure)
-        .find("[data-action=retry-explanation]")
-        .exists(),
-    ).toBe(true);
-
-    const withoutResult = item("FAILED");
-    withoutResult.result = null;
-    withoutResult.explanation = null;
-    expect(
-      mountCard(withoutResult)
-        .find("[data-action=retry-explanation]")
-        .exists(),
-    ).toBe(false);
-  });
-
-  it("disables retry and supplement actions while a mutation is active", () => {
-    const taskItem = item("PARTIALLY_SUCCEEDED");
-    taskItem.result = result("PARTIALLY_SUCCEEDED");
-    taskItem.latest_explanation_failure = explanation("FAILED", 2);
-    const wrapper = mountCard(taskItem, { mutationBusy: true });
-
-    expect(
-      wrapper.get("[data-action=retry-tool]").attributes(),
-    ).toHaveProperty("disabled");
-    expect(
-      wrapper.get("[data-action=retry-explanation]").attributes(),
-    ).toHaveProperty("disabled");
-  });
-
-  it("loads history only on demand and preserves Backend run order", async () => {
-    const wrapper = mountCard(item());
-
-    expect(wrapper.emitted("load-history")).toBeUndefined();
-    await wrapper.get("[data-action=load-history]").trigger("click");
-    expect(wrapper.emitted("load-history")).toEqual([["task-1"]]);
-
-    await wrapper.setProps({
-      taskDetail: detail([
-        run(2, "SUCCEEDED", true),
-        run(1, "FAILED", false),
-      ]),
+    partial.result = result({
+      status: "PARTIALLY_SUCCEEDED",
+      completed_outputs: ["sem_image"],
+      failed_outputs: ["mechanical_properties"],
     });
-    expect(
-      wrapper
-        .findAll("[data-history-attempt]")
-        .map((entry) => entry.attributes("data-history-attempt")),
-    ).toEqual(["2", "1"]);
-    expect(wrapper.text()).toContain("当前选中");
-
-    await wrapper.get("[data-action=close-history]").trigger("click");
-    await wrapper.get("[data-action=load-history]").trigger("click");
-    expect(wrapper.emitted("load-history")).toHaveLength(1);
+    partial.latest_explanation_failure = explanation("FAILED", 2);
+    const wrapper = mountCard(partial, true);
+    expect(wrapper.get('[data-action="retry-tool"]').attributes()).toHaveProperty("disabled");
+    expect(wrapper.get('[data-action="retry-explanation"]').attributes()).toHaveProperty("disabled");
   });
 
-  it("shows safe Task and ToolRun errors without internal object dumps", () => {
-    const taskItem = item("FAILED");
-    taskItem.task.safe_error_message = "任务安全错误。";
-    taskItem.errors = [
-      { code: "SAFE_ERROR", message: "公共错误摘要。" },
-    ];
-    taskItem.tool_runs.selected_tool_run = run(2, "FAILED", true);
+  it("keeps successful explanation text above the latest regeneration failure", () => {
+    const taskItem = item("PARTIALLY_SUCCEEDED");
+    taskItem.latest_explanation_failure = explanation("FAILED", 2);
     const wrapper = mountCard(taskItem);
+    const explanationSection = wrapper.get('[data-section="explanation"]');
 
-    expect(wrapper.text()).toContain("任务安全错误");
-    expect(wrapper.text()).toContain("公共错误摘要");
-    expect(wrapper.text()).toContain("工具未完成全部输出");
-    expect(wrapper.text()).not.toContain("[object Object]");
+    expect(wrapper.get(".status-badge").text()).toBe("已完成");
+    expect(explanationSection.text()).toContain("这是已持久化的成功说明。");
+    expect(explanationSection.text()).toContain("最近一次重新生成说明失败");
+    expect(explanationSection.text()).toContain("说明服务暂时不可用。");
+    expect(explanationSection.text().indexOf("这是已持久化的成功说明。")).toBeLessThan(
+      explanationSection.text().indexOf("最近一次重新生成说明失败"),
+    );
+  });
+
+  it("never exposes ToolRun errors, raw statuses, unknown objects, or private JSON", () => {
+    const taskItem = item();
+    taskItem.task.safe_error_message = "任务安全提示。";
+    taskItem.errors = [{ code: "PRIVATE_ITEM_CODE", message: "结果安全提示。" }];
+    taskItem.result = result({
+      warnings: [{ unknown: "unknown warning body", private_payload: "private warning" }],
+      error: { unknown: "raw error body", code: "PRIVATE_RESULT_CODE" },
+    });
+    const text = mountCard(taskItem).text();
+
+    expect(text).toContain("任务安全提示。");
+    expect(text).toContain("结果安全提示。");
+    expect(text).not.toMatch(/SUCCEEDED|PARTIALLY_SUCCEEDED|FAILED|PENDING|RUNNING|NEEDS_INPUT/);
+    expect(text).not.toMatch(/private-tool-run-id|private-tool-version|private-schema-version/);
+    expect(text).not.toMatch(/private-diagnostic-step|PRIVATE_DIAGNOSTIC_CODE|不应显示的 ToolRun/);
+    expect(text).not.toMatch(/raw_json|不应显示的原始结果|不应显示的来源数据/);
+    expect(text).not.toMatch(/unknown warning body|private warning|raw error body|PRIVATE_RESULT_CODE|PRIVATE_ITEM_CODE/);
+    expect(text).not.toContain("[object Object]");
+    expect(text).not.toContain("运行历史");
   });
 });

@@ -64,6 +64,7 @@ Backend 与旧模型 Runtime 不共享 Python 依赖。独立 Runtime 只是兼�
 - [阶段 1 当前状态](docs/progress/phase-1-current-status.md)
 - [阶段 1 验收清单](docs/acceptance/phase-1-checklist.md)
 - [环境职责说明](environments/README.md)
+- [本地开发模式启动与停止](docs/local-development.md)
 
 ## 仓库边界检查
 

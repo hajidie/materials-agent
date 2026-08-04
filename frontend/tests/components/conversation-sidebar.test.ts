@@ -41,6 +41,15 @@ function mountSidebar(
 }
 
 describe("ConversationSidebar", () => {
+  it("shows the approved agent title without the old platform eyebrow", () => {
+    const wrapper = mountSidebar();
+    const header = wrapper.get(".conversation-sidebar__header");
+
+    expect(header.get("h1").text()).toBe("高端金属材料组织图像智能体");
+    expect(header.find(".eyebrow").exists()).toBe(false);
+    expect(header.text()).not.toContain("本地材料研究平台");
+  });
+
   it("keeps Backend order and marks only the selected Conversation", () => {
     const wrapper = mountSidebar({
       conversations: [

@@ -3,7 +3,6 @@ import { computed, type DeepReadonly } from "vue";
 
 import type {
   ConversationListItem,
-  TaskDetail,
   TimelineItem,
 } from "../api/types";
 import type { MutationStatus } from "../composables/useIdempotentRequest";
@@ -26,10 +25,6 @@ const props = defineProps<{
     | null;
   mutationStatus: MutationStatus;
   writeBusy: boolean;
-  taskDetailsById: Readonly<
-    Record<string, TaskDetail | DeepReadonly<TaskDetail>>
-  >;
-  taskDetailsLoadingById: Readonly<Record<string, boolean>>;
 }>();
 
 defineEmits<{
@@ -39,7 +34,6 @@ defineEmits<{
   "cancel-supplement-target": [];
   "retry-tool": [taskId: string];
   "retry-explanation": [resultId: string];
-  "load-task-history": [taskId: string];
   refresh: [];
 }>();
 
@@ -88,12 +82,9 @@ const title = computed(() => {
           :items="timeline"
           :conversation-id="selectedConversation.conversation_id"
           :mutation-busy="writeBusy"
-          :task-details-by-id="taskDetailsById"
-          :task-details-loading-by-id="taskDetailsLoadingById"
           @set-supplement-target="$emit('set-supplement-target', $event)"
           @retry-tool="$emit('retry-tool', $event)"
           @retry-explanation="$emit('retry-explanation', $event)"
-          @load-task-history="$emit('load-task-history', $event)"
         />
       </div>
 
