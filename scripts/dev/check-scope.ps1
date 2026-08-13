@@ -2,7 +2,11 @@
 param(
     [Parameter(Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
-    [string]$Milestone
+    [string]$Label,
+
+    [string[]]$AllowedPath = @(),
+
+    [string]$AllowlistFile
 )
 
 Set-StrictMode -Version Latest
@@ -10,14 +14,12 @@ $ErrorActionPreference = 'Stop'
 
 # Stable exit codes:
 # 0 = SCOPE_OK
-# 2 = UNKNOWN_MILESTONE
 # 3 = GIT_UNAVAILABLE
 # 4 = NOT_A_GIT_REPOSITORY
 # 5 = OUT_OF_SCOPE_CHANGES
 # 6 = SCRIPT_CONFIGURATION_ERROR
 $ExitCodes = @{
     SCOPE_OK = 0
-    UNKNOWN_MILESTONE = 2
     GIT_UNAVAILABLE = 3
     NOT_A_GIT_REPOSITORY = 4
     OUT_OF_SCOPE_CHANGES = 5
@@ -42,527 +44,86 @@ function Complete-ScopeCheck {
     exit $ExitCodes[$Code]
 }
 
+$normalizedLabel = $Label.Trim().ToUpperInvariant()
+if ($normalizedLabel -notmatch '^[A-Z0-9][A-Z0-9._-]{0,63}$') {
+    Complete-ScopeCheck -Code 'SCRIPT_CONFIGURATION_ERROR' -Summary 'INVALID_LABEL'
+}
+
 function ConvertTo-RepoPath {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Path
     )
 
-    $normalized = $Path.Replace([char]92, [char]47)
+    $normalized = $Path.Trim().Replace([char]92, [char]47)
     while ($normalized.StartsWith('./', [StringComparison]::Ordinal)) {
         $normalized = $normalized.Substring(2)
     }
     return $normalized
 }
 
-$normalizedMilestone = $Milestone.Trim().ToUpperInvariant()
-$recognizedMilestones = @(
-    'G0', 'M0', 'M4A', 'M4B', 'M4PLAN', 'M11A', 'M11B', 'M12A', 'M12B',
-    'P1B1', 'P1B2'
-) + @(1..16 | ForEach-Object { "M$_" })
-if ($recognizedMilestones -notcontains $normalizedMilestone) {
-    Complete-ScopeCheck -Code 'UNKNOWN_MILESTONE' -Summary $normalizedMilestone
+function ConvertTo-AllowedRepoPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $normalized = ConvertTo-RepoPath -Path $Path
+    $segments = @($normalized.Split([char]47))
+    $invalid = (
+        [string]::IsNullOrWhiteSpace($normalized) -or
+        [IO.Path]::IsPathRooted($normalized) -or
+        $normalized -match '^[A-Za-z]:' -or
+        $normalized.EndsWith('/', [StringComparison]::Ordinal) -or
+        [System.Management.Automation.WildcardPattern]::ContainsWildcardCharacters($normalized) -or
+        $segments -contains '' -or
+        $segments -contains '.' -or
+        $segments -contains '..'
+    )
+    if ($invalid) {
+        Complete-ScopeCheck -Code 'SCRIPT_CONFIGURATION_ERROR' -Summary $normalizedLabel
+    }
+    $workingTreePath = Join-Path (Get-Location).Path $normalized
+    if (Test-Path -LiteralPath $workingTreePath -PathType Container) {
+        Complete-ScopeCheck -Code 'SCRIPT_CONFIGURATION_ERROR' -Summary $normalizedLabel
+    }
+    return $normalized
 }
 
-$globalAllowedPaths = @(
-    'docs/progress/phase-1-current-status.md'
-)
-
-# M0-M11 configured milestones/work units have reviewed exact allowlists.
-# G0 and otherwise unconfigured recognized milestones are retained so
-# callers receive a stable configuration error until their exact plan allowlist
-# is reviewed and added; this deliberately avoids inventing future scope.
-$milestoneAllowlists = @{
-    M0 = @(
-        '.editorconfig'
-        '.gitattributes'
-        '.env.example'
-        'README.md'
-        'environments/README.md'
-        'scripts/dev/check-scope.ps1'
-        'docs/acceptance/phase-1-checklist.md'
-    )
-    M1 = @(
-        'scripts/dev/check-scope.ps1'
-        'environments/materialsagent-backend.yml'
-        'backend/pyproject.toml'
-        'backend/src/materialsagent/__init__.py'
-        'backend/src/materialsagent/main.py'
-        'backend/src/materialsagent/api/__init__.py'
-        'backend/src/materialsagent/api/routes/__init__.py'
-        'backend/src/materialsagent/api/routes/health.py'
-        'backend/src/materialsagent/infrastructure/__init__.py'
-        'backend/src/materialsagent/infrastructure/config.py'
-        'backend/src/materialsagent/infrastructure/logging.py'
-        'backend/tests/conftest.py'
-        'backend/tests/unit/test_config.py'
-        'backend/tests/api/test_health.py'
-    )
-    M2 = @(
-        'scripts/dev/check-scope.ps1'
-        'backend/pyproject.toml'
-        'backend/src/materialsagent/main.py'
-        'backend/src/materialsagent/api/routes/health.py'
-        'backend/src/materialsagent/application/bootstrap.py'
-        'backend/src/materialsagent/application/readiness.py'
-        'backend/src/materialsagent/domain/ports/storage.py'
-        'backend/src/materialsagent/infrastructure/config.py'
-        'backend/src/materialsagent/infrastructure/storage/minio.py'
-        'backend/tests/unit/test_config.py'
-        'backend/tests/unit/test_readiness.py'
-        'backend/tests/unit/test_storage_contract.py'
-        'backend/tests/integration/storage/conftest.py'
-        'backend/tests/integration/storage/test_minio_storage.py'
-        'backend/tests/api/test_health.py'
-    )
-    M3 = @(
-        'scripts/dev/check-scope.ps1'
-        'backend/src/materialsagent/main.py'
-        'backend/src/materialsagent/application/context.py'
-        'backend/src/materialsagent/application/errors.py'
-        'backend/src/materialsagent/application/conversations.py'
-        'backend/src/materialsagent/application/messages.py'
-        'backend/src/materialsagent/application/tasks.py'
-        'backend/src/materialsagent/api/dependencies.py'
-        'backend/src/materialsagent/api/routes/conversations.py'
-        'backend/src/materialsagent/api/routes/tasks.py'
-        'backend/src/materialsagent/domain/ports/unit_of_work.py'
-        'backend/src/materialsagent/infrastructure/db/conversation_task.py'
-        'backend/tests/unit/test_conversation_title.py'
-        'backend/tests/api/conftest.py'
-        'backend/tests/api/test_conversations.py'
-        'backend/tests/api/test_tasks.py'
-    )
-    M4A = @(
-        'scripts/dev/check-scope.ps1'
-        'docs/progress/phase-1-current-status.md'
-        'backend/src/materialsagent/domain/ports/chat_orchestration.py'
-        'backend/src/materialsagent/application/zta35g_input.py'
-        'backend/src/materialsagent/infrastructure/llm/mock.py'
-        'backend/src/materialsagent/domain/models/llm_call.py'
-        'backend/src/materialsagent/domain/ports/unit_of_work.py'
-        'backend/src/materialsagent/infrastructure/db/llm_call.py'
-        'backend/src/materialsagent/infrastructure/db/conversation_task.py'
-        'backend/src/materialsagent/infrastructure/db/unit_of_work.py'
-        'backend/alembic/env.py'
-        'backend/alembic/versions/0004_create_llm_call.py'
-        'backend/tests/contract/test_chat_orchestration.py'
-        'backend/tests/unit/test_zta35g_input.py'
-        'backend/tests/unit/test_llm_call_domain.py'
-        'backend/tests/integration/db/test_llm_call.py'
-        'backend/tests/integration/db/test_migrations.py'
-    )
-    M4PLAN = @(
-        'scripts/dev/check-scope.ps1'
-        'docs/acceptance/phase-1-checklist.md'
-        'docs/progress/phase-1-current-status.md'
-        'docs/superpowers/plans/2026-07-17-sem-mvp-phase-1-implementation-plan.md'
-    )
-    M4B = @(
-        'scripts/dev/check-scope.ps1'
-        'docs/progress/phase-1-current-status.md'
-        'backend/src/materialsagent/application/chat_orchestration.py'
-        'backend/src/materialsagent/application/errors.py'
-        'backend/src/materialsagent/domain/ports/chat_orchestration.py'
-        'backend/src/materialsagent/domain/ports/unit_of_work.py'
-        'backend/src/materialsagent/infrastructure/llm/mock.py'
-        'backend/src/materialsagent/infrastructure/db/conversation_task.py'
-        'backend/src/materialsagent/api/dependencies.py'
-        'backend/src/materialsagent/api/routes/conversations.py'
-        'backend/src/materialsagent/main.py'
-        'backend/tests/unit/test_chat_orchestration_service.py'
-        'backend/tests/contract/test_chat_orchestration.py'
-        'backend/tests/integration/db/test_chat_orchestration_persistence.py'
-        'backend/tests/api/test_conversations.py'
-        'backend/tests/api/test_message_orchestration.py'
-        'backend/tests/api/test_tasks.py'
-    )
-    M5 = @(
-        '.env.example'
-        'scripts/dev/check-scope.ps1'
-        'backend/alembic/env.py'
-        'backend/alembic/versions/0005_create_tool_run.py'
-        'backend/src/materialsagent/main.py'
-        'backend/src/materialsagent/api/dependencies.py'
-        'backend/src/materialsagent/api/routes/tools.py'
-        'backend/src/materialsagent/application/tool_execution.py'
-        'backend/src/materialsagent/application/tools.py'
-        'backend/src/materialsagent/domain/models/tool_run.py'
-        'backend/src/materialsagent/domain/ports/tool_execution.py'
-        'backend/src/materialsagent/domain/ports/unit_of_work.py'
-        'backend/src/materialsagent/infrastructure/config.py'
-        'backend/src/materialsagent/infrastructure/db/conversation_task.py'
-        'backend/src/materialsagent/infrastructure/db/tool_run.py'
-        'backend/src/materialsagent/infrastructure/db/unit_of_work.py'
-        'backend/src/materialsagent/infrastructure/tool_clients/local_zta35g.py'
-        'backend/tests/api/test_message_orchestration.py'
-        'backend/tests/api/test_tools.py'
-        'backend/tests/contract/test_runtime_contract.py'
-        'backend/tests/integration/db/test_chat_orchestration_persistence.py'
-        'backend/tests/integration/db/test_migrations.py'
-        'backend/tests/integration/db/test_tool_run.py'
-        'backend/tests/unit/test_config.py'
-        'backend/tests/unit/test_tool_execution_service.py'
-        'mock-runtime/pyproject.toml'
-        'mock-runtime/src/materialsagent_mock_runtime/main.py'
-        'mock-runtime/tests/conftest.py'
-        'mock-runtime/tests/test_runtime.py'
-    )
-    M6 = @(
-        'scripts/dev/check-scope.ps1'
-        'backend/pyproject.toml'
-        'backend/alembic/env.py'
-        'backend/alembic/versions/0006_create_asset.py'
-        'backend/src/materialsagent/main.py'
-        'backend/src/materialsagent/api/dependencies.py'
-        'backend/src/materialsagent/api/routes/assets.py'
-        'backend/src/materialsagent/api/routes/tools.py'
-        'backend/src/materialsagent/application/asset_service.py'
-        'backend/src/materialsagent/application/image_payload.py'
-        'backend/src/materialsagent/application/png_encoder.py'
-        'backend/src/materialsagent/application/tool_execution.py'
-        'backend/src/materialsagent/domain/models/asset.py'
-        'backend/src/materialsagent/domain/ports/storage.py'
-        'backend/src/materialsagent/domain/ports/tool_execution.py'
-        'backend/src/materialsagent/domain/ports/unit_of_work.py'
-        'backend/src/materialsagent/infrastructure/db/asset.py'
-        'backend/src/materialsagent/infrastructure/db/unit_of_work.py'
-        'backend/src/materialsagent/infrastructure/storage/minio.py'
-        'backend/tests/unit/test_asset_domain.py'
-        'backend/tests/unit/test_image_payload.py'
-        'backend/tests/unit/test_png_encoder.py'
-        'backend/tests/unit/test_storage_contract.py'
-        'backend/tests/unit/test_tool_execution_service.py'
-        'backend/tests/integration/db/test_asset.py'
-        'backend/tests/integration/db/test_chat_orchestration_persistence.py'
-        'backend/tests/integration/db/test_migrations.py'
-        'backend/tests/integration/storage/test_asset_lifecycle.py'
-        'backend/tests/integration/storage/test_minio_storage.py'
-        'backend/tests/api/conftest.py'
-        'backend/tests/api/test_assets.py'
-        'backend/tests/api/test_message_orchestration.py'
-        'backend/tests/api/test_tools.py'
-    )
-    M7 = @(
-        'scripts/dev/check-scope.ps1'
-        'backend/alembic/env.py'
-        'backend/alembic/versions/0007_create_tool_result_explanation.py'
-        'backend/src/materialsagent/main.py'
-        'backend/src/materialsagent/api/dependencies.py'
-        'backend/src/materialsagent/api/routes/conversations.py'
-        'backend/src/materialsagent/api/routes/tasks.py'
-        'backend/src/materialsagent/api/routes/tool_results.py'
-        'backend/src/materialsagent/application/chat_orchestration.py'
-        'backend/src/materialsagent/application/errors.py'
-        'backend/src/materialsagent/application/explanation_service.py'
-        'backend/src/materialsagent/application/result_service.py'
-        'backend/src/materialsagent/application/tasks.py'
-        'backend/src/materialsagent/application/tool_execution.py'
-        'backend/src/materialsagent/application/tool_workflow.py'
-        'backend/src/materialsagent/domain/models/explanation.py'
-        'backend/src/materialsagent/domain/models/llm_call.py'
-        'backend/src/materialsagent/domain/models/result_asset_link.py'
-        'backend/src/materialsagent/domain/models/task.py'
-        'backend/src/materialsagent/domain/models/tool_result.py'
-        'backend/src/materialsagent/domain/models/tool_run.py'
-        'backend/src/materialsagent/domain/ports/explanation.py'
-        'backend/src/materialsagent/domain/ports/unit_of_work.py'
-        'backend/src/materialsagent/infrastructure/db/asset.py'
-        'backend/src/materialsagent/infrastructure/db/conversation_task.py'
-        'backend/src/materialsagent/infrastructure/db/explanation.py'
-        'backend/src/materialsagent/infrastructure/db/llm_call.py'
-        'backend/src/materialsagent/infrastructure/db/tool_result.py'
-        'backend/src/materialsagent/infrastructure/db/tool_run.py'
-        'backend/src/materialsagent/infrastructure/db/unit_of_work.py'
-        'backend/src/materialsagent/infrastructure/llm/mock_explanation.py'
-        'backend/tests/api/conftest.py'
-        'backend/tests/api/test_assets.py'
-        'backend/tests/api/test_explanation_outcomes.py'
-        'backend/tests/api/test_message_orchestration.py'
-        'backend/tests/api/test_tasks.py'
-        'backend/tests/api/test_tool_results.py'
-        'backend/tests/contract/test_explanation.py'
-        'backend/tests/contract/test_tool_execution_output.py'
-        'backend/tests/integration/db/test_chat_orchestration_persistence.py'
-        'backend/tests/integration/db/test_conversation_task.py'
-        'backend/tests/integration/db/test_explanation_persistence.py'
-        'backend/tests/integration/db/test_llm_call.py'
-        'backend/tests/integration/db/test_migrations.py'
-        'backend/tests/integration/db/test_result_commit.py'
-        'backend/tests/integration/db/test_tool_run.py'
-        'backend/tests/unit/test_chat_orchestration_service.py'
-        'backend/tests/unit/test_explanation_domain.py'
-        'backend/tests/unit/test_explanation_service.py'
-        'backend/tests/unit/test_llm_call_domain.py'
-        'backend/tests/unit/test_result_public_projection.py'
-        'backend/tests/unit/test_result_service.py'
-        'backend/tests/unit/test_tool_execution_service.py'
-        'backend/tests/unit/test_tool_result_domain.py'
-    )
-    M8 = @(
-        'scripts/dev/check-scope.ps1'
-        'backend/alembic/env.py'
-        'backend/alembic/versions/0008_create_idempotency_record.py'
-        'backend/src/materialsagent/main.py'
-        'backend/src/materialsagent/api/dependencies.py'
-        'backend/src/materialsagent/api/routes/conversations.py'
-        'backend/src/materialsagent/api/routes/tasks.py'
-        'backend/src/materialsagent/api/routes/tool_results.py'
-        'backend/src/materialsagent/application/chat_orchestration.py'
-        'backend/src/materialsagent/application/errors.py'
-        'backend/src/materialsagent/application/explanation_service.py'
-        'backend/src/materialsagent/application/idempotency.py'
-        'backend/src/materialsagent/application/messages.py'
-        'backend/src/materialsagent/application/result_service.py'
-        'backend/src/materialsagent/application/retries.py'
-        'backend/src/materialsagent/application/tool_execution.py'
-        'backend/src/materialsagent/application/tool_workflow.py'
-        'backend/src/materialsagent/domain/models/idempotency_record.py'
-        'backend/src/materialsagent/domain/ports/unit_of_work.py'
-        'backend/src/materialsagent/infrastructure/db/actor.py'
-        'backend/src/materialsagent/infrastructure/db/conversation_task.py'
-        'backend/src/materialsagent/infrastructure/db/idempotency_record.py'
-        'backend/src/materialsagent/infrastructure/db/tool_result.py'
-        'backend/src/materialsagent/infrastructure/db/unit_of_work.py'
-        'backend/tests/api/test_assets.py'
-        'backend/tests/api/test_conversations.py'
-        'backend/tests/api/test_explanation_outcomes.py'
-        'backend/tests/api/test_m8_explanation_retry.py'
-        'backend/tests/api/test_m8_message_idempotency.py'
-        'backend/tests/api/test_m8_tool_retry.py'
-        'backend/tests/api/test_message_orchestration.py'
-        'backend/tests/api/test_tasks.py'
-        'backend/tests/api/test_tools.py'
-        'backend/tests/integration/db/test_idempotency_persistence.py'
-        'backend/tests/integration/db/test_migrations.py'
-        'backend/tests/integration/db/test_result_commit.py'
-        'backend/tests/unit/test_explanation_service.py'
-        'backend/tests/unit/test_idempotency.py'
-    )
-    M9 = @(
-        'docs/superpowers/plans/2026-07-17-sem-mvp-phase-1-implementation-plan.md'
-        'scripts/dev/check-scope.ps1'
-        '.env.example'
-        'backend/alembic/versions/0009_add_timeline_query_indexes.py'
-        'backend/src/materialsagent/application/timeline.py'
-        'backend/src/materialsagent/application/timeline_cursor.py'
-        'backend/src/materialsagent/application/tasks.py'
-        'backend/src/materialsagent/domain/ports/timeline_query.py'
-        'backend/src/materialsagent/infrastructure/config.py'
-        'backend/src/materialsagent/infrastructure/db/conversation_task.py'
-        'backend/src/materialsagent/infrastructure/db/timeline_query.py'
-        'backend/src/materialsagent/api/dependencies.py'
-        'backend/src/materialsagent/api/routes/timeline.py'
-        'backend/src/materialsagent/api/routes/tasks.py'
-        'backend/src/materialsagent/main.py'
-        'backend/tests/unit/test_config.py'
-        'backend/tests/unit/test_timeline_cursor.py'
-        'backend/tests/unit/test_timeline_sort.py'
-        'backend/tests/unit/test_task_query.py'
-        'backend/tests/contract/test_timeline_contract.py'
-        'backend/tests/integration/db/test_migrations.py'
-        'backend/tests/integration/db/test_timeline_query.py'
-        'backend/tests/api/conftest.py'
-        'backend/tests/api/test_timeline.py'
-        'backend/tests/api/test_tasks.py'
-        'backend/tests/conftest.py'
-        'backend/tests/integration/db/conftest.py'
-    )
-    M10 = @(
-        'docs/superpowers/plans/2026-07-17-sem-mvp-phase-1-implementation-plan.md'
-        'scripts/dev/check-scope.ps1'
-        '.env.example'
-        'frontend/.env.example'
-        'frontend/.gitignore'
-        'frontend/.node-version'
-        'frontend/index.html'
-        'frontend/package.json'
-        'frontend/package-lock.json'
-        'frontend/tsconfig.json'
-        'frontend/tsconfig.app.json'
-        'frontend/tsconfig.node.json'
-        'frontend/vite.config.ts'
-        'frontend/src/env.d.ts'
-        'frontend/src/main.ts'
-        'frontend/src/App.vue'
-        'frontend/src/styles.css'
-        'frontend/src/api/types.ts'
-        'frontend/src/api/errors.ts'
-        'frontend/src/api/client.ts'
-        'frontend/src/composables/useIdempotentRequest.ts'
-        'frontend/src/composables/usePolling.ts'
-        'frontend/src/composables/useMaterialsAgent.ts'
-        'frontend/src/components/ConversationSidebar.vue'
-        'frontend/src/components/ConversationView.vue'
-        'frontend/src/components/TimelineList.vue'
-        'frontend/src/components/UserMessageItem.vue'
-        'frontend/src/components/AssistantMessageItem.vue'
-        'frontend/src/components/ToolTaskCard.vue'
-        'frontend/src/components/StructuredResult.vue'
-        'frontend/src/components/AssetGallery.vue'
-        'frontend/src/components/TaskHistory.vue'
-        'frontend/src/components/ChatComposer.vue'
-        'frontend/src/components/GlobalErrorNotice.vue'
-        'frontend/src/test/setup.ts'
-        'frontend/tests/api/client.test.ts'
-        'frontend/tests/composables/idempotent-request.test.ts'
-        'frontend/tests/composables/polling.test.ts'
-        'frontend/tests/composables/materials-agent.test.ts'
-        'frontend/tests/components/conversation-sidebar.test.ts'
-        'frontend/tests/components/timeline-list.test.ts'
-        'frontend/tests/components/tool-task-card.test.ts'
-        'frontend/tests/components/chat-composer.test.ts'
-        'frontend/tests/components/app-flow.test.ts'
-    )
-    M11A = @(
-        'docs/superpowers/plans/2026-07-17-sem-mvp-phase-1-implementation-plan.md'
-        'docs/progress/phase-1-current-status.md'
-        'scripts/dev/check-scope.ps1'
-        'scripts/dev/start-mock-stack.ps1'
-        'scripts/dev/stop-mock-stack.ps1'
-        'backend/tests/e2e/conftest.py'
-        'backend/tests/e2e/test_mock_journey.py'
-    )
-    M11B = @(
-        'docs/progress/phase-1-current-status.md'
-        'scripts/dev/check-scope.ps1'
-        'scripts/dev/start-mock-stack.ps1'
-        'scripts/dev/stop-mock-stack.ps1'
-        'scripts/acceptance/run-phase-1a.ps1'
-        'backend/src/materialsagent/domain/ports/storage.py'
-        'backend/src/materialsagent/infrastructure/storage/minio.py'
-        'backend/src/materialsagent/application/asset_service.py'
-        'backend/src/materialsagent/infrastructure/llm/mock.py'
-        'backend/tests/unit/test_storage_contract.py'
-        'backend/tests/contract/test_chat_orchestration.py'
-        'backend/tests/integration/storage/test_minio_storage.py'
-        'backend/tests/integration/storage/test_asset_lifecycle.py'
-        'backend/tests/e2e/conftest.py'
-        'backend/tests/e2e/test_mock_journey.py'
-        'backend/tests/e2e/test_mock_acceptance_matrix.py'
-        'docs/acceptance/phase-1a-report.md'
-    )
-    M11 = @(
-        'docs/superpowers/plans/2026-07-17-sem-mvp-phase-1-implementation-plan.md'
-        'docs/progress/phase-1-current-status.md'
-        'scripts/dev/check-scope.ps1'
-        'scripts/dev/start-mock-stack.ps1'
-        'scripts/dev/stop-mock-stack.ps1'
-        'scripts/acceptance/run-phase-1a.ps1'
-        'backend/src/materialsagent/domain/ports/storage.py'
-        'backend/src/materialsagent/infrastructure/storage/minio.py'
-        'backend/src/materialsagent/application/asset_service.py'
-        'backend/src/materialsagent/infrastructure/llm/mock.py'
-        'backend/tests/unit/test_storage_contract.py'
-        'backend/tests/contract/test_chat_orchestration.py'
-        'backend/tests/integration/storage/test_minio_storage.py'
-        'backend/tests/integration/storage/test_asset_lifecycle.py'
-        'backend/tests/e2e/conftest.py'
-        'backend/tests/e2e/test_mock_journey.py'
-        'backend/tests/e2e/test_mock_acceptance_matrix.py'
-        'docs/acceptance/phase-1a-report.md'
-    )
-    M12A = @(
-        '.env.example'
-        'backend/pyproject.toml'
-        'backend/src/materialsagent/domain/ports/chat_orchestration.py'
-        'backend/src/materialsagent/domain/ports/explanation.py'
-        'backend/src/materialsagent/domain/models/llm_call.py'
-        'backend/src/materialsagent/application/chat_orchestration.py'
-        'backend/src/materialsagent/application/explanation_service.py'
-        'backend/src/materialsagent/infrastructure/config.py'
-        'backend/src/materialsagent/infrastructure/llm/mock.py'
-        'backend/src/materialsagent/infrastructure/llm/mock_explanation.py'
-        'backend/src/materialsagent/infrastructure/llm/deepseek_common.py'
-        'backend/src/materialsagent/infrastructure/llm/deepseek_chat.py'
-        'backend/src/materialsagent/infrastructure/llm/deepseek_explanation.py'
-        'backend/src/materialsagent/main.py'
-        'backend/tests/contract/test_chat_orchestration.py'
-        'backend/tests/contract/test_explanation.py'
-        'backend/tests/contract/test_deepseek_adapters.py'
-        'backend/tests/unit/test_chat_orchestration_service.py'
-        'backend/tests/unit/test_explanation_service.py'
-        'backend/tests/unit/test_llm_call_domain.py'
-        'backend/tests/unit/test_config.py'
-        'backend/tests/api/test_message_orchestration.py'
-        'backend/tests/api/test_explanation_outcomes.py'
-        'backend/tests/integration/db/test_chat_orchestration_persistence.py'
-        'backend/tests/integration/db/test_explanation_persistence.py'
-        'backend/tests/integration/db/test_llm_call.py'
-        'backend/tests/integration/llm/test_deepseek_wiring.py'
-        'backend/tests/integration/llm/test_provider_idempotency.py'
-        'docs/superpowers/plans/2026-07-17-sem-mvp-phase-1-implementation-plan.md'
-        'docs/acceptance/m12-a-offline-provider.md'
-        'scripts/dev/check-scope.ps1'
-        'scripts/acceptance/run-phase-1a.ps1'
-    )
-    M12B = @(
-        'scripts/dev/check-scope.ps1'
-        'docs/acceptance/real-llm-provider.md'
-        'docs/progress/phase-1-current-status.md'
-    )
-    P1B1 = @(
-        '.env.example'
-        'docs/superpowers/plans/2026-07-17-sem-mvp-phase-1-implementation-plan.md'
-        'docs/progress/phase-1-current-status.md'
-        'docs/acceptance/zta35g-runtime-offline.md'
-        'scripts/dev/check-scope.ps1'
-        'scripts/acceptance/run-phase-1a.ps1'
-        'zta35g-runtime/pyproject.toml'
-        'zta35g-runtime/src/materialsagent_zta35g_runtime/__init__.py'
-        'zta35g-runtime/src/materialsagent_zta35g_runtime/constants.py'
-        'zta35g-runtime/src/materialsagent_zta35g_runtime/contracts.py'
-        'zta35g-runtime/src/materialsagent_zta35g_runtime/config.py'
-        'zta35g-runtime/src/materialsagent_zta35g_runtime/model_architecture.py'
-        'zta35g-runtime/src/materialsagent_zta35g_runtime/model_bundle.py'
-        'zta35g-runtime/src/materialsagent_zta35g_runtime/inference.py'
-        'zta35g-runtime/src/materialsagent_zta35g_runtime/app.py'
-        'zta35g-runtime/src/materialsagent_zta35g_runtime/main.py'
-        'zta35g-runtime/tests/conftest.py'
-        'zta35g-runtime/tests/unit/test_contracts.py'
-        'zta35g-runtime/tests/unit/test_config.py'
-        'zta35g-runtime/tests/unit/test_model_bundle.py'
-        'zta35g-runtime/tests/unit/test_inference.py'
-        'zta35g-runtime/tests/contract/test_runtime_http.py'
-        'zta35g-runtime/tests/compatibility/conftest.py'
-        'zta35g-runtime/tests/compatibility/test_model_loading.py'
-        'zta35g-runtime/tests/compatibility/test_minimal_inference.py'
-        'zta35g-runtime/tests/compatibility/test_payload_and_resources.py'
-        'backend/tests/contract/test_real_runtime_adapter.py'
-    )
-    P1B2 = @(
-        'zta35g-runtime/tests/unit/test_inference.py'
-        'zta35g-runtime/tests/unit/test_model_bundle.py'
-        'zta35g-runtime/tests/compatibility/conftest.py'
-        'zta35g-runtime/tests/compatibility/test_model_loading.py'
-        'zta35g-runtime/tests/compatibility/test_minimal_inference.py'
-        'zta35g-runtime/tests/compatibility/test_payload_and_resources.py'
-        'docs/superpowers/plans/2026-07-17-sem-mvp-phase-1-implementation-plan.md'
-        'docs/progress/phase-1-current-status.md'
-        'docs/acceptance/phase-1b-report.md'
-        'docs/acceptance/zta35g-runtime-runbook.md'
-        'scripts/acceptance/run-phase-1b.ps1'
-        'scripts/acceptance/run-phase-1b.py'
-        'scripts/dev/check-scope.ps1'
-        'backend/src/materialsagent/infrastructure/config.py'
-        'backend/tests/unit/test_config.py'
-        'backend/tests/contract/test_runtime_contract.py'
-        'backend/tests/e2e/test_real_zta35g_journey.py'
-        'backend/src/materialsagent/infrastructure/llm/deepseek_chat.py'
-        'backend/tests/contract/test_deepseek_adapters.py'
-        'backend/tests/contract/test_chat_orchestration_harness.py'
-        'environments/materialsagent-zta35g.yml'
-        'zta35g-runtime/requirements-win-py38.lock.txt'
-    )
+$configuredPaths = New-Object 'System.Collections.Generic.List[string]'
+foreach ($path in @($AllowedPath)) {
+    if ($null -eq $path) {
+        Complete-ScopeCheck -Code 'SCRIPT_CONFIGURATION_ERROR' -Summary $normalizedLabel
+    }
+    $configuredPaths.Add((ConvertTo-AllowedRepoPath -Path $path))
 }
 
-if (-not $milestoneAllowlists.ContainsKey($normalizedMilestone)) {
-    Complete-ScopeCheck -Code 'SCRIPT_CONFIGURATION_ERROR' -Summary ("{0} allowlist is not configured yet." -f $normalizedMilestone)
+if (-not [string]::IsNullOrWhiteSpace($AllowlistFile)) {
+    try {
+        $resolvedAllowlistFile = [IO.Path]::GetFullPath($AllowlistFile)
+        if (-not (Test-Path -LiteralPath $resolvedAllowlistFile -PathType Leaf)) {
+            Complete-ScopeCheck -Code 'SCRIPT_CONFIGURATION_ERROR' -Summary $normalizedLabel
+        }
+        foreach ($line in @(Get-Content -LiteralPath $resolvedAllowlistFile -Encoding UTF8)) {
+            $trimmed = $line.Trim()
+            if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed.StartsWith('#')) {
+                continue
+            }
+            $configuredPaths.Add((ConvertTo-AllowedRepoPath -Path $trimmed))
+        }
+    }
+    catch {
+        Complete-ScopeCheck -Code 'SCRIPT_CONFIGURATION_ERROR' -Summary $normalizedLabel
+    }
+}
+
+if ($configuredPaths.Count -eq 0) {
+    Complete-ScopeCheck -Code 'SCRIPT_CONFIGURATION_ERROR' -Summary $normalizedLabel
 }
 
 $allowedPaths = @{}
-foreach ($path in @($globalAllowedPaths + $milestoneAllowlists[$normalizedMilestone])) {
-    $allowedPaths[(ConvertTo-RepoPath -Path $path)] = $true
+foreach ($path in $configuredPaths) {
+    $allowedPaths[$path] = $true
 }
 
 $gitExecutable = $null
@@ -647,7 +208,7 @@ $outOfScope = @(
 )
 
 if ($outOfScope.Count -gt 0) {
-    Complete-ScopeCheck -Code 'OUT_OF_SCOPE_CHANGES' -Summary $normalizedMilestone -Paths $outOfScope
+    Complete-ScopeCheck -Code 'OUT_OF_SCOPE_CHANGES' -Summary $normalizedLabel -Paths $outOfScope
 }
 
-Complete-ScopeCheck -Code 'SCOPE_OK' -Summary $normalizedMilestone
+Complete-ScopeCheck -Code 'SCOPE_OK' -Summary $normalizedLabel

@@ -74,10 +74,18 @@ Backend 与旧模型 Runtime 不共享 Python 依赖。独立 Runtime 只是兼�
 powershell -ExecutionPolicy Bypass `
   -File scripts/dev/check-sem-integrity.ps1
 
-powershell -ExecutionPolicy Bypass `
-  -File scripts/dev/check-scope.ps1 `
-  -Milestone M0
+& .\scripts\dev\check-scope.ps1 `
+  -Label MAINTENANCE `
+  -AllowedPath @('README.md', 'scripts/dev/check-scope.ps1')
+
+& .\scripts\dev\check-scope.ps1 `
+  -Label P1B2 `
+  -AllowlistFile scripts/acceptance/allowlists/p1b2.txt
 ```
+
+范围检查器不再内置里程碑映射。日常维护直接传入精确文件路径；历史验收由
+`scripts/acceptance/allowlists/` 中对应的只读清单提供范围。路径必须是仓库相对文件路径，
+不接受通配符、父目录跳转或目录级授权。
 
 `SEM/` 不得修改、移动、删除或运行。完整性检查只枚举文件、校验字节数和 SHA-256，不导入模型代码。
 

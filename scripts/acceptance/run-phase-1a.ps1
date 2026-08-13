@@ -25,6 +25,11 @@ $statePath = Join-Path $repoRoot 'tmp\m11-mock-stack\state.json'
 $startScript = Join-Path $repoRoot 'scripts\dev\start-mock-stack.ps1'
 $stopScript = Join-Path $repoRoot 'scripts\dev\stop-mock-stack.ps1'
 $scopeScript = Join-Path $repoRoot 'scripts\dev\check-scope.ps1'
+$scopeAllowlistFiles = @{
+    M12A = Join-Path $repoRoot 'scripts\acceptance\allowlists\m12a.txt'
+    P1B1 = Join-Path $repoRoot 'scripts\acceptance\allowlists\p1b1.txt'
+}
+$scopeAllowlistFile = $scopeAllowlistFiles[$ScopeMilestone]
 $semScript = Join-Path $repoRoot 'scripts\dev\check-sem-integrity.ps1'
 $powershellExe = (Get-Command powershell.exe -ErrorAction Stop).Source
 $m11aBaseline = '4ed740222238433541fb31c993dd75610634d157'
@@ -958,8 +963,10 @@ try {
                 'Bypass',
                 '-File',
                 $scopeScript,
-                '-Milestone',
-                $ScopeMilestone
+                '-Label',
+                $ScopeMilestone,
+                '-AllowlistFile',
+                $scopeAllowlistFile
             ) `
             -LogRelative "logs/03-scope-$scopeMilestoneSlug-pre.log" `
             -Required
@@ -1331,8 +1338,10 @@ finally {
             'Bypass',
             '-File',
             $scopeScript,
-            '-Milestone',
-            $ScopeMilestone
+            '-Label',
+            $ScopeMilestone,
+            '-AllowlistFile',
+            $scopeAllowlistFile
         ) `
         -LogRelative "logs/18-scope-$scopeMilestoneSlug-post.log" `
         -Required

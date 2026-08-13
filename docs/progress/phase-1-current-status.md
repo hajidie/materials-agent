@@ -6,11 +6,11 @@
 
 | 字段 | 当前值 |
 |---|---|
-| 当前阶段 | 真实能力接入 |
-| 当前里程碑 | P1B2 |
-| 当前工作单元 | 本地 MVP v1.1.0 收口 |
-| 状态 | `COMPLETE / PROJECT_OWNER_BROWSER_ACCEPTED / LOCAL_MVP_V1.1.0` |
-| 上一已验收工作单元 | P1B2 门四-A 正式 Runner 暂缓与路线调整 |
+| 当前阶段 | 本地 MVP 收口维护 |
+| 当前里程碑 | MVP v1.1.0 代码审查清理 |
+| 当前工作单元 | 代码清理第二轮：范围检查器缩减与通用化 |
+| 状态 | `IMPLEMENTED / VERIFIED / PROJECT_OWNER_ACCEPTED / COMMIT_AUTHORIZED` |
+| 上一已验收工作单元 | 本地 MVP v1.1.0 收口，`main@1c8a0e2017083ff4b7a3a24110b8155c413a5db5` |
 | Pre-M8 stop-loss commit | `891714dd58cf069073a7d4037be43ef66304d0ac` |
 | M8 | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M8 acceptance commit | `18005944982ca5191412e06154effc67465ca3a7` |
@@ -32,19 +32,19 @@
 | P1B2 门三 acceptance commit | `5735384430a7556682993de8861d2a7d28889156` |
 | P1B2 门四恢复 baseline branch / HEAD | `main` / `0db1c29f661313b10dac81c807f2649210046c1f` |
 | P1B2 门四-A 前置 Harness baseline branch / HEAD | `main` / `b074a89563e94bf18419d5bff865636b71326885` |
-| 暂存区 | 提交授权前为 `empty`；项目负责人已授权精确 22 路径一次性暂存与提交 |
+| 暂存区 | 提交前为空；本工作单元只允许按精确 10 路径暂存一次，提交后须恢复为空 |
 | P1B1 验收提交范围 | 精确 26 个 allowlist 路径；原 24 路径加 Phase 1A Runner 和 compatibility 共享授权门 |
 | P1B2 门一范围 | 精确 8 个 allowlist 路径；2 个测试兼容性修订路径加 6 个收尾路径 |
-| 本工作单元范围 | 精确 22 路径：既有 9 个本地开发入口、文档和侧栏标题路径，加 13 个图像优先结果页组件、样式与测试路径 |
+| 本工作单元范围 | 精确 10 路径：通用范围检查器及测试、M12A/P1B1/P1B2 三份验收白名单、Phase 1A/1B 调用方与测试、README、当前进度；保留上一轮两路径清理 diff |
 | 已确认设计基线 | 五份均未修改 |
 | 历史 migration | `0001`–`0008` 均未修改；当前唯一 head/current 为 `0009_timeline_query_indexes` |
 | `SEM/` | 未修改；门三前后 `SEM_INTEGRITY_OK`；固定 bundle 在 GPU 完成 A–D 精确 4 次受控推理并已释放 |
 | Mock Runtime | 实现和协议未修改 |
 | Real Provider calls | 历史 M12-B 为 6；作废 Stage C run 已明确观察计划外真实 Chat delegate `>= 8`；项目负责人确认首次真实 DeepSeek + 真实 ZTA35G Runtime 浏览器闭环已完成；本工作单元真实调用 0 |
-| Commit | `AUTHORIZED`；精确 22 路径一次本地提交，主题 `mvp-v1.1.0` |
+| Commit | 项目负责人已授权本工作单元创建一个本地提交；commit hash 由 Git 创建后在交接中记录，不预写 |
 | Push | `NO` |
 | Amend | `NO` |
-| Git 外部动作 | 项目负责人已授权精确暂存并创建一次本地 commit；仍禁止 push 和 amend |
+| Git 外部动作 | 只授权精确 10 路径的一次暂存和一个本地 commit；禁止额外路径、第二个提交、push 和 amend |
 | M10-A | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M10-B | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
 | M10 overall | `COMPLETE / PROJECT_OWNER_ACCEPTED` |
@@ -62,8 +62,56 @@
 | M11-B start baseline | `main@4ed740222238433541fb31c993dd75610634d157` |
 | M12-A start baseline | `main@f5e24dcaab4801dbeffb8400f2960c33b60b4f00` |
 | M12-B start baseline | `main@ffd29353cb4682c74fd3455425822999444bb1d2` |
-| 是否处于项目负责人暂停点 | 否；项目负责人已确认浏览器正常使用并授权 MVP v1.1.0 收口提交。提交后停止。 |
-| 更新时间 | `2026-08-04` |
+| 是否处于项目负责人暂停点 | 是；项目负责人已验收并授权一个精确范围本地提交，提交后立即停止 |
+| 更新时间 | `2026-08-13` |
+
+## 范围检查器缩减与通用化（2026-08-13）
+
+- 经项目负责人批准，`scripts/dev/check-scope.ps1` 从约 630 行缩减为 214 行：
+  删除已完成里程碑的集中映射，改为通用 `-Label`、`-AllowedPath`、
+  `-AllowlistFile` 接口；保留 staged/unstaged/untracked 与 rename/copy 双路径检查、
+  固定退出码和 fail-closed 行为。
+- 白名单条目只接受精确仓库相对文件路径；绝对路径、父目录跳转、通配符、空清单、
+  缺失清单和目录级授权均以 `SCRIPT_CONFIGURATION_ERROR` 拒绝。
+- 为保留历史验收重跑能力，原 M12A、P1B1、P1B2 范围逐项迁移到
+  `scripts/acceptance/allowlists/`；与 HEAD 中旧内置映射比较分别得到
+  `ALLOWLIST_EQUIVALENT M12A paths=33`、`P1B1 paths=27`、`P1B2 paths=22`。
+  Phase 1A 与 Phase 1B 调用方均已改为显式传入所属白名单。
+- TDD RED 分别确认旧检查器不接受通用接口、旧 P1B2 调用仍传 `-Milestone`；GREEN 后
+  新检查器临时 Git 仓库测试为 `CHECK_SCOPE_TESTS_OK tests=6`，覆盖允许修改、
+  越界未跟踪、暂存、路径规范化、重命名双路径、组合输入和非法配置。
+- 完整 P1B2 Runner 离线测试为 `118 passed, 1 skipped`；Python/PowerShell SelfTest
+  分别返回 `P1B2_GATE4_EXECUTOR_SELF_TEST_OK` 与
+  `P1B2_GATE4_POWERSHELL_SELF_TEST_OK`；三个 PowerShell 文件解析错误均为 0，
+  Python `py_compile` 通过。Backend 环境未安装 `ruff`，未改变环境或安装依赖。
+- 当前精确 10 路径通过 `SCOPE_OK SCOPE_GENERALIZATION`；`SEM_INTEGRITY_OK` 保持
+  `files=57`、`total_size_bytes=2043071133`、
+  `aggregate_fingerprint=62bbb0878ed5d659490755e401fba0e3e09f1f36e3a67667ea04227927546b4a`。
+- 本轮没有读取根 `.env`、调用 Provider、启动 Runtime/GPU、Docker、Backend、
+  Frontend、PostgreSQL 或 MinIO，也没有暂存、commit、push 或 amend。
+
+## 代码清理第一轮（2026-08-11）
+
+- 开始基线为干净的
+  `main@1c8a0e2017083ff4b7a3a24110b8155c413a5db5`；暂存区和工作区均为空。
+- 基于全仓引用扫描和 Python AST 调用分析，从
+  `scripts/acceptance/run-phase-1b.py` 删除三个无调用者的私有 helper：
+  `_safe_fingerprint`、`_process_executable_name` 和 `_stop_owned_process`。
+  仍在使用的 `_inventory_fingerprint`、`_process_executable_path`、
+  `stop_owned_process_tree`、公开 fail-closed 分发、SelfTest 和 Mock 回归均保留。
+- 删除前后定向 Runner 行为测试均为 `3 passed`；最终完整 Runner 离线测试为
+  `117 passed, 1 skipped`。Python/PowerShell SelfTest 分别返回
+  `P1B2_GATE4_EXECUTOR_SELF_TEST_OK` 和
+  `P1B2_GATE4_POWERSHELL_SELF_TEST_OK`。
+- README 的过期时态原计划一并修订，但实时 P1B2 scope gate 返回
+  `OUT_OF_SCOPE_CHANGES P1B2 / README.md`；本轮未修改 scope 配置，已撤销该路径，
+  最终精确 2 路径通过 `SCOPE_OK P1B2`。
+- `SEM_INTEGRITY_OK`：`files=57`、`total_size_bytes=2043071133`、
+  `aggregate_fingerprint=62bbb0878ed5d659490755e401fba0e3e09f1f36e3a67667ea04227927546b4a`。
+- `git diff --check` 与 `git diff --cached --check` 均通过；最终工作区精确修改
+  2 个批准路径，暂存区为空。
+- 本轮没有读取根 `.env`、调用 Provider、启动 Runtime/GPU、Docker、Backend、
+  Frontend、PostgreSQL 或 MinIO，也没有暂存、commit、push 或 amend。
 
 ## 本地开发模式启动与停止入口
 
@@ -1816,12 +1864,10 @@ NO
 
 ## 下一步
 
-正式 Stage C 五阶段 Runner 及其生产级安全验收暂缓。后续优先推进智能体功能、
-Chat Orchestration Harness、前端人工体验和多 Tool 接入；如未来恢复正式 Runner，
-必须作为新的独立工作单元重新确认安全目标、范围和授权，不能直接恢复本次未完成
-实现。本轮只允许精确暂存三份文档并创建主题为
-`docs: defer formal stage c runner` 的唯一收尾提交；提交后必须确认 working tree
-clean、staging empty、untracked 0，禁止 push 或 amend，并停止。
+代码清理第一轮已完成离线回归、scope、SEM 完整性和 Git diff 审计，当前停在项目
+负责人验收点。本轮不得暂存或提交。正式 Stage C 五阶段 Runner 及其生产级安全验收
+继续暂缓；如需裁剪公开入口不可达的完整 Stage B/Phase 1 实现，必须作为新的独立工作
+单元重新确认保留边界、精确路径和验收命令，不能在本轮扩大范围。
 
 ## P1B2 门四-A 正式 Runner 暂缓与路线调整（2026-08-04）
 
@@ -1839,5 +1885,5 @@ clean、staging empty、untracked 0，禁止 push 或 amend，并停止。
   接入。
 - 本路线调整工作单元没有读取根 `.env`、调用真实 Provider、启动真实 Runtime/GPU
   或模型，也没有删除或修改 SEM、数据库 volume、MinIO volume 和用户已有数据。
-- 项目负责人已验收路线调整和工作区恢复结果；后续动作仅限精确三文档的唯一收尾
-  提交，提交后不得 push、amend 或继续正式 Runner 工作。
+- 项目负责人当时已验收路线调整和工作区恢复结果；该工作单元随后以精确三文档收尾
+  提交结束，未 push、amend 或继续正式 Runner 工作。

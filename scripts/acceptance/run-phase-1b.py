@@ -4253,12 +4253,6 @@ def _all_controlled_values(
     )
 
 
-def _safe_fingerprint(values: Iterable[str]) -> tuple[int, str]:
-    normalized = sorted(set(values))
-    payload = "\n".join(normalized).encode("utf-8")
-    return len(normalized), sha256(payload).hexdigest()
-
-
 def _read_text_command(
     command: Sequence[str],
     *,
@@ -4388,8 +4382,16 @@ def _validate_repository_gate(repo_root: Path) -> None:
             "Bypass",
             "-File",
             os.fspath(repo_root / "scripts" / "dev" / "check-scope.ps1"),
-            "-Milestone",
+            "-Label",
             "P1B2",
+            "-AllowlistFile",
+            os.fspath(
+                repo_root
+                / "scripts"
+                / "acceptance"
+                / "allowlists"
+                / "p1b2.txt"
+            ),
         ],
         cwd=repo_root,
         environment=environment,
@@ -4973,11 +4975,6 @@ def _process_executable_path(pid: int) -> str | None:
         return None
 
 
-def _process_executable_name(pid: int) -> str | None:
-    path = _process_executable_path(pid)
-    return Path(path).name if path is not None else None
-
-
 def _process_command_line(pid: int) -> str:
     if os.name != "nt":
         try:
@@ -5397,35 +5394,6 @@ def stop_owned_process_tree(
     if not command_runner.owned_tree_gone(effective_record):
         raise Gate4Error(CLEANUP_INCOMPLETE)
     return True
-
-
-def _stop_owned_process(record: Mapping[str, object]) -> None:
-    if not _owned_process_matches(record):
-        raise Gate4Error(PROCESS_IDENTITY_FAILED)
-    pid = int(record["pid"])
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except OSError as exc:
-        if _process_start_time(pid) is not None:
-            raise Gate4Error(PROCESS_IDENTITY_FAILED) from exc
-    deadline = time.monotonic() + 15.0
-    while time.monotonic() < deadline:
-        if _process_start_time(pid) is None:
-            return
-        time.sleep(0.1)
-    if not _owned_process_matches(record):
-        raise Gate4Error(PROCESS_IDENTITY_FAILED)
-    try:
-        os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
-    except OSError as exc:
-        if _process_start_time(pid) is not None:
-            raise Gate4Error(PROCESS_IDENTITY_FAILED) from exc
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline:
-        if _process_start_time(pid) is None:
-            return
-        time.sleep(0.1)
-    raise Gate4Error(PROCESS_IDENTITY_FAILED)
 
 
 def finalize_stage_b(

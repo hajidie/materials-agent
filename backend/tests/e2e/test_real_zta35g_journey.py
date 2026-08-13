@@ -612,6 +612,68 @@ def test_stage_b_worktree_status_rejects_fifth_unauthorized_untracked(
         )
 
 
+def test_repository_gate_uses_acceptance_owned_scope_allowlist(
+    runner, monkeypatch
+) -> None:
+    accepted_status = "\n".join(
+        [
+            " M docs/acceptance/phase-1b-report.md",
+            " M docs/progress/phase-1-current-status.md",
+            (
+                " M docs/superpowers/plans/"
+                "2026-07-17-sem-mvp-phase-1-implementation-plan.md"
+            ),
+            " M scripts/dev/check-scope.ps1",
+            "?? scripts/acceptance/run-phase-1b.ps1",
+            "?? scripts/acceptance/run-phase-1b.py",
+            "?? backend/tests/e2e/test_real_zta35g_journey.py",
+            "?? docs/acceptance/zta35g-runtime-runbook.md",
+        ]
+    )
+
+    def fake_git_output(_repo_root, *arguments):
+        if arguments == ("branch", "--show-current"):
+            return runner.EXPECTED_BRANCH
+        if arguments == ("rev-parse", "HEAD"):
+            return runner.EXPECTED_HEAD
+        if arguments == ("log", "-1", "--format=%H%n%s%n%P"):
+            return "\n".join(
+                [
+                    runner.EXPECTED_HEAD,
+                    runner.EXPECTED_SUBJECT,
+                    runner.EXPECTED_PARENT,
+                ]
+            )
+        return accepted_status
+
+    commands: list[list[str]] = []
+
+    def fake_read_text_command(command, **_kwargs):
+        commands.append(command)
+        return ""
+
+    monkeypatch.setattr(runner, "_git_output", fake_git_output)
+    monkeypatch.setattr(runner, "_read_text_command", fake_read_text_command)
+    monkeypatch.setattr(
+        runner.shutil,
+        "which",
+        lambda name: f"C:/tools/{name}.exe",
+    )
+
+    runner._validate_repository_gate(REPO_ROOT)
+
+    scope_command = next(
+        command for command in commands if "check-scope.ps1" in " ".join(command)
+    )
+    assert "-Milestone" not in scope_command
+    assert scope_command[-4:] == [
+        "-Label",
+        "P1B2",
+        "-AllowlistFile",
+        os.fspath(REPO_ROOT / "scripts" / "acceptance" / "allowlists" / "p1b2.txt"),
+    ]
+
+
 def test_invalid_key_is_random_safe_and_not_derived_from_real_key(runner, controlled) -> None:
     first = runner.generate_invalid_provider_key("unit-run", controlled["real_provider_key"])
     second = runner.generate_invalid_provider_key("unit-run", controlled["real_provider_key"])
