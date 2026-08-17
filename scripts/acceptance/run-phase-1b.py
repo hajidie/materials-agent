@@ -4308,34 +4308,6 @@ def _git_output(repo_root: Path, *arguments: str) -> str:
     )
 
 
-def validate_worktree_status(lines: Iterable[str]) -> bool:
-    """Accept only the exact in-progress Gate 4 path/status boundary."""
-
-    expected = {
-        " M docs/acceptance/phase-1b-report.md",
-        " M docs/progress/phase-1-current-status.md",
-        (
-            " M docs/superpowers/plans/"
-            "2026-07-17-sem-mvp-phase-1-implementation-plan.md"
-        ),
-        " M scripts/dev/check-scope.ps1",
-        "?? scripts/acceptance/run-phase-1b.ps1",
-        "?? scripts/acceptance/run-phase-1b.py",
-        "?? backend/tests/e2e/test_real_zta35g_journey.py",
-        "?? docs/acceptance/zta35g-runtime-runbook.md",
-    }
-    observed: set[str] = set()
-    for raw_line in lines:
-        line = raw_line.rstrip("\r\n")
-        normalized = line[:3] + line[3:].replace("\\", "/")
-        if normalized in observed:
-            raise Gate4Error(REPOSITORY_GATE_FAILED)
-        observed.add(normalized)
-    if observed != expected:
-        raise Gate4Error(REPOSITORY_GATE_FAILED)
-    return True
-
-
 def _validate_repository_gate(repo_root: Path) -> None:
     if _git_output(repo_root, "branch", "--show-current").strip() != EXPECTED_BRANCH:
         raise Gate4Error(REPOSITORY_GATE_FAILED)
@@ -4361,16 +4333,6 @@ def _validate_repository_gate(repo_root: Path) -> None:
             controlled_values=(),
             failure_marker=REPOSITORY_GATE_FAILED,
         )
-    status = _git_output(
-        repo_root,
-        "-c",
-        "core.quotepath=false",
-        "status",
-        "--porcelain=v1",
-        "--untracked-files=all",
-    )
-    validate_worktree_status(status.splitlines())
-
     powershell = shutil.which("powershell") or shutil.which("pwsh")
     if powershell is None:
         raise Gate4Error(REPOSITORY_GATE_FAILED)

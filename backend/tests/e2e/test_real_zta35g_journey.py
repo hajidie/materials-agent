@@ -554,83 +554,9 @@ def test_child_roles_isolate_secrets_and_argv(runner, controlled) -> None:
             )
 
 
-def test_stage_b_worktree_status_allows_only_authorized_in_progress_files(
-    runner,
-) -> None:
-    accepted = [
-        " M docs/acceptance/phase-1b-report.md",
-        " M docs/progress/phase-1-current-status.md",
-        (
-            " M docs/superpowers/plans/"
-            "2026-07-17-sem-mvp-phase-1-implementation-plan.md"
-        ),
-        "?? scripts/acceptance/run-phase-1b.ps1",
-        "?? scripts/acceptance/run-phase-1b.py",
-        "?? backend/tests/e2e/test_real_zta35g_journey.py",
-        "?? docs/acceptance/zta35g-runtime-runbook.md",
-        " M scripts/dev/check-scope.ps1",
-    ]
-    assert runner.validate_worktree_status(accepted) is True
-
-    rejected = [
-        [
-            "M  docs/acceptance/phase-1b-report.md",
-            *accepted[1:],
-        ],
-        [
-            "R  docs/acceptance/phase-1b-report.md -> docs/acceptance/moved.md",
-            *accepted[1:],
-        ],
-    ]
-    for lines in rejected:
-        with pytest.raises(runner.Gate4Error):
-            runner.validate_worktree_status(lines)
-
-
-def test_stage_b_worktree_status_rejects_fifth_unauthorized_untracked(
-    runner,
-) -> None:
-    accepted = [
-        " M docs/acceptance/phase-1b-report.md",
-        " M docs/progress/phase-1-current-status.md",
-        (
-            " M docs/superpowers/plans/"
-            "2026-07-17-sem-mvp-phase-1-implementation-plan.md"
-        ),
-        " M scripts/dev/check-scope.ps1",
-        "?? scripts/acceptance/run-phase-1b.ps1",
-        "?? scripts/acceptance/run-phase-1b.py",
-        "?? backend/tests/e2e/test_real_zta35g_journey.py",
-        "?? docs/acceptance/zta35g-runtime-runbook.md",
-    ]
-    with pytest.raises(
-        runner.Gate4Error,
-        match="P1B2_GATE4_REPOSITORY_GATE_FAILED",
-    ):
-        runner.validate_worktree_status(
-            [*accepted, "?? fifth-unauthorized-file.txt"]
-        )
-
-
-def test_repository_gate_uses_acceptance_owned_scope_allowlist(
+def test_repository_gate_uses_scope_allowlist_without_historical_status_snapshot(
     runner, monkeypatch
 ) -> None:
-    accepted_status = "\n".join(
-        [
-            " M docs/acceptance/phase-1b-report.md",
-            " M docs/progress/phase-1-current-status.md",
-            (
-                " M docs/superpowers/plans/"
-                "2026-07-17-sem-mvp-phase-1-implementation-plan.md"
-            ),
-            " M scripts/dev/check-scope.ps1",
-            "?? scripts/acceptance/run-phase-1b.ps1",
-            "?? scripts/acceptance/run-phase-1b.py",
-            "?? backend/tests/e2e/test_real_zta35g_journey.py",
-            "?? docs/acceptance/zta35g-runtime-runbook.md",
-        ]
-    )
-
     def fake_git_output(_repo_root, *arguments):
         if arguments == ("branch", "--show-current"):
             return runner.EXPECTED_BRANCH
@@ -644,7 +570,7 @@ def test_repository_gate_uses_acceptance_owned_scope_allowlist(
                     runner.EXPECTED_PARENT,
                 ]
             )
-        return accepted_status
+        raise AssertionError(f"unexpected dynamic Git-state probe: {arguments!r}")
 
     commands: list[list[str]] = []
 

@@ -1,4 +1,4 @@
-# Historical M12A / Phase 1A exact scope.
+# M12A / Phase 1A executable scope retained after documentation consolidation.
 .env.example
 backend/pyproject.toml
 backend/src/materialsagent/domain/ports/chat_orchestration.py
@@ -27,9 +27,6 @@ backend/tests/integration/db/test_explanation_persistence.py
 backend/tests/integration/db/test_llm_call.py
 backend/tests/integration/llm/test_deepseek_wiring.py
 backend/tests/integration/llm/test_provider_idempotency.py
-docs/superpowers/plans/2026-07-17-sem-mvp-phase-1-implementation-plan.md
-docs/progress/phase-1-current-status.md
-docs/acceptance/m12-a-offline-provider.md
 scripts/dev/check-scope.ps1
 scripts/acceptance/run-phase-1a.ps1
 scripts/acceptance/allowlists/m12a.txt

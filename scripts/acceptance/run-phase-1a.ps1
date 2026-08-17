@@ -45,8 +45,7 @@ $expectedComposeImages = @(
     )
 )
 
-$expectedM11BPaths = @(
-    'docs/progress/phase-1-current-status.md',
+$expectedM11BExecutablePaths = @(
     'scripts/dev/check-scope.ps1',
     'scripts/dev/start-mock-stack.ps1',
     'scripts/dev/stop-mock-stack.ps1',
@@ -61,12 +60,10 @@ $expectedM11BPaths = @(
     'backend/tests/integration/storage/test_asset_lifecycle.py',
     'backend/tests/e2e/conftest.py',
     'backend/tests/e2e/test_mock_journey.py',
-    'backend/tests/e2e/test_mock_acceptance_matrix.py',
-    'docs/acceptance/phase-1a-report.md'
+    'backend/tests/e2e/test_mock_acceptance_matrix.py'
 )
 
 $allowedPaths = @(
-    'docs/progress/phase-1-current-status.md',
     'scripts/dev/check-scope.ps1',
     'scripts/dev/start-mock-stack.ps1',
     'scripts/dev/stop-mock-stack.ps1',
@@ -81,8 +78,7 @@ $allowedPaths = @(
     'backend/tests/integration/storage/test_asset_lifecycle.py',
     'backend/tests/e2e/conftest.py',
     'backend/tests/e2e/test_mock_journey.py',
-    'backend/tests/e2e/test_mock_acceptance_matrix.py',
-    'docs/acceptance/phase-1a-report.md'
+    'backend/tests/e2e/test_mock_acceptance_matrix.py'
 )
 
 $script:commandRecords = [System.Collections.Generic.List[object]]::new()
@@ -418,13 +414,13 @@ function Test-AcceptanceAllowlistCoverage {
     )
     Assert-Result ($duplicates.Count -eq 0) `
         'Acceptance scan allowlist contains duplicate paths.'
-    Assert-Result ($allowedPaths.Count -eq 17) `
-        'Acceptance scan allowlist must contain exactly 17 paths.'
+    Assert-Result ($allowedPaths.Count -eq 15) `
+        'Acceptance scan allowlist must contain exactly 15 paths.'
     Assert-Result (
         Test-ExactSet `
             -Actual $allowedPaths `
-            -Expected $expectedM11BPaths
-    ) 'Acceptance scan allowlist does not match the M11-B scope.'
+            -Expected $expectedM11BExecutablePaths
+    ) 'Acceptance scan allowlist does not match the retained M11-B executable scope.'
     foreach ($relative in $allowedPaths) {
         $path = Join-Path $repoRoot ($relative.Replace('/', '\'))
         Assert-Result (
