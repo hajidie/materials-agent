@@ -17,7 +17,7 @@
 - Python 3.8 隔离环境中的真实 ZTA35G Runtime；
 - PostgreSQL 保存结构化事实，MinIO 保存生成图片；
 - 可查询聊天时间线、任务状态、Tool catalog、结果和图片资产；
-- 一条 PowerShell 命令启动或停止完整本地栈。
+- 完成一次性环境准备后，一条 PowerShell 命令启动或停止完整本地栈。
 
 本项目仍是本地 MVP，不提供登录、多用户隔离、Redis、后台 Worker、SSE、WebSocket、多
 Tool、用户上传真实 SEM 或生产部署能力。
@@ -66,7 +66,7 @@ Backend 与真实 Runtime 不共享 Python 包。
 | `scripts/acceptance/` | 可重复运行的验收与离线检查程序 |
 | `docs/acceptance/sem-package-manifest.json` | `SEM/` 文件大小和 SHA-256 机器基线 |
 | `SEM/` | 本地只读的外部研究模型包；不进入普通 Git 跟踪 |
-| `tmp/` | 被忽略的本地状态、日志和验收输出；不是项目事实来源 |
+| `tmp/` | 启动或验收时创建的本地状态、日志和输出；被忽略且不是项目事实来源 |
 
 ## 环境要求
 
@@ -76,6 +76,10 @@ Backend 与真实 Runtime 不共享 Python 包。
 - Node.js `24.14.x` 与 npm `11.9.x`；
 - 使用真实模型时需要 `materialsagent-zta35g` Conda 环境（Python 3.8.20）、兼容 GPU
   和只读 `SEM/ZTA35G_lab` 模型包。
+
+本地启动入口假定所选模式需要的 Conda 环境、Frontend `node_modules` 和 Compose 中固定
+摘要的 PostgreSQL/MinIO 镜像已准备完成。入口不会创建或更新 Conda 环境、安装 Python 或
+Node.js 依赖，也不会拉取镜像。
 
 依赖版本分别以这些机器文件为准：
 
@@ -102,7 +106,9 @@ timesteps=1000
 ```
 
 `scripts/dev/local-dev.ps1` 每次启动会在内存中生成独立的 Runtime token，只注入 Backend
-与 Runtime 子进程，不写入状态文件。它不会解析、复制、打印或修改根 `.env`。
+与 Runtime 子进程，不写入状态文件。PowerShell 入口不自行解析、复制、打印或修改根
+`.env`；Backend 配置加载器和 Docker Compose 会按需直接读取该文件，Secret 不写入本地
+启动状态。
 
 ## 启动
 
@@ -185,8 +191,29 @@ npm --prefix frontend run typecheck
 npm --prefix frontend run build
 ```
 
-真实 Runtime 的单元与契约/兼容性测试必须在 `materialsagent-zta35g` 环境中运行；只有明确
-需要真实推理时才加载模型或占用 GPU。
+Mock Runtime 使用 Backend 环境：
+
+```powershell
+python -m pytest mock-runtime/tests -q
+```
+
+真实 Runtime 的安全单元与 HTTP 契约测试必须在 `materialsagent-zta35g` 环境中运行：
+
+```powershell
+python -m pytest zta35g-runtime/tests/unit zta35g-runtime/tests/contract -q
+```
+
+兼容性测试按改动选择 `zta35g-runtime/tests/compatibility/` 中的对应文件。模型加载和最小推理
+测试会使用只读 `SEM/` 包，并可能占用 GPU；只有任务明确要求时才运行。
+
+本地入口和范围检查的离线测试：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File scripts/dev/test-local-dev.ps1
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File scripts/dev/test-check-scope.ps1
+```
 
 检查只读 SEM 包：
 
@@ -229,9 +256,10 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 
 ## 文档与历史
 
-当前树只保留两份 Markdown：`AGENTS.md` 规定协作和安全规则，`README.md` 说明项目本身。
-不要为进度、里程碑、实施计划、验收报告或交接摘要新增 Markdown；这些一次性事实由 Git
-提交、测试输出和被忽略的本地证据承担。
+`AGENTS.md` 是 Agent 协作和安全规则入口，本 README 是项目用途、运行和维护入口。不要为
+动态进度、里程碑日志、一次性交接摘要或逐次验收报告新增 Markdown；这些事实由 Git、测试
+输出和被忽略的本地证据承担。稳定的架构决策、运维说明或子目录专属规则，只有在 README
+无法清晰承载且具有长期价值时才新增，并且不得复制现有事实形成第二套权威说明。
 
 需要查看已经删除的旧文档时：
 
