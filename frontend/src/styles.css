@@ -166,13 +166,6 @@ textarea:focus-visible {
   justify-self: start;
 }
 
-.message__author {
-  margin: 0 0 0.4rem;
-  color: #356b55;
-  font-size: 0.8rem;
-  font-weight: 700;
-}
-
 .message__content,
 .tool-card__request,
 .explanation-panel__text,

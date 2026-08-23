@@ -27,7 +27,6 @@ function formatTime(value: string): string {
 
 <template>
   <article class="message message--assistant" aria-label="智能体回答">
-    <p class="message__author">材料智能体</p>
     <p class="message__content">{{ message.content_text }}</p>
     <time
       v-if="message.created_at"

@@ -123,6 +123,25 @@ describe("TimelineList", () => {
     );
   });
 
+  it("does not display author labels on user or assistant messages", () => {
+    const wrapper = mountTimeline([
+      userItem("user-1", "问题正文", "2026-07-24T10:00:00Z"),
+      assistantItem(
+        "assistant-1",
+        "回答正文",
+        "2026-07-24T10:01:00Z",
+      ),
+    ]);
+
+    const userMessage = wrapper.get(".message--user");
+    const assistantMessage = wrapper.get(".message--assistant");
+
+    expect(userMessage.text()).toContain("问题正文");
+    expect(userMessage.text()).not.toContain("你");
+    expect(assistantMessage.text()).toContain("回答正文");
+    expect(assistantMessage.text()).not.toContain("材料智能体");
+  });
+
   it("does not inherit removed Task history attributes on a Tool card", () => {
     const wrapper = mountTimeline([toolItem("task-without-history")]);
     const card = wrapper.get(".tool-card");
