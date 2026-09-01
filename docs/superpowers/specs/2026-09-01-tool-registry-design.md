@@ -137,6 +137,31 @@ Binding 只能发生在 `Registry.resolve()` 成功，并且 `ToolDefinition.nor
 
 写入 Binding 使用短事务内的比较更新或 Task 行锁。两个并发请求试图绑定不同 Tool 时，首个提交者成功；另一个收到冲突并重新读取，不能覆盖已有 Binding。
 
+### 6.1 Task 与 ToolRun 状态职责
+
+Task 和 ToolRun 是两层不同状态机。Task 表达用户科研任务从创建、补参到最终结束的业务阶段；ToolRun 只表达某一次模型执行尝试。Task 可以在没有 ToolRun 时进入 `NEEDS_INPUT` 或 `READY`，同一 Task 也可以因显式重试拥有多个 ToolRun。
+
+Task 的业务阶段职责至少包括：
+
+- `CREATED`：Task 已持久化，但路由、规范化或 Binding 尚未形成最终结论；
+- `NEEDS_INPUT`：需要用户澄清 Tool 或补充参数，不能创建 ToolRun；
+- `READY`：唯一 Tool 已绑定且输入完整，可以进入授权和执行；
+- `RUNNING`：Task 当前选中的 ToolRun 正在执行；
+- `COMPLETED`：Task 已产生终态结果，结果事实继续由 ToolResult、Asset 和现有完成明细表达；
+- `FAILED`：Task 因 Agent 内部错误、授权后的执行失败或其他受控失败终止。
+
+`CREATED` 和 `COMPLETED` 是本设计使用的业务阶段名称，不要求本次把现有持久化枚举机械改名：`CREATED` 对应现有执行前 `PENDING` 职责，`COMPLETED` 对应现有 `SUCCEEDED` 或 `PARTIALLY_SUCCEEDED` 终态职责。`READY` 是本设计新增的持久化状态，现有 `RUNNING`、`NEEDS_INPUT` 和 `FAILED` 继续保留。该映射避免仅为术语一致而扩大数据库迁移范围。
+
+ToolRun 的持久化状态职责是：
+
+- `PENDING`：已通过授权并保存执行快照，但尚未开始调用 Runtime；
+- `RUNNING`：本次尝试已经开始，开始时间已持久化，Runtime 调用将在数据库事务外执行；
+- `SUCCEEDED`：本次请求的全部输出成功；
+- `PARTIALLY_SUCCEEDED`：只有部分请求输出成功，完成和失败集合必须完整且互斥；
+- `FAILED`：本次尝试没有成功输出，保存受控错误与耗时。
+
+ToolRun 不使用 `NEEDS_INPUT` 或 `READY`；这两个状态只属于 Task 的执行前业务阶段。
+
 ## 7. 首次自然语言路由
 
 固定主链路是：
@@ -227,7 +252,13 @@ normalizer 使用上一 TaskInputRevision 的规范化输入和本次 delta：�
 - `execution_policy_snapshot`；
 - `task_input_revision_id`、attempt、seed 和现有结果追踪字段。
 
-数据库提交后才调用外部 Runtime。Runtime 调用不得位于数据库长事务中。
+ToolRun 状态按以下顺序流转：
+
+1. `authorize()` 通过后，在短事务中创建并提交 `PENDING` ToolRun；
+2. 在下一段短事务中执行 `PENDING -> RUNNING`，保存 `started_at` 并提交；
+3. 只有 RUNNING 已提交后，才在数据库事务外调用独立 Runtime；
+4. Runtime 返回后，在新的短事务中把当前 ToolRun 更新为 `SUCCEEDED`、`PARTIALLY_SUCCEEDED` 或 `FAILED`，并保存完成时间、耗时和受控结果摘要；
+5. Runtime 超时、不可用、协议错误或受控模型错误只会使当前 ToolRun 进入 `FAILED`，不会改写该 Task 的任何旧 ToolRun。
 
 Runtime 失败后不自动重试。显式重试必须重新执行当前策略授权，并创建新的 ToolRun、attempt 和 seed；旧 ToolRun 不覆盖。
 
@@ -317,6 +348,8 @@ LLMCall 不保存完整 Prompt 和 Provider 原始响应。首次路由至少保
 - `authorize()` 覆盖 ANY_TASK、EXISTING_TASK_ONLY、NONE 的补参、执行和重试矩阵；
 - Task Binding 只能在 resolve 与受控 normalize 结果之后写入，并且不可切换 Tool；
 - Ready、合法 NeedsInput、非法 normalizer 结果和 Agent 内部错误分类正确。
+- Task 业务阶段与 ToolRun 执行状态分别验证，Task 的 NEEDS_INPUT/READY 不会误创建 ToolRun 状态；
+- ToolRun 只允许 PENDING -> RUNNING -> 终态的合法转换，不能跳过 RUNNING 或从终态重新开始。
 
 ### 16.2 自然语言与补参测试
 
@@ -354,6 +387,8 @@ LLMCall 不保存完整 Prompt 和 Provider 原始响应。首次路由至少保
 
 测试必须证明增加该 Tool 只需要 ToolDefinition、测试执行适配器和测试注册项；Router、Registry、Task Binding 和执行核心不修改。该 Tool 不进入生产组合根。
 
+该测试的唯一产品结论是 Registry 与 Single Tool Router 能承载不同能力契约。它不能用于声称生产已经支持模型训练、训练数据上传、EBSD、Planner 或多 Agent。
+
 ### 16.5 数据库、并发、安全与回归
 
 - 迁移测试覆盖 READY、Binding 约束、ToolRun 新快照字段、历史回填和 LLMCall 审计；
@@ -361,6 +396,7 @@ LLMCall 不保存完整 Prompt 和 Provider 原始响应。首次路由至少保
 - 策略快照不能绕过当前 Registry 授权；
 - Catalog、LLMCall、公共响应和日志不泄露 Secret、端点、路径、完整 Prompt 或原始响应；
 - Runtime 外调不占用数据库长事务；
+- authorize 后先提交 PENDING、Runtime 前提交 RUNNING、Runtime 后提交终态，且失败尝试不覆盖旧 ToolRun；
 - Backend 全量、迁移、契约和现有 ZTA35G 回归测试通过；
 - 最终运行 `git diff --check`、精确范围检查和 `git status`。
 
