@@ -24,6 +24,7 @@ from materialsagent.domain.models.task_input_revision import TaskInputRevision
 from materialsagent.domain.models.tool_result import ToolResult
 from materialsagent.domain.models.tool_run import ToolRun
 from materialsagent.domain.ports.unit_of_work import PersistenceError
+from materialsagent.domain.ports.tool_registry import ExecutionPolicy
 from materialsagent.infrastructure.db import timeline_query as timeline_query_db
 from materialsagent.infrastructure.db.conversation_task import (
     MessageRow,
@@ -37,6 +38,7 @@ from materialsagent.infrastructure.db.unit_of_work import SQLAlchemyUnitOfWork
 
 
 BASE = datetime(2026, 7, 24, 4, 0, tzinfo=timezone.utc)
+SCHEMA_HASH = "f821240f782ce788bc723fd1acd02a2e58cedbf68b70b1414e2accd16d989d07"
 
 
 def _assistant(
@@ -165,7 +167,10 @@ def _terminal_run(
         attempt_no=attempt_no,
         tool_id="zta35g_sem_virtual_lab",
         tool_version="0.1.0",
-        schema_version="1.0",
+        schema_hash=SCHEMA_HASH,
+        normalized_input_snapshot={},
+        execution_policy_snapshot=ExecutionPolicy.ANY_TASK,
+        input_revision_no=1,
         execution_input={},
         requested_outputs=requested,
         created_at=created_at,
@@ -229,7 +234,7 @@ def _result_for_run(
         ),
         tool_id=run.tool_id,
         tool_version=run.tool_version,
-        schema_version=run.schema_version,
+        schema_hash=run.schema_hash,
         created_at=run.completed_at or run.created_at,
     )
 

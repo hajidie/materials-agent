@@ -75,7 +75,7 @@ class ToolResultView(StrictModel):
     warnings: list[object]
     tool_id: str
     tool_version: str
-    schema_version: str
+    schema_hash: str
     provenance: dict[str, object]
     error: dict[str, object] | None
     created_at: str
@@ -162,7 +162,7 @@ def get_tool_result(
             warnings=_public_json(result.warnings),
             tool_id=result.tool_id,
             tool_version=result.tool_version,
-            schema_version=result.schema_version,
+            schema_hash=result.schema_hash,
             provenance=_public_json(result.provenance),
             error=(
                 None

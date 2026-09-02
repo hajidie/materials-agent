@@ -188,6 +188,11 @@ def test_explicit_ports_take_priority_without_deepseek_key() -> None:
         provider="explicit",
         model_name="explicit-chat",
     )
+    explicit_tool_input = SimpleNamespace(
+        provider="explicit",
+        model_name="explicit-tool-input",
+        extract=lambda _command: None,
+    )
     explicit_explanation = SimpleNamespace(
         provider="explicit",
         model_name="explicit-explanation",
@@ -196,12 +201,17 @@ def test_explicit_ports_take_priority_without_deepseek_key() -> None:
     app = _app(
         settings=load_settings({"LLM_ADAPTER": "deepseek"}),
         chat_orchestration_port=explicit_chat,
+        tool_input_extraction_port=explicit_tool_input,
         explanation_port=explicit_explanation,
     )
 
     assert (
         app.state.chat_orchestration_service._orchestration_port
         is explicit_chat
+    )
+    assert (
+        app.state.chat_orchestration_service._tool_input_extraction_port
+        is explicit_tool_input
     )
     assert (
         app.state.explanation_retry_service._explanation_service._port

@@ -10,6 +10,8 @@ from sqlalchemy import func, select
 from sqlalchemy.engine import Engine
 
 from materialsagent.domain.models.actor import Actor
+from materialsagent.domain.models.task import NEEDS_INPUT, READY
+from materialsagent.domain.ports.tool_registry import ToolRef
 from materialsagent.domain.ports.unit_of_work import PersistenceConflictError
 from materialsagent.infrastructure.db.actor import ActorRow
 from materialsagent.infrastructure.db.session import create_session_factory
@@ -156,6 +158,128 @@ def test_domain_rejects_non_utc_times() -> None:
                 tzinfo=timezone(timedelta(hours=8)),
             ),
         )
+
+
+def test_repository_preserves_binding_and_latest_candidate_references(
+    migrated_database_engine: Engine,
+) -> None:
+    actor_id = _opaque("actor")
+    _persist_actor(migrated_database_engine, actor_id)
+    conversation, task, message, revision = _valid_facts(actor_id)
+    candidate_refs = (
+        ToolRef("zta35g_sem_virtual_lab", "1", "a" * 64),
+        ToolRef("training", "1", "b" * 64),
+    )
+    candidate_revision = replace(
+        revision,
+        candidate_tool_refs=candidate_refs,
+    )
+    factory = _uow_factory(migrated_database_engine)
+
+    with factory() as unit_of_work:
+        unit_of_work.conversations.add(conversation)
+        unit_of_work.tasks.add(task)
+        unit_of_work.messages.add(message)
+        unit_of_work.task_input_revisions.add(candidate_revision)
+        unit_of_work.commit()
+
+    needs_input = replace(task, current_status=NEEDS_INPUT)
+    with factory() as unit_of_work:
+        assert unit_of_work.tasks.update(
+            needs_input,
+            expected_status="PENDING",
+        ) == needs_input
+        unit_of_work.commit()
+
+    complete_revision = replace(
+        candidate_revision,
+        task_input_revision_id=_opaque("revision"),
+        revision=2,
+        candidate_tool_refs=(),
+        normalized_input={"material": "ZTA35G"},
+        missing_fields=[],
+    )
+    ready = replace(needs_input, current_status=READY)
+    ready.bind_tool(candidate_refs[0])
+    with factory() as unit_of_work:
+        unit_of_work.task_input_revisions.add(complete_revision)
+        assert unit_of_work.tasks.update(
+            ready,
+            expected_status="NEEDS_INPUT",
+        ) == ready
+        unit_of_work.commit()
+
+    with factory() as unit_of_work:
+        loaded = unit_of_work.tasks.get(task.task_id)
+        revisions = unit_of_work.task_input_revisions.list_for_task(task.task_id)
+
+    assert loaded is not None
+    assert loaded.bound_tool_ref == candidate_refs[0]
+    assert loaded.current_status == READY
+    assert revisions[0].candidate_tool_refs == tuple(
+        {
+            "tool_id": item.tool_id,
+            "version": item.version,
+            "schema_hash": item.schema_hash,
+        }
+        for item in candidate_refs
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "revision_overrides"),
+    [
+        (NEEDS_INPUT, {}),
+        (READY, {"missing_fields": ["aging_time"]}),
+    ],
+)
+def test_uow_rejects_routing_states_without_a_valid_latest_revision(
+    migrated_database_engine: Engine,
+    status: str,
+    revision_overrides: dict[str, object],
+) -> None:
+    actor_id = _opaque("actor")
+    _persist_actor(migrated_database_engine, actor_id)
+    conversation, task, message, revision = _valid_facts(actor_id)
+    if status == READY:
+        task.bind_tool(ToolRef("zta35g_sem_virtual_lab", "1", "a" * 64))
+    task = replace(task, current_status=status)
+    revision = replace(revision, **revision_overrides)
+    factory = _uow_factory(migrated_database_engine)
+
+    with pytest.raises(PersistenceConflictError):
+        with factory() as unit_of_work:
+            unit_of_work.conversations.add(conversation)
+            unit_of_work.tasks.add(task)
+            unit_of_work.messages.add(message)
+            unit_of_work.task_input_revisions.add(revision)
+            unit_of_work.commit()
+
+
+def test_uow_rejects_bound_needs_input_with_a_complete_latest_revision(
+    migrated_database_engine: Engine,
+) -> None:
+    actor_id = _opaque("actor")
+    _persist_actor(migrated_database_engine, actor_id)
+    conversation, task, message, revision = _valid_facts(actor_id)
+    task.bind_tool(ToolRef("zta35g_sem_virtual_lab", "1", "a" * 64))
+    task = replace(task, current_status=NEEDS_INPUT)
+    revision = replace(
+        revision,
+        normalized_input={"material": "ZTA35G"},
+        missing_fields=[],
+        ambiguous_fields=[],
+        validation_errors=[],
+    )
+    factory = _uow_factory(migrated_database_engine)
+
+    with pytest.raises(PersistenceConflictError):
+        with factory() as unit_of_work:
+            unit_of_work.conversations.add(conversation)
+            unit_of_work.tasks.add(task)
+            unit_of_work.messages.add(message)
+            unit_of_work.task_input_revisions.add(revision)
+            unit_of_work.commit()
 
 
 @pytest.mark.parametrize(

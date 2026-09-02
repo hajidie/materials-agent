@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from threading import Lock
 
 import pytest
@@ -18,9 +19,15 @@ from backend.tests.api.test_m8_explanation_retry import (
 )
 from materialsagent.application.result_service import ResultService
 from materialsagent.application.tool_execution import ToolExecutionService
+from materialsagent.application.tool_registry import ToolRegistry
 from materialsagent.application.tools import build_tool_registry
+from materialsagent.application.zta35g_tool import build_zta35g_tool_definition
 from materialsagent.domain.ports.tool_execution import (
     ToolClientUnavailableError,
+)
+from materialsagent.domain.ports.tool_registry import (
+    ExecutionPolicy,
+    ToolStatus,
 )
 from materialsagent.infrastructure.db.asset import AssetRow
 from materialsagent.infrastructure.db.conversation_task import TaskRow
@@ -218,15 +225,18 @@ def _client_options(
     seeds,
     *,
     unit_of_work_factory=None,
+    tool_registry=None,
 ):
     factory = unit_of_work_factory or api_harness.unit_of_work_factory
+    registry = tool_registry or build_tool_registry(runtime)
     options = {
         "tool_execution_service": ToolExecutionService(
             factory,
-            build_tool_registry(runtime),
+            registry,
             clock=lambda: BASE_TIME.replace(hour=1),
             seed_factory=seeds,
         ),
+        "tool_registry": registry,
         "storage_service": storage,
         "explanation_port": explanation,
         "chat_orchestration_port": _chat_port_for_outputs(
@@ -237,6 +247,24 @@ def _client_options(
     if unit_of_work_factory is not None:
         options["unit_of_work_factory"] = unit_of_work_factory
     return options
+
+
+def _lifecycle_registry(runtime, *, version: str, policy: ExecutionPolicy):
+    status = (
+        ToolStatus.DEPRECATED
+        if policy is ExecutionPolicy.EXISTING_TASK_ONLY
+        else ToolStatus.DISABLED
+    )
+    return ToolRegistry(
+        (
+            replace(
+                build_zta35g_tool_definition(runtime),
+                version=version,
+                status=status,
+                execution_policy=policy,
+            ),
+        )
+    )
 
 
 def _create_failed_task(client) -> dict[str, object]:
@@ -258,6 +286,143 @@ def _create_failed_task(client) -> dict[str, object]:
         "PARTIALLY_SUCCEEDED",
     }
     return response.json()["data"]
+
+
+def test_retry_uses_current_compatible_version_and_policy_without_rewriting_history(
+    api_harness,
+) -> None:
+    actor_id = "actor_m8_retry_version_refresh"
+    api_harness.persist_actor(actor_id)
+    runtime = _Runtime(partial=True)
+    storage = _MemoryStorage()
+    explanation = MockExplanationAdapter()
+    with api_harness.create_client(
+        actor_id,
+        **_client_options(
+            api_harness,
+            runtime,
+            storage,
+            explanation,
+            _Seeds(101),
+        ),
+    ) as client:
+        initial = _create_failed_task(client)
+    initial_run_id = initial["task"]["selected_tool_run_id"]
+    task_id = initial["task"]["task_id"]
+    with create_session_factory(api_harness.engine)() as session:
+        old_before = session.get(ToolRunRow, initial_run_id)
+        assert old_before is not None
+        old_facts = (
+            old_before.current_status,
+            old_before.tool_version,
+            old_before.schema_hash,
+            old_before.execution_policy_snapshot,
+            old_before.error_code,
+        )
+
+    runtime.partial = False
+    current_registry = _lifecycle_registry(
+        runtime,
+        version="2",
+        policy=ExecutionPolicy.EXISTING_TASK_ONLY,
+    )
+    with api_harness.create_client(
+        actor_id,
+        **_client_options(
+            api_harness,
+            runtime,
+            storage,
+            explanation,
+            _Seeds(202),
+            tool_registry=current_registry,
+        ),
+    ) as client:
+        retried = client.post(
+            f"/api/v1/tasks/{task_id}/tool-runs",
+            headers={"Idempotency-Key": "version-refresh-retry"},
+            json={},
+        )
+
+    assert retried.status_code == 200, retried.json()
+    payload = retried.json()["data"]
+    with create_session_factory(api_harness.engine)() as session:
+        old_after = session.get(ToolRunRow, initial_run_id)
+        new_run = session.get(
+            ToolRunRow,
+            payload["tool_run"]["tool_run_id"],
+        )
+        task_after = session.get(TaskRow, task_id)
+        assert old_after is not None
+        assert new_run is not None
+        assert task_after is not None
+        assert new_run.tool_version == "2"
+        assert (
+            new_run.execution_policy_snapshot
+            == ExecutionPolicy.EXISTING_TASK_ONLY
+        )
+        assert task_after.bound_tool_version == "1"
+        assert (
+            old_after.current_status,
+            old_after.tool_version,
+            old_after.schema_hash,
+            old_after.execution_policy_snapshot,
+            old_after.error_code,
+        ) == old_facts
+
+
+def test_disabled_current_policy_rejects_retry_without_new_attempt(
+    api_harness,
+) -> None:
+    actor_id = "actor_m8_retry_disabled_policy"
+    api_harness.persist_actor(actor_id)
+    runtime = _Runtime(partial=True)
+    storage = _MemoryStorage()
+    explanation = MockExplanationAdapter()
+    with api_harness.create_client(
+        actor_id,
+        **_client_options(
+            api_harness,
+            runtime,
+            storage,
+            explanation,
+            _Seeds(101),
+        ),
+    ) as client:
+        initial = _create_failed_task(client)
+    task_id = initial["task"]["task_id"]
+    with create_session_factory(api_harness.engine)() as session:
+        run_count_before = session.scalar(
+            select(func.count()).select_from(ToolRunRow)
+        )
+
+    disabled_registry = _lifecycle_registry(
+        runtime,
+        version="2",
+        policy=ExecutionPolicy.NONE,
+    )
+    with api_harness.create_client(
+        actor_id,
+        **_client_options(
+            api_harness,
+            runtime,
+            storage,
+            explanation,
+            _Seeds(),
+            tool_registry=disabled_registry,
+        ),
+    ) as client:
+        denied = client.post(
+            f"/api/v1/tasks/{task_id}/tool-runs",
+            headers={"Idempotency-Key": "disabled-policy-retry"},
+            json={},
+        )
+
+    assert denied.status_code == 409, denied.json()
+    assert denied.json()["error"]["code"] == "TOOL_EXECUTION_NOT_ALLOWED"
+    with create_session_factory(api_harness.engine)() as session:
+        assert session.scalar(
+            select(func.count()).select_from(ToolRunRow)
+        ) == run_count_before
 
 
 def test_tool_retry_success_replay_conflict_and_immutable_history(

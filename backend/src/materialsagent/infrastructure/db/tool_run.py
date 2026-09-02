@@ -30,15 +30,18 @@ class ToolRunRow(Base):
         CheckConstraint("length(btrim(task_id)) > 0", name="ck_tool_run_task_id_not_blank"),
         CheckConstraint("length(btrim(request_id)) > 0", name="ck_tool_run_request_id_not_blank"),
         CheckConstraint("length(btrim(task_input_revision_id)) > 0", name="ck_tool_run_revision_id_not_blank"),
+        CheckConstraint("input_revision_no > 0", name="ck_tool_run_input_revision_no_positive"),
         CheckConstraint("attempt_no > 0", name="ck_tool_run_attempt_positive"),
         CheckConstraint("length(btrim(tool_id)) > 0", name="ck_tool_run_tool_id_not_blank"),
         CheckConstraint("length(btrim(tool_version)) > 0", name="ck_tool_run_tool_version_not_blank"),
-        CheckConstraint("length(btrim(schema_version)) > 0", name="ck_tool_run_schema_version_not_blank"),
+        CheckConstraint("schema_hash ~ '^[0-9a-f]{64}$'", name="ck_tool_run_schema_hash_sha256"),
         CheckConstraint("cardinality(requested_outputs) > 0", name="ck_tool_run_requested_outputs_nonempty"),
         CheckConstraint("completed_outputs <@ requested_outputs", name="ck_tool_run_completed_subset"),
         CheckConstraint("failed_outputs <@ requested_outputs", name="ck_tool_run_failed_subset"),
         CheckConstraint("NOT (completed_outputs && failed_outputs)", name="ck_tool_run_output_sets_disjoint"),
         CheckConstraint("jsonb_typeof(execution_input) = 'object'", name="ck_tool_run_execution_input_object"),
+        CheckConstraint("jsonb_typeof(normalized_input_snapshot) = 'object'", name="ck_tool_run_normalized_input_snapshot_object"),
+        CheckConstraint("execution_policy_snapshot IN ('ANY_TASK', 'EXISTING_TASK_ONLY', 'NONE')", name="ck_tool_run_execution_policy_snapshot_allowed"),
         CheckConstraint("actual_runtime_parameters IS NULL OR jsonb_typeof(actual_runtime_parameters) = 'object'", name="ck_tool_run_runtime_parameters_object"),
         CheckConstraint("jsonb_typeof(diagnostics) = 'array'", name="ck_tool_run_diagnostics_array"),
         CheckConstraint("output_summary IS NULL OR jsonb_typeof(output_summary) = 'object'", name="ck_tool_run_output_summary_object"),
@@ -63,10 +66,13 @@ class ToolRunRow(Base):
     task_id: Mapped[str] = mapped_column(ForeignKey("task.task_id", name="fk_tool_run_task", ondelete="RESTRICT"), nullable=False)
     request_id: Mapped[str] = mapped_column(Text, nullable=False)
     task_input_revision_id: Mapped[str] = mapped_column(ForeignKey("task_input_revision.task_input_revision_id", name="fk_tool_run_revision", ondelete="RESTRICT"), nullable=False)
+    input_revision_no: Mapped[int] = mapped_column(Integer, nullable=False)
     attempt_no: Mapped[int] = mapped_column(Integer, nullable=False)
     tool_id: Mapped[str] = mapped_column(Text, nullable=False)
     tool_version: Mapped[str] = mapped_column(String(64), nullable=False)
-    schema_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    schema_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    normalized_input_snapshot: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    execution_policy_snapshot: Mapped[str] = mapped_column(String(32), nullable=False)
     requested_outputs: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
     completed_outputs: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
     failed_outputs: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
@@ -90,10 +96,13 @@ def _from_row(row: ToolRunRow) -> ToolRun:
         task_id=row.task_id,
         request_id=row.request_id,
         task_input_revision_id=row.task_input_revision_id,
+        input_revision_no=row.input_revision_no,
         attempt_no=row.attempt_no,
         tool_id=row.tool_id,
         tool_version=row.tool_version,
-        schema_version=row.schema_version,
+        schema_hash=row.schema_hash,
+        normalized_input_snapshot=dict(row.normalized_input_snapshot),
+        execution_policy_snapshot=row.execution_policy_snapshot,
         requested_outputs=list(row.requested_outputs),
         completed_outputs=list(row.completed_outputs),
         failed_outputs=list(row.failed_outputs),
@@ -163,6 +172,8 @@ class SQLAlchemyToolRunRepository:
         return [_from_row(row) for row in rows]
 
     def add(self, tool_run: ToolRun) -> None:
+        if tool_run.current_status != "PENDING":
+            raise ValueError("Only PENDING ToolRun records can be inserted.")
         try:
             self._session.flush()
             self._session.add(ToolRunRow(**{field: getattr(tool_run, field) for field in ToolRun.__dataclass_fields__}))
@@ -176,9 +187,10 @@ class SQLAlchemyToolRunRepository:
             if row is None or row.current_status != expected_status:
                 return None
             immutable = (
-                "task_id", "request_id", "task_input_revision_id", "attempt_no",
-                "tool_id", "tool_version", "schema_version", "requested_outputs",
-                "execution_input", "created_at",
+                "task_id", "request_id", "task_input_revision_id", "input_revision_no",
+                "attempt_no", "tool_id", "tool_version", "schema_hash",
+                "normalized_input_snapshot", "execution_policy_snapshot",
+                "requested_outputs", "execution_input", "created_at",
             )
             if any(getattr(row, field) != getattr(tool_run, field) for field in immutable):
                 return None

@@ -1,17 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+import math
 from typing import Final
-
-from materialsagent.domain.ports.chat_orchestration import (
-    AmbiguousValue,
-    NeedsInputCandidate,
-    ParameterCandidate,
-    ToolCandidate,
-    ZTA35GParameterCandidates,
-)
-
 
 PARAMETER_FIELDS: Final = (
     "solution_temperature",
@@ -32,6 +25,63 @@ FIELD_RANGES: Final = {
 ALLOWED_OUTPUTS: Final = frozenset(
     {"sem_image", "mechanical_properties"}
 )
+
+
+@dataclass(frozen=True, slots=True)
+class AmbiguousValue:
+    candidates: tuple[object, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.candidates, tuple):
+            raise ValueError("Ambiguous candidates must be a tuple.")
+        deduplicated: list[object] = []
+        for candidate in self.candidates:
+            if candidate is not None and type(candidate) not in (str, bool, int, float):
+                raise ValueError("Ambiguous candidate must be a JSON scalar.")
+            if not any(type(candidate) is type(item) and candidate == item for item in deduplicated):
+                deduplicated.append(candidate)
+        if len(deduplicated) < 2:
+            raise ValueError("Ambiguous value requires two candidates.")
+        object.__setattr__(self, "candidates", tuple(deduplicated))
+
+
+@dataclass(frozen=True, slots=True)
+class ParameterCandidate:
+    value: object
+    unit: object
+
+    def __post_init__(self) -> None:
+        for value in (self.value, self.unit):
+            if isinstance(value, AmbiguousValue):
+                continue
+            if value is None or type(value) in (str, bool, int):
+                continue
+            if type(value) is float and math.isfinite(value):
+                continue
+            raise ValueError("candidate must be a controlled JSON scalar.")
+
+
+@dataclass(frozen=True, slots=True)
+class ZTA35GParameterCandidates:
+    solution_temperature: ParameterCandidate | None = None
+    solution_time: ParameterCandidate | None = None
+    aging_temperature: ParameterCandidate | None = None
+    aging_time: ParameterCandidate | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCandidate:
+    tool_id: str
+    material: object
+    candidate_parameters: ZTA35GParameterCandidates
+    requested_outputs: tuple[object, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class NeedsInputCandidate(ToolCandidate):
+    missing_fields: tuple[str, ...]
+    ambiguous_fields: tuple[str, ...]
+    follow_up_suggestion: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -316,8 +366,58 @@ def _normalize_outputs(
 
 
 def normalize_zta35g_candidate(
-    candidate: ToolCandidate | NeedsInputCandidate,
+    candidate: Mapping[str, object] | ToolCandidate | NeedsInputCandidate,
+    prior_normalized_input: Mapping[str, object] | None = None,
 ) -> ZTA35GValidationResult:
+    if isinstance(candidate, Mapping):
+        if prior_normalized_input is not None and not isinstance(
+            prior_normalized_input,
+            Mapping,
+        ):
+            raise ValueError("prior_normalized_input must be a JSON object.")
+        effective_input = dict(prior_normalized_input or {})
+        effective_input.update(candidate)
+        allowed_fields = {"material", *PARAMETER_FIELDS, "requested_outputs"}
+        if set(effective_input) - allowed_fields:
+            raise ValueError("candidate_input contains unknown fields.")
+
+        def candidate_value(value: object) -> object:
+            if isinstance(value, Mapping):
+                if set(value) != {"candidates"} or not isinstance(
+                    value["candidates"],
+                    (list, tuple),
+                ):
+                    raise ValueError("candidate ambiguity is invalid.")
+                return AmbiguousValue(tuple(value["candidates"]))
+            return value
+
+        parameters: dict[str, ParameterCandidate | None] = {}
+        for field_name in PARAMETER_FIELDS:
+            raw_parameter = effective_input.get(field_name)
+            if raw_parameter is None:
+                parameters[field_name] = None
+                continue
+            if not isinstance(raw_parameter, Mapping) or set(raw_parameter) != {
+                "value",
+                "unit",
+            }:
+                raise ValueError("candidate parameter is invalid.")
+            parameters[field_name] = ParameterCandidate(
+                value=candidate_value(raw_parameter["value"]),
+                unit=candidate_value(raw_parameter["unit"]),
+            )
+        requested_outputs = effective_input.get("requested_outputs", ())
+        if not isinstance(requested_outputs, (list, tuple)):
+            raise ValueError("requested_outputs must be an array.")
+        candidate = ToolCandidate(
+            tool_id="zta35g_sem_virtual_lab",
+            material=candidate_value(effective_input.get("material")),
+            candidate_parameters=ZTA35GParameterCandidates(**parameters),
+            requested_outputs=tuple(
+                candidate_value(value) for value in requested_outputs
+            ),
+        )
+
     raw_input = ZTA35GRawInput(
         material=candidate.material,
         parameters=candidate.candidate_parameters,

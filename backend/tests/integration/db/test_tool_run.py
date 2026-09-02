@@ -13,6 +13,7 @@ from materialsagent.domain.models.llm_call import LLMCall
 from materialsagent.domain.models.task import Task
 from materialsagent.domain.models.task_input_revision import TaskInputRevision
 from materialsagent.domain.models.tool_run import ToolRun
+from materialsagent.domain.ports.tool_registry import ExecutionPolicy
 from materialsagent.domain.ports.unit_of_work import PersistenceConflictError
 from materialsagent.infrastructure.db.session import create_session_factory
 from materialsagent.infrastructure.db.tool_run import ToolRunRow
@@ -20,6 +21,7 @@ from materialsagent.infrastructure.db.unit_of_work import SQLAlchemyUnitOfWork
 
 
 BASE = datetime(2026, 7, 20, 8, 0, tzinfo=timezone.utc)
+SCHEMA_HASH = "f821240f782ce788bc723fd1acd02a2e58cedbf68b70b1414e2accd16d989d07"
 
 
 def _seed_sources(engine: Engine) -> SQLAlchemyUnitOfWork:
@@ -50,6 +52,9 @@ def _seed_sources(engine: Engine) -> SQLAlchemyUnitOfWork:
                 completed_at=BASE + timedelta(seconds=1),
                 error_code="TOOL_UNAVAILABLE",
                 safe_error_message="Tool execution is not available yet.",
+                tool_id="zta35g_sem_virtual_lab",
+                bound_tool_version="1",
+                bound_schema_hash=SCHEMA_HASH,
             )
         )
         unit_of_work.llm_calls.add(
@@ -109,8 +114,11 @@ def _pending(tool_run_id: str = "tool_run_1", attempt_no: int = 1) -> ToolRun:
         task_input_revision_id="revision_1",
         attempt_no=attempt_no,
         tool_id="zta35g_sem_virtual_lab",
-        tool_version="0.1.0",
-        schema_version="1.0",
+        tool_version="1",
+        schema_hash=SCHEMA_HASH,
+        normalized_input_snapshot={"material": "ZTA35G"},
+        execution_policy_snapshot=ExecutionPolicy.ANY_TASK,
+        input_revision_no=1,
         requested_outputs=["sem_image", "mechanical_properties"],
         execution_input={
             "process_parameters": {
@@ -174,14 +182,32 @@ def test_failure_terminal_fields_are_persisted_without_task_selection(
     migrated_database_engine: Engine,
 ) -> None:
     unit_of_work = _seed_sources(migrated_database_engine)
-    failed = _pending().start(started_at=BASE + timedelta(seconds=3)).fail(
+    pending = _pending()
+    running = pending.start(started_at=BASE + timedelta(seconds=3))
+    failed = running.fail(
         failed_at=BASE + timedelta(seconds=4),
         error_code="RUNTIME_TIMEOUT",
         safe_error_message="Tool Runtime timed out.",
     )
     with unit_of_work:
-        unit_of_work.tool_runs.add(failed)
+        unit_of_work.tool_runs.add(pending)
         unit_of_work.commit()
+    with SQLAlchemyUnitOfWork(
+        create_session_factory(migrated_database_engine)
+    ) as transition:
+        assert transition.tool_runs.update(
+            running,
+            expected_status="PENDING",
+        ) == running
+        transition.commit()
+    with SQLAlchemyUnitOfWork(
+        create_session_factory(migrated_database_engine)
+    ) as transition:
+        assert transition.tool_runs.update(
+            failed,
+            expected_status="RUNNING",
+        ) == failed
+        transition.commit()
     with SQLAlchemyUnitOfWork(
         create_session_factory(migrated_database_engine)
     ) as query:
@@ -190,3 +216,70 @@ def test_failure_terminal_fields_are_persisted_without_task_selection(
         task = query.tasks.get("task_1")
         assert task.selected_tool_run_id is None
         assert task.selected_result_id is None
+
+
+def test_repository_only_inserts_pending_tool_runs(
+    migrated_database_engine: Engine,
+) -> None:
+    unit_of_work = _seed_sources(migrated_database_engine)
+    terminal = _pending().start(
+        started_at=BASE + timedelta(seconds=3)
+    ).fail(
+        failed_at=BASE + timedelta(seconds=4),
+        error_code="RUNTIME_TIMEOUT",
+        safe_error_message="Tool Runtime timed out.",
+    )
+
+    with pytest.raises(ValueError, match="PENDING"):
+        with unit_of_work:
+            unit_of_work.tool_runs.add(terminal)
+
+    with migrated_database_engine.connect() as connection:
+        assert connection.scalar(select(func.count()).select_from(ToolRunRow)) == 0
+
+
+def test_failed_second_attempt_does_not_overwrite_successful_first_attempt(
+    migrated_database_engine: Engine,
+) -> None:
+    unit_of_work = _seed_sources(migrated_database_engine)
+    first_pending = _pending("tool_run_1", attempt_no=1)
+    first_running = first_pending.start(started_at=BASE + timedelta(seconds=3))
+    first_succeeded = first_running.complete_from_result(
+        completed_outputs=["sem_image", "mechanical_properties"],
+        failed_outputs=[],
+        completed_at=BASE + timedelta(seconds=4),
+        error_code=None,
+        safe_error_message=None,
+    )
+    second_pending = _pending("tool_run_2", attempt_no=2)
+    second_running = second_pending.start(started_at=BASE + timedelta(seconds=5))
+    second_failed = second_running.fail(
+        failed_at=BASE + timedelta(seconds=6),
+        error_code="RUNTIME_TIMEOUT",
+        safe_error_message="Tool Runtime timed out.",
+    )
+
+    with unit_of_work:
+        unit_of_work.tool_runs.add(first_pending)
+        unit_of_work.commit()
+    with SQLAlchemyUnitOfWork(create_session_factory(migrated_database_engine)) as uow:
+        assert uow.tool_runs.update(first_running, expected_status="PENDING") == first_running
+        uow.commit()
+    with SQLAlchemyUnitOfWork(create_session_factory(migrated_database_engine)) as uow:
+        assert uow.tool_runs.update(first_succeeded, expected_status="RUNNING") == first_succeeded
+        uow.commit()
+    with SQLAlchemyUnitOfWork(create_session_factory(migrated_database_engine)) as uow:
+        uow.tool_runs.add(second_pending)
+        uow.commit()
+    with SQLAlchemyUnitOfWork(create_session_factory(migrated_database_engine)) as uow:
+        assert uow.tool_runs.update(second_running, expected_status="PENDING") == second_running
+        uow.commit()
+    with SQLAlchemyUnitOfWork(create_session_factory(migrated_database_engine)) as uow:
+        assert uow.tool_runs.update(second_failed, expected_status="RUNNING") == second_failed
+        uow.commit()
+
+    with SQLAlchemyUnitOfWork(
+        create_session_factory(migrated_database_engine)
+    ) as query:
+        assert query.tool_runs.get("tool_run_1") == first_succeeded
+        assert query.tool_runs.get("tool_run_2") == second_failed

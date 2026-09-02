@@ -101,7 +101,7 @@ def _projection(value: ExplanationInput) -> dict[str, object]:
         "process_parameters": _plain_json(value.process_parameters),
         "tool_id": value.tool_id,
         "tool_version": value.tool_version,
-        "schema_version": value.schema_version,
+        "schema_hash": value.schema_hash,
     }
 
 

@@ -2,19 +2,32 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from enum import StrEnum
 import json
+import re
 from typing import Final
 
+from materialsagent.domain.ports.tool_registry import ExecutionPolicy
 
-PENDING: Final = "PENDING"
-RUNNING: Final = "RUNNING"
-SUCCEEDED: Final = "SUCCEEDED"
-PARTIALLY_SUCCEEDED: Final = "PARTIALLY_SUCCEEDED"
-FAILED: Final = "FAILED"
+
+class ToolRunStatus(StrEnum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    PARTIALLY_SUCCEEDED = "PARTIALLY_SUCCEEDED"
+    FAILED = "FAILED"
+
+
+PENDING: Final = ToolRunStatus.PENDING
+RUNNING: Final = ToolRunStatus.RUNNING
+SUCCEEDED: Final = ToolRunStatus.SUCCEEDED
+PARTIALLY_SUCCEEDED: Final = ToolRunStatus.PARTIALLY_SUCCEEDED
+FAILED: Final = ToolRunStatus.FAILED
 TOOL_RUN_STATUSES: Final = frozenset(
     {PENDING, RUNNING, SUCCEEDED, PARTIALLY_SUCCEEDED, FAILED}
 )
 MAX_SAFE_JSON_BYTES: Final = 16384
+SHA256_PATTERN: Final = re.compile(r"[0-9a-f]{64}\Z")
 
 
 def _require_text(value: str, field_name: str) -> None:
@@ -50,7 +63,10 @@ def _safe_json_object(
         raise ValueError(f"{field_name} must contain safe JSON values.") from None
     if len(encoded) > MAX_SAFE_JSON_BYTES:
         raise ValueError(f"{field_name} exceeds the safe size limit.")
-    return value
+    detached = json.loads(encoded.decode("utf-8"))
+    if not isinstance(detached, dict):
+        raise ValueError(f"{field_name} must be a JSON object.")
+    return detached
 
 
 @dataclass(slots=True)
@@ -59,10 +75,13 @@ class ToolRun:
     task_id: str
     request_id: str
     task_input_revision_id: str
+    input_revision_no: int
     attempt_no: int
     tool_id: str
     tool_version: str
-    schema_version: str
+    schema_hash: str
+    normalized_input_snapshot: dict[str, object]
+    execution_policy_snapshot: ExecutionPolicy
     requested_outputs: list[str]
     completed_outputs: list[str]
     failed_outputs: list[str]
@@ -70,7 +89,7 @@ class ToolRun:
     actual_runtime_parameters: dict[str, object] | None
     diagnostics: list[dict[str, object]]
     output_summary: dict[str, object] | None
-    current_status: str
+    current_status: ToolRunStatus | str
     model_bundle_id: str | None
     created_at: datetime
     started_at: datetime | None
@@ -87,9 +106,14 @@ class ToolRun:
             "task_input_revision_id",
             "tool_id",
             "tool_version",
-            "schema_version",
         ):
             _require_text(getattr(self, field_name), field_name)
+        if SHA256_PATTERN.fullmatch(self.schema_hash) is None:
+            raise ValueError("schema_hash must be lowercase SHA-256 hex.")
+        if not isinstance(self.input_revision_no, int) or isinstance(
+            self.input_revision_no, bool
+        ) or self.input_revision_no <= 0:
+            raise ValueError("input_revision_no must be a positive integer.")
         if not isinstance(self.attempt_no, int) or isinstance(
             self.attempt_no, bool
         ) or self.attempt_no <= 0:
@@ -109,10 +133,27 @@ class ToolRun:
                 raise ValueError(f"{field_name} must be a requested output subset.")
         if set(self.completed_outputs) & set(self.failed_outputs):
             raise ValueError("completed_outputs and failed_outputs must be disjoint.")
-        if not isinstance(self.execution_input, dict):
-            raise ValueError("execution_input must be a JSON object.")
-        _safe_json_object(self.execution_input, "execution_input")
-        _safe_json_object(
+        normalized_snapshot = _safe_json_object(
+            self.normalized_input_snapshot,
+            "normalized_input_snapshot",
+        )
+        execution_input = _safe_json_object(
+            self.execution_input,
+            "execution_input",
+        )
+        if normalized_snapshot is None or execution_input is None:
+            raise ValueError("ToolRun execution snapshots must not be null.")
+        self.normalized_input_snapshot = normalized_snapshot
+        self.execution_input = execution_input
+        try:
+            self.execution_policy_snapshot = ExecutionPolicy(
+                self.execution_policy_snapshot
+            )
+        except (TypeError, ValueError):
+            raise ValueError(
+                "execution_policy_snapshot is not an allowed policy."
+            ) from None
+        self.actual_runtime_parameters = _safe_json_object(
             self.actual_runtime_parameters,
             "actual_runtime_parameters",
         )
@@ -121,8 +162,13 @@ class ToolRun:
         ):
             raise ValueError("diagnostics must be a JSON object array.")
         _safe_json_object({"items": self.diagnostics}, "diagnostics")
-        _safe_json_object(self.output_summary, "output_summary")
-        if self.current_status not in TOOL_RUN_STATUSES:
+        self.output_summary = _safe_json_object(
+            self.output_summary,
+            "output_summary",
+        )
+        try:
+            self.current_status = ToolRunStatus(self.current_status)
+        except ValueError:
             raise ValueError("current_status is not an allowed ToolRun status.")
         if self.model_bundle_id is not None:
             _require_text(self.model_bundle_id, "model_bundle_id")
@@ -181,10 +227,13 @@ class ToolRun:
         task_id: str,
         request_id: str,
         task_input_revision_id: str,
+        input_revision_no: int,
         attempt_no: int,
         tool_id: str,
         tool_version: str,
-        schema_version: str,
+        schema_hash: str,
+        normalized_input_snapshot: dict[str, object],
+        execution_policy_snapshot: ExecutionPolicy,
         execution_input: dict[str, object],
         requested_outputs: list[str],
         created_at: datetime,
@@ -194,10 +243,13 @@ class ToolRun:
             task_id=task_id,
             request_id=request_id,
             task_input_revision_id=task_input_revision_id,
+            input_revision_no=input_revision_no,
             attempt_no=attempt_no,
             tool_id=tool_id,
             tool_version=tool_version,
-            schema_version=schema_version,
+            schema_hash=schema_hash,
+            normalized_input_snapshot=normalized_input_snapshot,
+            execution_policy_snapshot=execution_policy_snapshot,
             requested_outputs=list(requested_outputs),
             completed_outputs=[],
             failed_outputs=[],
@@ -214,6 +266,10 @@ class ToolRun:
             error_code=None,
             safe_error_message=None,
         )
+
+    @property
+    def status(self) -> ToolRunStatus:
+        return ToolRunStatus(self.current_status)
 
     def start(self, *, started_at: datetime) -> "ToolRun":
         if self.current_status != PENDING:

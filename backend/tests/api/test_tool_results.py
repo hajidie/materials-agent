@@ -50,6 +50,10 @@ def test_get_tool_result_uses_linked_asset_public_projection(
     data = response.json()["data"]
     assert data["result_id"] == "result_1"
     assert data["status"] == "SUCCEEDED"
+    assert data["schema_hash"] == (
+        "f821240f782ce788bc723fd1acd02a2e58cedbf68b70b1414e2accd16d989d07"
+    )
+    assert "schema_version" not in data
     assert data["data"]["yield_strength"] == {
         "value": 650.0,
         "unit": "MPa",

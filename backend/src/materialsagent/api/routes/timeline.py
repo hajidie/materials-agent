@@ -70,6 +70,7 @@ class TimelineTaskView(StrictModel):
     task_type: Literal["KNOWLEDGE_QA", "TOOL_EXECUTION"] | None
     status: Literal[
         "PENDING",
+        "READY",
         "RUNNING",
         "NEEDS_INPUT",
         "SUCCEEDED",
@@ -84,6 +85,9 @@ class TimelineTaskView(StrictModel):
     completed_at: str | None
     error_code: str | None
     safe_error_message: str | None
+    tool_id: str | None
+    bound_tool_version: str | None
+    bound_schema_hash: str | None
 
 
 class DiagnosticSummaryView(StrictModel):
@@ -99,7 +103,7 @@ class ToolRunSummaryView(StrictModel):
     attempt_no: int
     tool_id: str
     tool_version: str
-    schema_version: str
+    schema_hash: str
     status: Literal[
         "PENDING",
         "RUNNING",
@@ -138,7 +142,7 @@ class ResultSummaryView(StrictModel):
     error: dict[str, object] | None
     tool_id: str
     tool_version: str
-    schema_version: str
+    schema_hash: str
     created_at: str
 
 
@@ -171,6 +175,7 @@ class NeedsInputView(StrictModel):
     missing_fields: list[str]
     ambiguous_fields: list[dict[str, object]]
     normalized_input: dict[str, object] | None
+    candidate_tool_refs: list[dict[str, str]]
 
 
 class UserMessageTimelineItemView(StrictModel):
@@ -255,7 +260,7 @@ def _tool_run_view(
         attempt_no=run.attempt_no,
         tool_id=run.tool_id,
         tool_version=run.tool_version,
-        schema_version=run.schema_version,
+        schema_hash=run.schema_hash,
         status=run.status,
         requested_outputs=list(run.requested_outputs),
         completed_outputs=list(run.completed_outputs),
@@ -291,7 +296,7 @@ def _result_view(
         error=result.error,
         tool_id=result.tool_id,
         tool_version=result.tool_version,
-        schema_version=result.schema_version,
+        schema_hash=result.schema_hash,
         created_at=_utc_text(result.created_at),
     )
 
@@ -366,6 +371,9 @@ def _item_view(
             completed_at=_utc_text(task.completed_at),
             error_code=task.error_code,
             safe_error_message=task.safe_error_message,
+            tool_id=task.tool_id,
+            bound_tool_version=task.bound_tool_version,
+            bound_schema_hash=task.bound_schema_hash,
         ),
         input_thread=[
             _message_view(message) for message in item.input_thread
@@ -394,6 +402,9 @@ def _item_view(
                     item.needs_input.ambiguous_fields
                 ),
                 normalized_input=item.needs_input.normalized_input,
+                candidate_tool_refs=list(
+                    item.needs_input.candidate_tool_refs
+                ),
             )
         ),
         errors=[

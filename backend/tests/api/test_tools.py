@@ -130,6 +130,10 @@ def test_catalog_list_detail_and_unknown_tool_are_safely_projected(
         "description",
         "material_scope",
         "enabled",
+        "status",
+        "execution_policy",
+        "version",
+        "schema_hash",
         "availability",
         "tool_version",
         "schema_version",
@@ -140,6 +144,10 @@ def test_catalog_list_detail_and_unknown_tool_are_safely_projected(
         "limitations",
     }
     assert entry["tool_id"] == "zta35g_sem_virtual_lab"
+    assert entry["status"] == "ACTIVE"
+    assert entry["execution_policy"] == "ANY_TASK"
+    assert entry["version"] == "1"
+    assert len(entry["schema_hash"]) == 64
     assert entry["tool_version"] == "0.1.0"
     assert entry["schema_version"] == "1.0"
     assert entry["availability"] == "AVAILABLE"
@@ -192,6 +200,10 @@ def test_enabled_dev_path_executes_revision_and_queries_safe_running_tool_run(
 
     assert tool_client.calls == 1
     assert run_data["status"] == "RUNNING"
+    assert run_data["schema_hash"] == (
+        "f821240f782ce788bc723fd1acd02a2e58cedbf68b70b1414e2accd16d989d07"
+    )
+    assert "schema_version" not in run_data
     assert run_data["completed_outputs"] == []
     assert run_data["failed_outputs"] == []
     assert run_data["output_summary"]["runtime_status"] == "SUCCEEDED"

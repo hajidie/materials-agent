@@ -2,16 +2,17 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+import json
 import math
 import re
 from types import MappingProxyType
 from typing import Final, Literal, Protocol
 
+from materialsagent.domain.ports.tool_registry import RoutingCatalogSnapshot
+
 
 KNOWLEDGE_ANSWER: Final = "KNOWLEDGE_ANSWER"
 TOOL_EXECUTION: Final = "TOOL_EXECUTION"
-NEEDS_INPUT: Final = "NEEDS_INPUT"
-ZTA35G_TOOL_ID: Final = "zta35g_sem_virtual_lab"
 MAX_SAFE_JSON_INTEGER: Final = 9_007_199_254_740_991
 SHA256_PATTERN: Final = re.compile(r"[0-9a-f]{64}\Z")
 PROVIDER_REQUEST_ID_PATTERN: Final = re.compile(
@@ -85,21 +86,13 @@ def _is_controlled_candidate_scalar(value: object) -> bool:
     return False
 
 
-def _require_candidate_value(value: object, field_name: str) -> None:
-    if isinstance(value, AmbiguousValue):
-        return
-    if not _is_controlled_candidate_scalar(value):
-        raise ValueError(
-            f"{field_name} candidate must be a controlled JSON scalar."
-        )
-
-
 @dataclass(frozen=True, slots=True)
 class ChatOrchestrationInput:
     task_id: str
     conversation_id: str
     request_id: str
     content_text: str
+    routing_catalog: RoutingCatalogSnapshot
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -109,65 +102,11 @@ class ChatOrchestrationInput:
             "content_text",
         ):
             _require_non_blank(getattr(self, field_name), field_name)
-
-
-@dataclass(frozen=True, slots=True)
-class AmbiguousValue:
-    candidates: tuple[object, ...]
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.candidates, tuple):
-            raise ValueError(
-                "AmbiguousValue candidates must be a tuple."
-            )
-        deduplicated: list[object] = []
-        for candidate in self.candidates:
-            if not _is_controlled_candidate_scalar(candidate):
-                raise ValueError(
-                    "AmbiguousValue candidate must be a controlled JSON scalar."
-                )
-            if not any(
-                type(candidate) is type(existing) and candidate == existing
-                for existing in deduplicated
-            ):
-                deduplicated.append(candidate)
-        if len(deduplicated) < 2:
-            raise ValueError(
-                "AmbiguousValue requires at least two distinct candidates."
-            )
-        object.__setattr__(self, "candidates", tuple(deduplicated))
-
-
-@dataclass(frozen=True, slots=True)
-class ParameterCandidate:
-    value: object
-    unit: object
-
-    def __post_init__(self) -> None:
-        _require_candidate_value(self.value, "value")
-        _require_candidate_value(self.unit, "unit")
-
-
-@dataclass(frozen=True, slots=True)
-class ZTA35GParameterCandidates:
-    solution_temperature: ParameterCandidate | None = None
-    solution_time: ParameterCandidate | None = None
-    aging_temperature: ParameterCandidate | None = None
-    aging_time: ParameterCandidate | None = None
-
-    def __post_init__(self) -> None:
-        for field_name in (
-            "solution_temperature",
-            "solution_time",
-            "aging_temperature",
-            "aging_time",
+        if not isinstance(
+            self.routing_catalog,
+            RoutingCatalogSnapshot,
         ):
-            value = getattr(self, field_name)
-            if value is not None and not isinstance(value, ParameterCandidate):
-                raise ValueError(
-                    "candidate_parameters must contain ParameterCandidate "
-                    "values or null."
-                )
+            raise ValueError("routing_catalog must be a RoutingCatalogSnapshot.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,91 +121,91 @@ class KnowledgeAnswer:
         _require_non_blank(self.answer_text, "answer_text")
 
 
-@dataclass(frozen=True, slots=True)
-class ToolCandidate:
-    tool_id: str
-    material: object
-    candidate_parameters: ZTA35GParameterCandidates
-    requested_outputs: tuple[object, ...]
-    route: Literal["TOOL_EXECUTION"] = field(
-        init=False,
-        default=TOOL_EXECUTION,
-    )
-
-    def __post_init__(self) -> None:
-        if self.tool_id != ZTA35G_TOOL_ID:
-            raise ValueError(
-                f"tool_id must be {ZTA35G_TOOL_ID}."
-            )
-        if not isinstance(
-            self.candidate_parameters,
-            ZTA35GParameterCandidates,
-        ):
-            raise ValueError(
-                "candidate_parameters must be ZTA35GParameterCandidates."
-            )
-        _require_candidate_value(self.material, "material")
-        if not isinstance(self.requested_outputs, tuple):
-            raise ValueError("requested_outputs must be a tuple.")
-        if not all(
-            _is_controlled_candidate_scalar(item)
-            for item in self.requested_outputs
-        ):
-            raise ValueError(
-                "requested_outputs must contain controlled JSON scalars."
-            )
+def _plain_candidate_json(value: object) -> object:
+    if isinstance(value, Mapping):
+        result: dict[str, object] = {}
+        for key, item in value.items():
+            if type(key) is not str:
+                raise ValueError("candidate_input must use text keys.")
+            result[key] = _plain_candidate_json(item)
+        return result
+    if isinstance(value, (list, tuple)):
+        return [_plain_candidate_json(item) for item in value]
+    if _is_controlled_candidate_scalar(value):
+        return value
+    raise ValueError("candidate_input must contain safe JSON values.")
 
 
-@dataclass(frozen=True, slots=True)
-class NeedsInputCandidate:
-    tool_id: str
-    material: object
-    candidate_parameters: ZTA35GParameterCandidates
-    missing_fields: tuple[str, ...]
-    ambiguous_fields: tuple[str, ...]
-    follow_up_suggestion: str
-    requested_outputs: tuple[object, ...]
-    route: Literal["NEEDS_INPUT"] = field(
-        init=False,
-        default=NEEDS_INPUT,
-    )
-
-    def __post_init__(self) -> None:
-        if self.tool_id != ZTA35G_TOOL_ID:
-            raise ValueError(
-                f"tool_id must be {ZTA35G_TOOL_ID}."
-            )
-        if not isinstance(
-            self.candidate_parameters,
-            ZTA35GParameterCandidates,
-        ):
-            raise ValueError(
-                "candidate_parameters must be ZTA35GParameterCandidates."
-            )
-        _require_candidate_value(self.material, "material")
-        for field_name in ("missing_fields", "ambiguous_fields"):
-            value = getattr(self, field_name)
-            if not isinstance(value, tuple) or not all(
-                isinstance(item, str) for item in value
-            ):
-                raise ValueError(f"{field_name} must be a string tuple.")
-        _require_non_blank(
-            self.follow_up_suggestion,
-            "follow_up_suggestion",
+def _freeze_candidate_json(value: object) -> object:
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {key: _freeze_candidate_json(item) for key, item in value.items()}
         )
-        if not isinstance(self.requested_outputs, tuple):
-            raise ValueError("requested_outputs must be a tuple.")
-        if not all(
-            _is_controlled_candidate_scalar(item)
-            for item in self.requested_outputs
-        ):
-            raise ValueError(
-                "requested_outputs must contain controlled JSON scalars."
-            )
+    if isinstance(value, list):
+        return tuple(_freeze_candidate_json(item) for item in value)
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCandidateProposal:
+    tool_id: str
+    candidate_input: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        _require_non_blank(self.tool_id, "tool_id")
+        if not isinstance(self.candidate_input, Mapping):
+            raise ValueError("candidate_input must be a JSON object.")
+        plain = _plain_candidate_json(self.candidate_input)
+        encoded = json.dumps(
+            plain,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        if len(encoded) > 4096:
+            raise ValueError("candidate_input exceeds the safe size limit.")
+        object.__setattr__(self, "candidate_input", _freeze_candidate_json(plain))
+
+
+@dataclass(frozen=True, slots=True)
+class ToolCandidateSet:
+    candidates: tuple[ToolCandidateProposal, ...]
+    route: Literal["TOOL_CANDIDATES"] = field(
+        init=False,
+        default="TOOL_CANDIDATES",
+    )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.candidates, tuple) or not 1 <= len(self.candidates) <= 5:
+            raise ValueError("candidates must contain one to five proposals.")
+        if not all(isinstance(item, ToolCandidateProposal) for item in self.candidates):
+            raise ValueError("candidates must contain ToolCandidateProposal values.")
+        if len({item.tool_id for item in self.candidates}) != len(self.candidates):
+            raise ValueError("candidates must not repeat a Tool ID.")
+        decoded = {
+            "route": "TOOL_CANDIDATES",
+            "candidates": [
+                {
+                    "tool_id": item.tool_id,
+                    "candidate_input": _plain_candidate_json(item.candidate_input),
+                }
+                for item in self.candidates
+            ],
+        }
+        encoded = json.dumps(
+            decoded,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        if len(encoded) > 4096:
+            raise ValueError("Tool candidate set exceeds the safe size limit.")
 
 
 ChatOrchestrationResult = (
-    KnowledgeAnswer | ToolCandidate | NeedsInputCandidate
+    KnowledgeAnswer | ToolCandidateSet
 )
 
 
@@ -320,7 +259,7 @@ class ChatOrchestrationOutcome:
     def __post_init__(self) -> None:
         if not isinstance(
             self.result,
-            (KnowledgeAnswer, ToolCandidate, NeedsInputCandidate),
+            (KnowledgeAnswer, ToolCandidateSet),
         ):
             raise ValueError("result must be a chat orchestration result.")
         if (

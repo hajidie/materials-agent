@@ -547,7 +547,7 @@ class ResultService:
             != list(output.requested_outputs)
             or tool_run.tool_id != receipt.tool_run.tool_id
             or tool_run.tool_version != receipt.tool_run.tool_version
-            or tool_run.schema_version != receipt.tool_run.schema_version
+            or tool_run.schema_hash != receipt.tool_run.schema_hash
             or tool_run.task_id != receipt.tool_run.task_id
             or tool_run.request_id != receipt.tool_run.request_id
             or tool_run.task_input_revision_id
@@ -732,7 +732,7 @@ class ResultService:
             error=error,
             tool_id=sources.tool_run.tool_id,
             tool_version=sources.tool_run.tool_version,
-            schema_version=sources.tool_run.schema_version,
+            schema_hash=sources.tool_run.schema_hash,
             created_at=completed_at,
         )
 

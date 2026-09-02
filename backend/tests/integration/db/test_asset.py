@@ -14,6 +14,7 @@ from materialsagent.domain.models.llm_call import LLMCall
 from materialsagent.domain.models.task import Task
 from materialsagent.domain.models.task_input_revision import TaskInputRevision
 from materialsagent.domain.models.tool_run import ToolRun
+from materialsagent.domain.ports.tool_registry import ExecutionPolicy
 from materialsagent.domain.ports.unit_of_work import PersistenceConflictError
 from materialsagent.infrastructure.db.asset import AssetRow
 from materialsagent.infrastructure.db.session import create_session_factory
@@ -111,7 +112,10 @@ def _seed_running_tool_run(engine: Engine) -> ToolRun:
             attempt_no=1,
             tool_id="zta35g_sem_virtual_lab",
             tool_version="0.1.0",
-            schema_version="1.0",
+            schema_hash="f821240f782ce788bc723fd1acd02a2e58cedbf68b70b1414e2accd16d989d07",
+            normalized_input_snapshot={},
+            execution_policy_snapshot=ExecutionPolicy.ANY_TASK,
+            input_revision_no=1,
             requested_outputs=["sem_image"],
             execution_input={
                 "process_parameters": {},

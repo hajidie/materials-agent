@@ -99,6 +99,9 @@ function toolItem(
       completed_at: null,
       error_code: null,
       safe_error_message: null,
+      tool_id: null,
+      bound_tool_version: null,
+      bound_schema_hash: null,
     },
     input_thread: [],
     input_thread_count: 0,
@@ -128,7 +131,7 @@ function toolItem(
           error: null,
           tool_id: "zta35g_sem_virtual_lab",
           tool_version: "0.1.0",
-          schema_version: "1.0",
+          schema_hash: "f821240f782ce788bc723fd1acd02a2e58cedbf68b70b1414e2accd16d989d07",
           created_at: timestamp,
         }
       : null,
@@ -154,6 +157,7 @@ function toolItem(
             missing_fields: ["aging_temperature"],
             ambiguous_fields: [],
             normalized_input: null,
+            candidate_tool_refs: [],
           }
         : null,
     errors: [],

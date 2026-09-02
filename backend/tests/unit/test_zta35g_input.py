@@ -21,14 +21,12 @@ FIELDS = (
 
 def _types() -> dict[str, Any]:
     from materialsagent.application.zta35g_input import (
-        normalize_zta35g_candidate,
-    )
-    from materialsagent.domain.ports.chat_orchestration import (
         AmbiguousValue,
         NeedsInputCandidate,
         ParameterCandidate,
         ToolCandidate,
         ZTA35GParameterCandidates,
+        normalize_zta35g_candidate,
     )
 
     return locals()
@@ -526,3 +524,32 @@ def test_revision_payload_projects_ambiguous_candidates_safely() -> None:
         {"field": "solution_time", "candidates": [2, 3]}
     ]
     assert json.dumps(payloads, ensure_ascii=False, allow_nan=False)
+
+
+def test_normalizer_consumes_generic_candidate_mapping_and_prior_input() -> None:
+    """Changing the normalizer back to Router-owned ZTA DTOs must fail."""
+    from materialsagent.application.zta35g_input import (
+        normalize_zta35g_candidate,
+    )
+
+    result = normalize_zta35g_candidate(
+        {"aging_temperature": {"value": 730, "unit": "°C"}},
+        prior_normalized_input={
+            "material": "ZTA35G",
+            "solution_temperature": {"value": 1000, "unit": "°C"},
+            "solution_time": {"value": 3, "unit": "h"},
+            "aging_time": {"value": 3, "unit": "h"},
+            "requested_outputs": ["sem_image"],
+        },
+    )
+
+    assert result.validation_errors == ()
+    assert result.missing_fields == ()
+    assert result.to_revision_payloads()["normalized_input"] == {
+        "material": "ZTA35G",
+        "solution_temperature": {"value": 1000, "unit": "°C"},
+        "solution_time": {"value": 3, "unit": "h"},
+        "aging_temperature": {"value": 730, "unit": "°C"},
+        "aging_time": {"value": 3, "unit": "h"},
+        "requested_outputs": ["sem_image"],
+    }

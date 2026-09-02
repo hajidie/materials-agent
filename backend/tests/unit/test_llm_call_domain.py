@@ -84,6 +84,138 @@ def test_both_purposes_enforce_input_result_id_contract() -> None:
         _call(purpose="TOOL_RESULT_EXPLANATION", input_result_id=None)
 
 
+def test_tool_input_extraction_requires_its_bound_tool_context() -> None:
+    context = {
+        "tool_id": "zta35g_sem_virtual_lab",
+        "version": "1",
+        "schema_hash": "a" * 64,
+    }
+    call = _call(
+        purpose="TOOL_INPUT_EXTRACTION",
+        structured_output_summary={
+            "candidate_input_delta": {"temperature": 900, "dataset": "d1"}
+        },
+        tool_context_ref=context,
+    )
+
+    assert call.tool_context_ref == context
+    with pytest.raises(ValueError, match="tool_context_ref"):
+        _call(
+            purpose="TOOL_INPUT_EXTRACTION",
+            structured_output_summary={"candidate_input_delta": {}},
+        )
+
+
+def test_first_route_audit_requires_catalog_hash_and_bounded_refs() -> None:
+    refs = [
+        {
+            "tool_id": "zta35g_sem_virtual_lab",
+            "version": "1",
+            "schema_hash": "a" * 64,
+        }
+    ]
+    call = _call(
+        structured_output_summary={
+            "route": "TOOL_CANDIDATES",
+            "candidates": [
+                {
+                    "tool_id": "zta35g_sem_virtual_lab",
+                    "candidate_input": {"temperature": 900, "dataset": "d1"},
+                }
+            ],
+        },
+        catalog_hash="b" * 64,
+        catalog_snapshot_refs=refs,
+    )
+
+    assert call.catalog_hash == "b" * 64
+    with pytest.raises(ValueError, match="catalog_hash"):
+        _call(
+            structured_output_summary={
+                "route": "TOOL_CANDIDATES",
+                "candidates": [
+                    {"tool_id": "zta35g_sem_virtual_lab", "candidate_input": {}}
+                ],
+            },
+            catalog_snapshot_refs=refs,
+        )
+
+
+def test_chat_orchestration_audits_an_empty_catalog_without_weakening_fixed_tool_context() -> None:
+    empty_catalog_call = _call(
+        structured_output_summary={
+            "route": "KNOWLEDGE_ANSWER",
+            "answer_length": 6,
+            "answer_digest": "c" * 64,
+        },
+        catalog_hash="b" * 64,
+        catalog_snapshot_refs=(),
+    )
+
+    assert empty_catalog_call.catalog_snapshot_refs == ()
+    assert empty_catalog_call.catalog_hash == "b" * 64
+    with pytest.raises(ValueError, match="routing catalog"):
+        _call(
+            purpose="TOOL_INPUT_EXTRACTION",
+            structured_output_summary={"candidate_input_delta": {}},
+            tool_context_ref={
+                "tool_id": "zta35g_sem_virtual_lab",
+                "version": "1",
+                "schema_hash": "a" * 64,
+            },
+            catalog_hash="b" * 64,
+            catalog_snapshot_refs=(),
+        )
+
+
+def test_tool_candidate_summary_accepts_heterogeneous_input_and_rejects_unsafe_size_or_count() -> None:
+    candidates = [
+        {
+            "tool_id": f"tool_{index}",
+            "candidate_input": {"field": index, "nested": {"key": index}},
+        }
+        for index in range(1, 6)
+    ]
+    call = _call(
+        structured_output_summary={"route": "TOOL_CANDIDATES", "candidates": candidates},
+        catalog_hash="b" * 64,
+        catalog_snapshot_refs=[
+            {"tool_id": "tool_1", "version": "1", "schema_hash": "a" * 64}
+        ],
+    )
+
+    assert len(call.structured_output_summary["candidates"]) == 5
+    with pytest.raises(ValueError, match="candidates"):
+        _call(
+            structured_output_summary={
+                "route": "TOOL_CANDIDATES",
+                "candidates": candidates + [
+                    {"tool_id": "tool_6", "candidate_input": {}}
+                ],
+            },
+            catalog_hash="b" * 64,
+            catalog_snapshot_refs=[
+                {"tool_id": "tool_1", "version": "1", "schema_hash": "a" * 64}
+            ],
+        )
+    with pytest.raises(ValueError, match="structured_output_summary"):
+        _call(
+            structured_output_summary={
+                "route": "TOOL_CANDIDATES",
+                "candidates": [
+                    {
+                        "tool_id": "tool_1",
+                        "candidate_input": {"payload": "x" * 4096},
+                    }
+                ],
+            },
+            catalog_hash="b" * 64,
+            catalog_snapshot_refs=[
+                {"tool_id": "tool_1", "version": "1", "schema_hash": "a" * 64}
+            ],
+        )
+
+
 def test_negative_or_boolean_duration_is_rejected() -> None:
     for duration in (-1, True):
         with pytest.raises(ValueError, match="duration_ms"):

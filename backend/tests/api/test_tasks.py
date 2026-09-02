@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
+from materialsagent.api.routes.tasks import RetriedToolRunView
 from materialsagent.application.errors import (
     ApplicationInternalError,
 )
@@ -17,6 +18,18 @@ from materialsagent.domain.ports.unit_of_work import (
 
 
 BASE_TIME = datetime(2026, 7, 19, 0, 0, tzinfo=timezone.utc)
+
+
+def test_retried_tool_run_public_schema_excludes_task_only_ready_status() -> None:
+    status_schema = RetriedToolRunView.model_json_schema()["properties"]["status"]
+
+    assert status_schema["enum"] == [
+        "PENDING",
+        "RUNNING",
+        "SUCCEEDED",
+        "PARTIALLY_SUCCEEDED",
+        "FAILED",
+    ]
 
 
 def _assert_utc(value: str | None) -> None:
@@ -81,6 +94,9 @@ def test_get_owned_pending_task_returns_exact_public_projection_without_writes(
         "completed_at",
         "error_code",
         "safe_error_message",
+        "tool_id",
+        "bound_tool_version",
+        "bound_schema_hash",
         "needs_input",
         "tool_run_count",
         "tool_runs",
@@ -99,6 +115,9 @@ def test_get_owned_pending_task_returns_exact_public_projection_without_writes(
     assert body["data"]["completed_at"] is None
     assert body["data"]["error_code"] is None
     assert body["data"]["safe_error_message"] is None
+    assert body["data"]["tool_id"] is None
+    assert body["data"]["bound_tool_version"] is None
+    assert body["data"]["bound_schema_hash"] is None
     assert body["data"]["selected_result_summary"] is None
     assert body["data"]["anchor_at"] == body["data"]["created_at"]
     assert body["data"]["needs_input"] is None

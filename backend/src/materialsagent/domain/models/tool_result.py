@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import math
+import re
 from types import MappingProxyType
 from typing import Final, Mapping
 
@@ -18,6 +19,7 @@ MAX_SAFE_JSON_DEPTH: Final = 4
 MAX_SAFE_JSON_ARRAY_ITEMS: Final = 64
 MAX_SAFE_JSON_OBJECT_ITEMS: Final = 64
 MAX_SAFE_JSON_STRING_CHARS: Final = 1024
+SHA256_PATTERN: Final = re.compile(r"[0-9a-f]{64}\Z")
 _FORBIDDEN_JSON_KEY_PARTS: Final = frozenset(
     {
         "api_key",
@@ -257,7 +259,7 @@ class ToolResult:
     error: Mapping[str, object] | dict[str, object] | None
     tool_id: str
     tool_version: str
-    schema_version: str
+    schema_hash: str
     created_at: datetime
 
     def __post_init__(self) -> None:
@@ -268,9 +270,10 @@ class ToolResult:
             "actor_id",
             "tool_id",
             "tool_version",
-            "schema_version",
         ):
             _require_text(getattr(self, field_name), field_name)
+        if SHA256_PATTERN.fullmatch(self.schema_hash) is None:
+            raise ValueError("schema_hash must be lowercase SHA-256 hex.")
         if self.status not in TOOL_RESULT_STATUSES:
             raise ValueError("status is not an allowed ToolResult status.")
         requested_outputs = _normalize_requested_outputs(self.requested_outputs)

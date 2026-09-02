@@ -23,7 +23,7 @@ function toolRun(
     attempt_no: 2,
     tool_id: "zta35g_sem_virtual_lab",
     tool_version: "private-tool-version",
-    schema_version: "private-schema-version",
+    schema_hash: "f821240f782ce788bc723fd1acd02a2e58cedbf68b70b1414e2accd16d989d07",
     status,
     requested_outputs: ["sem_image", "mechanical_properties"],
     completed_outputs: status === "SUCCEEDED" ? ["sem_image", "mechanical_properties"] : [],
@@ -75,7 +75,7 @@ function result(overrides: Partial<ResultSummary> = {}): ResultSummary {
     error: null,
     tool_id: "zta35g_sem_virtual_lab",
     tool_version: "private-tool-version",
-    schema_version: "private-schema-version",
+    schema_hash: "f821240f782ce788bc723fd1acd02a2e58cedbf68b70b1414e2accd16d989d07",
     created_at: timestamp,
     ...overrides,
   };
@@ -137,6 +137,9 @@ function item(taskStatus: TaskStatus = "SUCCEEDED"): TimelineToolTaskItem {
       completed_at: timestamp,
       error_code: null,
       safe_error_message: null,
+      tool_id: "zta35g_sem_virtual_lab",
+      bound_tool_version: "1",
+      bound_schema_hash: "a".repeat(64),
     },
     input_thread: [
       {
@@ -324,6 +327,7 @@ describe("ToolTaskCard", () => {
         solution_temperature: { value: 1020, unit: "°C" },
         private_payload: "不应显示的 normalized_input",
       },
+      candidate_tool_refs: [],
     };
     const wrapper = mountCard(taskItem);
 
@@ -358,6 +362,7 @@ describe("ToolTaskCard", () => {
       missing_fields: [],
       ambiguous_fields: [],
       normalized_input: null,
+      candidate_tool_refs: [],
     };
     const wrapper = mountCard(taskItem);
 
@@ -449,6 +454,7 @@ describe("ToolTaskCard", () => {
       missing_fields: ["material"],
       ambiguous_fields: [],
       normalized_input: null,
+      candidate_tool_refs: [],
     };
     expect(mountCard(needsInput, true).get('[data-action="supplement"]').attributes()).toHaveProperty("disabled");
 

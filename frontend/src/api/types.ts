@@ -46,6 +46,7 @@ export type TaskStatus =
   | "PENDING"
   | "RUNNING"
   | "NEEDS_INPUT"
+  | "READY"
   | "SUCCEEDED"
   | "PARTIALLY_SUCCEEDED"
   | "FAILED";
@@ -90,6 +91,16 @@ export interface NeedsInput {
   normalized_input: Record<string, unknown> | null;
 }
 
+export interface ToolReference {
+  tool_id: string;
+  version: string;
+  schema_hash: string;
+}
+
+export interface TaskNeedsInput extends NeedsInput {
+  candidate_tool_refs: ToolReference[];
+}
+
 export interface SafeError {
   code: string;
   message: string;
@@ -108,7 +119,7 @@ export interface ToolRunSummary {
   attempt_no: number;
   tool_id: string;
   tool_version: string;
-  schema_version: string;
+  schema_hash: string;
   status: ToolRunStatus;
   requested_outputs: string[];
   completed_outputs: string[];
@@ -135,7 +146,7 @@ export interface ResultSummary {
   error: Record<string, unknown> | null;
   tool_id: string;
   tool_version: string;
-  schema_version: string;
+  schema_hash: string;
   created_at: string;
 }
 
@@ -176,6 +187,9 @@ export interface TimelineTask {
   completed_at: string | null;
   error_code: string | null;
   safe_error_message: string | null;
+  tool_id: string | null;
+  bound_tool_version: string | null;
+  bound_schema_hash: string | null;
 }
 
 export interface TimelineUserMessageItem {
@@ -213,7 +227,7 @@ export interface TimelineToolTaskItem {
   assets: AssetSummary[];
   explanation: ExplanationSummary | null;
   latest_explanation_failure: ExplanationSummary | null;
-  needs_input: NeedsInput | null;
+  needs_input: TaskNeedsInput | null;
   errors: SafeError[];
 }
 
@@ -243,7 +257,10 @@ export interface TaskDetail {
   completed_at: string | null;
   error_code: string | null;
   safe_error_message: string | null;
-  needs_input: NeedsInput | null;
+  tool_id: string | null;
+  bound_tool_version: string | null;
+  bound_schema_hash: string | null;
+  needs_input: TaskNeedsInput | null;
   tool_run_count: number;
   tool_runs: ToolRunSummary[];
   selected_result_summary: Pick<
@@ -295,7 +312,7 @@ export interface MessageSubmissionResponseData {
   needs_input: NeedsInput | null;
   result_summary: Omit<
     ResultSummary,
-    "tool_id" | "tool_version" | "schema_version" | "created_at"
+    "tool_id" | "tool_version" | "schema_hash" | "created_at"
   > & {
     artifacts: AssetSummary[];
   } | null;
@@ -360,7 +377,7 @@ export interface ToolResult {
   warnings: unknown[];
   tool_id: string;
   tool_version: string;
-  schema_version: string;
+  schema_hash: string;
   provenance: Record<string, unknown>;
   error: Record<string, unknown> | null;
   created_at: string;

@@ -52,6 +52,16 @@ class TaskNotRetryableError(ApplicationConflictError):
     default_code = "TASK_NOT_RETRYABLE"
 
 
+class ToolExecutionNotAllowedError(ApplicationConflictError):
+    default_message = "当前 Tool 不允许执行此操作。"
+    default_code = "TOOL_EXECUTION_NOT_ALLOWED"
+
+
+class ToolSchemaDriftError(ApplicationConflictError):
+    default_message = "Tool 输入契约已更新，请创建新任务。"
+    default_code = "TOOL_SCHEMA_DRIFT"
+
+
 class TargetTaskNotRecoverableError(ApplicationConflictError):
     default_message = "目标任务已有正在处理的补充请求。"
     default_code = "TARGET_TASK_NOT_RECOVERABLE"
@@ -76,6 +86,12 @@ class ApplicationInternalError(ApplicationError):
 
 class OrchestrationOutcomeError(ApplicationError):
     """A persisted CHAT_ORCHESTRATION outcome projected to public HTTP."""
+
+
+class AgentInternalError(OrchestrationOutcomeError):
+    default_message = "智能体内部处理失败。"
+    default_code = "AGENT_INTERNAL_ERROR"
+    default_status_code = 500
 
 
 class InvalidCursorError(ApplicationValidationError):

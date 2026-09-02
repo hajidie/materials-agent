@@ -2,6 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import re
+from collections.abc import Mapping
+from types import MappingProxyType
+
+from materialsagent.domain.ports.tool_registry import ToolRef
+
+
+SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 
 
 def _require_non_blank(value: str, field_name: str) -> None:
@@ -30,6 +38,7 @@ class TaskInputRevision:
     ambiguous_fields: list[dict[str, object]]
     validation_errors: list[dict[str, object]]
     created_at: datetime
+    candidate_tool_refs: tuple[Mapping[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         _require_non_blank(
@@ -69,4 +78,53 @@ class TaskInputRevision:
             isinstance(error, dict) for error in self.validation_errors
         ):
             raise ValueError("validation_errors must be a structured array.")
+        object.__setattr__(
+            self,
+            "candidate_tool_refs",
+            _controlled_candidate_tool_refs(self.candidate_tool_refs),
+        )
         _require_utc(self.created_at, "created_at")
+
+    @property
+    def is_complete(self) -> bool:
+        return (
+            self.normalized_input is not None
+            and not self.missing_fields
+            and not self.ambiguous_fields
+            and not self.validation_errors
+        )
+
+
+def _controlled_candidate_tool_refs(
+    value: object,
+) -> tuple[Mapping[str, str], ...]:
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("candidate_tool_refs must be a Tool reference array.")
+    if len(value) not in {0, 2, 3, 4, 5}:
+        raise ValueError("candidate_tool_refs must be empty or contain two to five references.")
+    refs: list[Mapping[str, str]] = []
+    tool_ids: set[str] = set()
+    for item in value:
+        if isinstance(item, ToolRef):
+            candidate = {
+                "tool_id": item.tool_id,
+                "version": item.version,
+                "schema_hash": item.schema_hash,
+            }
+        elif isinstance(item, Mapping):
+            candidate = dict(item)
+        else:
+            raise ValueError("candidate_tool_refs must contain Tool references.")
+        if set(candidate) != {"tool_id", "version", "schema_hash"} or not all(
+            type(candidate[key]) is str for key in candidate
+        ):
+            raise ValueError("candidate_tool_refs must contain controlled Tool references.")
+        if not candidate["tool_id"].strip() or not candidate["version"].strip():
+            raise ValueError("candidate_tool_refs must contain non-blank Tool references.")
+        if SHA256_PATTERN.fullmatch(candidate["schema_hash"]) is None:
+            raise ValueError("candidate_tool_refs must contain SHA-256 schema hashes.")
+        if candidate["tool_id"] in tool_ids:
+            raise ValueError("candidate_tool_refs must not repeat a Tool.")
+        tool_ids.add(candidate["tool_id"])
+        refs.append(MappingProxyType(candidate))
+    return tuple(refs)

@@ -30,6 +30,7 @@ from materialsagent.domain.ports.tool_execution import (
     ToolExecutionOutput,
     ToolImagePayload,
 )
+from materialsagent.domain.ports.tool_registry import ExecutionPolicy
 from materialsagent.domain.ports.unit_of_work import PersistenceError
 from materialsagent.infrastructure.db.session import create_session_factory
 from materialsagent.infrastructure.db.unit_of_work import SQLAlchemyUnitOfWork
@@ -40,10 +41,50 @@ from materialsagent.infrastructure.llm.mock_explanation import (
 
 BASE = datetime(2026, 7, 23, 1, 0, tzinfo=timezone.utc)
 ACTOR = ActorContext(actor_id="actor_1", user_id=None)
+TOOL_ID = "zta35g_sem_virtual_lab"
+TOOL_VERSION = "0.1.0"
+SCHEMA_HASH = (
+    "f821240f782ce788bc723fd1acd02a2e58cedbf68b70b1414e2accd16d989d07"
+)
 
 
 def _factory(engine: Engine):
     return lambda: SQLAlchemyUnitOfWork(create_session_factory(engine))
+
+
+def _record_runtime_output(
+    factory,
+    *,
+    tool_run_id: str,
+    output: ToolExecutionOutput,
+    started_at: datetime,
+) -> ToolRun:
+    with factory() as unit_of_work:
+        pending = unit_of_work.tool_runs.get(tool_run_id)
+        assert pending is not None
+        running = pending.start(started_at=started_at)
+        assert unit_of_work.tool_runs.update(
+            running,
+            expected_status="PENDING",
+        ) is not None
+        unit_of_work.commit()
+
+    with factory() as unit_of_work:
+        running = unit_of_work.tool_runs.get(tool_run_id)
+        assert running is not None
+        recorded = running.record_runtime_output(
+            actual_runtime_parameters=dict(output.actual_runtime_parameters),
+            diagnostics=[],
+            output_summary=normalize_tool_output_summary(output),
+            model_bundle_id=output.model_bundle_id,
+        )
+        persisted = unit_of_work.tool_runs.update(
+            recorded,
+            expected_status="RUNNING",
+        )
+        assert persisted is not None
+        unit_of_work.commit()
+    return persisted
 
 
 class _RevisionOverrideRepository:
@@ -319,6 +360,26 @@ def _seed(
         "aging_time": "h",
         **(normalized_unit_overrides or {}),
     }
+    normalized_input = {
+        "material": revision_material,
+        "solution_temperature": {
+            "value": 1000,
+            "unit": normalized_units["solution_temperature"],
+        },
+        "solution_time": {
+            "value": 3,
+            "unit": normalized_units["solution_time"],
+        },
+        "aging_temperature": {
+            "value": 730,
+            "unit": normalized_units["aging_temperature"],
+        },
+        "aging_time": {
+            "value": 3,
+            "unit": normalized_units["aging_time"],
+        },
+        "requested_outputs": list(revision_requested_outputs),
+    }
     output = _output(
         requested=requested,
         completed=completed,
@@ -355,6 +416,9 @@ def _seed(
             completed_at=None,
             error_code=None,
             safe_error_message=None,
+            tool_id=TOOL_ID,
+            bound_tool_version=TOOL_VERSION,
+            bound_schema_hash=SCHEMA_HASH,
         )
         unit_of_work.tasks.add(task)
         if asset_task_id != "task_1":
@@ -402,47 +466,25 @@ def _seed(
                 source_message_ids=["message_1"],
                 revision=1,
                 raw_input={"material": "ZTA35G"},
-                normalized_input={
-                    "material": revision_material,
-                    "solution_temperature": {
-                        "value": 1000,
-                        "unit": normalized_units[
-                            "solution_temperature"
-                        ],
-                    },
-                    "solution_time": {
-                        "value": 3,
-                        "unit": normalized_units["solution_time"],
-                    },
-                    "aging_temperature": {
-                        "value": 730,
-                        "unit": normalized_units[
-                            "aging_temperature"
-                        ],
-                    },
-                    "aging_time": {
-                        "value": 3,
-                        "unit": normalized_units["aging_time"],
-                    },
-                    "requested_outputs": list(
-                        revision_requested_outputs
-                    ),
-                },
+                normalized_input=normalized_input,
                 missing_fields=[],
                 ambiguous_fields=[],
                 validation_errors=[],
                 created_at=BASE,
             )
         )
-        run = ToolRun.pending(
+        pending_run = ToolRun.pending(
             tool_run_id="tool_run_1",
             task_id="task_1",
             request_id="request_1",
             task_input_revision_id="revision_1",
+            input_revision_no=1,
             attempt_no=1,
-            tool_id="zta35g_sem_virtual_lab",
-            tool_version="0.1.0",
-            schema_version="1.0",
+            tool_id=TOOL_ID,
+            tool_version=TOOL_VERSION,
+            schema_hash=SCHEMA_HASH,
+            normalized_input_snapshot=normalized_input,
+            execution_policy_snapshot=ExecutionPolicy.ANY_TASK,
             execution_input={
                 "process_parameters": {
                     "solution_temperature": 1000,
@@ -462,19 +504,12 @@ def _seed(
             },
             requested_outputs=list(requested),
             created_at=BASE + timedelta(seconds=1),
-        ).start(
-            started_at=BASE + timedelta(seconds=2)
-        ).record_runtime_output(
-            actual_runtime_parameters=dict(output.actual_runtime_parameters),
-            diagnostics=[],
-            output_summary=normalize_tool_output_summary(output),
-            model_bundle_id=output.model_bundle_id,
         )
-        unit_of_work.tool_runs.add(run)
+        unit_of_work.tool_runs.add(pending_run)
         if asset_tool_run_id != "tool_run_1":
             unit_of_work.tool_runs.add(
                 replace(
-                    run,
+                    pending_run,
                     tool_run_id=asset_tool_run_id,
                     attempt_no=2,
                 )
@@ -511,6 +546,20 @@ def _seed(
         if include_image:
             unit_of_work.assets.add(asset)
         unit_of_work.commit()
+
+    run = _record_runtime_output(
+        factory,
+        tool_run_id="tool_run_1",
+        output=output,
+        started_at=BASE + timedelta(seconds=2),
+    )
+    if asset_tool_run_id != "tool_run_1":
+        _record_runtime_output(
+            factory,
+            tool_run_id=asset_tool_run_id,
+            output=output,
+            started_at=BASE + timedelta(seconds=2),
+        )
     return (
         ToolExecutionReceipt(tool_run=run, output=output),
         [asset] if include_image else [],
@@ -540,26 +589,34 @@ def _seed_retry_result(
     with factory() as unit_of_work:
         old_run = unit_of_work.tool_runs.get("tool_run_1")
         assert old_run is not None
-        retry_run = ToolRun.pending(
+        pending_retry_run = ToolRun.pending(
             tool_run_id="tool_run_retry",
             task_id="task_1",
             request_id="request_retry",
             task_input_revision_id="revision_1",
+            input_revision_no=old_run.input_revision_no,
             attempt_no=2,
             tool_id=old_run.tool_id,
             tool_version=old_run.tool_version,
-            schema_version=old_run.schema_version,
+            schema_hash=old_run.schema_hash,
+            normalized_input_snapshot=dict(
+                old_run.normalized_input_snapshot
+            ),
+            execution_policy_snapshot=old_run.execution_policy_snapshot,
             execution_input=dict(old_run.execution_input),
             requested_outputs=list(old_run.requested_outputs),
             created_at=BASE + timedelta(seconds=6),
-        ).start(
-            started_at=BASE + timedelta(seconds=7)
-        ).record_runtime_output(
-            actual_runtime_parameters=dict(output.actual_runtime_parameters),
-            diagnostics=[],
-            output_summary=normalize_tool_output_summary(output),
-            model_bundle_id=output.model_bundle_id,
         )
+        unit_of_work.tool_runs.add(pending_retry_run)
+        unit_of_work.commit()
+
+    retry_run = _record_runtime_output(
+        factory,
+        tool_run_id="tool_run_retry",
+        output=output,
+        started_at=BASE + timedelta(seconds=7),
+    )
+    with factory() as unit_of_work:
         retry_asset = Asset.pending(
             asset_id="asset_retry",
             task_id="task_1",
@@ -580,7 +637,6 @@ def _seed_retry_result(
             encoding_rule="linear[-1,1]-half-up-uint8-png-l",
             available_at=BASE + timedelta(seconds=9),
         )
-        unit_of_work.tool_runs.add(retry_run)
         unit_of_work.assets.add(retry_asset)
         unit_of_work.commit()
     return (

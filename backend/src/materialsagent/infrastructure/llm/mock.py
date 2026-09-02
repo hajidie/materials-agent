@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from hashlib import sha256
+import json
 import re
 from typing import Final
 
 from materialsagent.domain.ports.chat_orchestration import (
-    AmbiguousValue,
     ChatOrchestrationProtocolError,
     ChatOrchestrationProviderError,
     ChatOrchestrationInput,
@@ -15,10 +15,8 @@ from materialsagent.domain.ports.chat_orchestration import (
     ChatOrchestrationResult,
     ChatOrchestrationTimeoutError,
     KnowledgeAnswer,
-    NeedsInputCandidate,
-    ParameterCandidate,
-    ToolCandidate,
-    ZTA35GParameterCandidates,
+    ToolCandidateProposal,
+    ToolCandidateSet,
 )
 
 
@@ -27,12 +25,6 @@ MOCK_MODEL_NAME: Final = "mock-chat-orchestration-v1"
 PROMPT_TEMPLATE_ID: Final = "chat-orchestration"
 PROMPT_TEMPLATE_VERSION: Final = "1"
 GENERATION_PARAMETERS: Final = {"temperature": 0, "max_tokens": 256}
-PARAMETER_FIELDS: Final = (
-    "solution_temperature",
-    "solution_time",
-    "aging_temperature",
-    "aging_time",
-)
 _AGING_TEMPERATURE_SUPPLEMENT_PATTERN: Final = re.compile(
     r"(?:aging_temperature\s*=\s*|时效温度\s+)?730\s*°\s*C",
     re.IGNORECASE,
@@ -40,6 +32,29 @@ _AGING_TEMPERATURE_SUPPLEMENT_PATTERN: Final = re.compile(
 
 
 Responder = Callable[[ChatOrchestrationInput], Mapping[str, object]]
+
+
+def _plain_json(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {key: _plain_json(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain_json(item) for item in value]
+    return value
+
+
+def _catalog_payload(value: ChatOrchestrationInput) -> list[dict[str, object]]:
+    return [
+        {
+            "tool_id": entry.tool_id,
+            "version": entry.version,
+            "schema_hash": entry.schema_hash,
+            "display_name": entry.display_name,
+            "description": entry.description,
+            "candidate_input_schema": _plain_json(entry.candidate_input_schema),
+            "supported_outputs": list(entry.supported_outputs),
+        }
+        for entry in value.routing_catalog.entries
+    ]
 
 
 def _default_parameters() -> dict[str, object]:
@@ -53,11 +68,17 @@ def _default_parameters() -> dict[str, object]:
 
 def _default_tool_payload() -> dict[str, object]:
     return {
-        "route": "TOOL_EXECUTION",
-        "tool_id": "zta35g_sem_virtual_lab",
-        "material": "ZTA35G",
-        "candidate_parameters": _default_parameters(),
-        "requested_outputs": ["sem_image", "mechanical_properties"],
+        "route": "TOOL_CANDIDATES",
+        "candidates": [
+            {
+                "tool_id": "zta35g_sem_virtual_lab",
+                "candidate_input": {
+                    "material": "ZTA35G",
+                    **_default_parameters(),
+                    "requested_outputs": ["sem_image", "mechanical_properties"],
+                },
+            }
+        ],
     }
 
 
@@ -88,20 +109,21 @@ def default_mock_responder(
         parameters = _default_parameters()
         parameters["aging_temperature"] = None
         return {
-            "route": "NEEDS_INPUT",
-            "tool_id": "zta35g_sem_virtual_lab",
-            "material": "ZTA35G",
-            "candidate_parameters": parameters,
-            "missing_fields": ["aging_temperature"],
-            "ambiguous_fields": [],
-            "follow_up_suggestion": "请补充时效温度。",
-            "requested_outputs": ["sem_image", "mechanical_properties"],
+            "route": "TOOL_CANDIDATES",
+            "candidates": [{
+                "tool_id": "zta35g_sem_virtual_lab",
+                "candidate_input": {
+                    "material": "ZTA35G",
+                    **parameters,
+                    "requested_outputs": ["sem_image", "mechanical_properties"],
+                },
+            }],
         }
     if _is_aging_temperature_supplement(content):
         payload = _default_tool_payload()
         parameters = _default_parameters()
         parameters["aging_temperature"] = {"value": 730, "unit": "°C"}
-        payload["candidate_parameters"] = parameters
+        payload["candidates"][0]["candidate_input"].update(parameters)  # type: ignore[index,union-attr]
         return payload
     if "歧义" in content:
         parameters = _default_parameters()
@@ -110,25 +132,26 @@ def default_mock_responder(
             "unit": "h",
         }
         return {
-            "route": "NEEDS_INPUT",
-            "tool_id": "zta35g_sem_virtual_lab",
-            "material": "ZTA35G",
-            "candidate_parameters": parameters,
-            "missing_fields": [],
-            "ambiguous_fields": ["solution_time"],
-            "follow_up_suggestion": "请确认固溶时间。",
-            "requested_outputs": ["sem_image"],
+            "route": "TOOL_CANDIDATES",
+            "candidates": [{
+                "tool_id": "zta35g_sem_virtual_lab",
+                "candidate_input": {
+                    "material": "ZTA35G",
+                    **parameters,
+                    "requested_outputs": ["sem_image"],
+                },
+            }],
         }
     payload = _default_tool_payload()
     if "solution_time = 180 min" in lowered:
         parameters = _default_parameters()
         parameters["solution_time"] = {"value": 180, "unit": "min"}
-        payload["candidate_parameters"] = parameters
+        payload["candidates"][0]["candidate_input"].update(parameters)  # type: ignore[index,union-attr]
         return payload
     if "越界温度" in content:
         parameters = _default_parameters()
         parameters["solution_temperature"] = {"value": 1200, "unit": "°C"}
-        payload["candidate_parameters"] = parameters
+        payload["candidates"][0]["candidate_input"].update(parameters)  # type: ignore[index,union-attr]
         return payload
     if "完整合法" in content:
         return payload
@@ -153,43 +176,6 @@ def _sequence(value: object, field_name: str) -> tuple[object, ...]:
     return tuple(value)
 
 
-def _string_sequence(value: object, field_name: str) -> tuple[str, ...]:
-    items = _sequence(value, field_name)
-    if not all(isinstance(item, str) for item in items):
-        raise ValueError(f"{field_name} must be a string array.")
-    return items  # type: ignore[return-value]
-
-
-def _candidate_value(value: object) -> object:
-    if not isinstance(value, Mapping):
-        return value
-    _exact_keys(value, {"candidates"}, "ambiguous candidate")
-    return AmbiguousValue(_sequence(value["candidates"], "candidates"))
-
-
-def _parameters(value: object) -> ZTA35GParameterCandidates:
-    if not isinstance(value, Mapping):
-        raise ValueError("candidate_parameters must be an object.")
-    unknown = set(value) - set(PARAMETER_FIELDS)
-    if unknown:
-        raise ValueError("candidate_parameters has unknown fields.")
-
-    decoded: dict[str, ParameterCandidate | None] = {}
-    for field_name in PARAMETER_FIELDS:
-        raw = value.get(field_name)
-        if raw is None:
-            decoded[field_name] = None
-            continue
-        if not isinstance(raw, Mapping):
-            raise ValueError(f"{field_name} must be an object or null.")
-        _exact_keys(raw, {"value", "unit"}, field_name)
-        decoded[field_name] = ParameterCandidate(
-            value=_candidate_value(raw["value"]),
-            unit=_candidate_value(raw["unit"]),
-        )
-    return ZTA35GParameterCandidates(**decoded)
-
-
 def _decode(payload: Mapping[str, object]) -> ChatOrchestrationResult:
     route = payload.get("route")
     if route == "KNOWLEDGE_ANSWER":
@@ -199,57 +185,25 @@ def _decode(payload: Mapping[str, object]) -> ChatOrchestrationResult:
             raise ValueError("answer_text must be text.")
         return KnowledgeAnswer(answer_text=answer_text)
 
-    common = {
-        "route",
-        "tool_id",
-        "material",
-        "candidate_parameters",
-        "requested_outputs",
-    }
-    if route == "TOOL_EXECUTION":
-        _exact_keys(payload, common, "result")
-        return ToolCandidate(
-            tool_id=payload["tool_id"],  # type: ignore[arg-type]
-            material=_candidate_value(payload["material"]),
-            candidate_parameters=_parameters(payload["candidate_parameters"]),
-            requested_outputs=_sequence(
-                payload["requested_outputs"],
-                "requested_outputs",
-            ),
-        )
-
-    if route == "NEEDS_INPUT":
-        _exact_keys(
-            payload,
-            common
-            | {
-                "missing_fields",
-                "ambiguous_fields",
-                "follow_up_suggestion",
-            },
-            "result",
-        )
-        follow_up = payload["follow_up_suggestion"]
-        if not isinstance(follow_up, str):
-            raise ValueError("follow_up_suggestion must be text.")
-        return NeedsInputCandidate(
-            tool_id=payload["tool_id"],  # type: ignore[arg-type]
-            material=_candidate_value(payload["material"]),
-            candidate_parameters=_parameters(payload["candidate_parameters"]),
-            missing_fields=_string_sequence(
-                payload["missing_fields"],
-                "missing_fields",
-            ),
-            ambiguous_fields=_string_sequence(
-                payload["ambiguous_fields"],
-                "ambiguous_fields",
-            ),
-            follow_up_suggestion=follow_up,
-            requested_outputs=_sequence(
-                payload["requested_outputs"],
-                "requested_outputs",
-            ),
-        )
+    if route == "TOOL_CANDIDATES":
+        _exact_keys(payload, {"route", "candidates"}, "result")
+        candidates = _sequence(payload["candidates"], "candidates")
+        decoded: list[ToolCandidateProposal] = []
+        for item in candidates:
+            if not isinstance(item, Mapping):
+                raise ValueError("candidate must be an object.")
+            _exact_keys(item, {"tool_id", "candidate_input"}, "candidate")
+            if not isinstance(item["tool_id"], str) or not isinstance(
+                item["candidate_input"], Mapping
+            ):
+                raise ValueError("candidate has invalid fields.")
+            decoded.append(
+                ToolCandidateProposal(
+                    tool_id=item["tool_id"],
+                    candidate_input=item["candidate_input"],
+                )
+            )
+        return ToolCandidateSet(tuple(decoded))
     raise ValueError("route is unknown.")
 
 
@@ -268,6 +222,7 @@ class MockChatOrchestrationAdapter:
     ) -> ChatOrchestrationRequestMetadata:
         canonical = (
             f"{PROMPT_TEMPLATE_ID}:{PROMPT_TEMPLATE_VERSION}\n"
+            f"{json.dumps(_catalog_payload(orchestration_input), ensure_ascii=False, sort_keys=True, separators=(',', ':'))}\n"
             f"{orchestration_input.content_text}"
         )
         return ChatOrchestrationRequestMetadata(

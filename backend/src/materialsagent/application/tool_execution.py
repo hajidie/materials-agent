@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -17,6 +17,8 @@ from materialsagent.application.errors import (
     ResourceNotFoundError,
     IdempotencyConflictError,
     TaskNotRetryableError,
+    ToolExecutionNotAllowedError,
+    ToolSchemaDriftError,
     from_persistence_error,
 )
 from materialsagent.application.idempotency import (
@@ -25,7 +27,13 @@ from materialsagent.application.idempotency import (
     recovered_idempotency_outcome,
 )
 from materialsagent.domain.models.idempotency_record import IdempotencyRecord
-from materialsagent.application.tools import StaticToolRegistry, UnknownToolError
+from materialsagent.application.tool_registry import (
+    ToolAuthorizationDenialReason,
+    ToolAuthorizationError,
+    ToolRegistry,
+    UnknownToolError,
+)
+from materialsagent.domain.models.task import Task
 from materialsagent.domain.models.tool_run import ToolRun
 from materialsagent.domain.ports.tool_execution import (
     ToolClientError,
@@ -36,6 +44,12 @@ from materialsagent.domain.ports.tool_execution import (
     ToolExecutionInput,
     ToolExecutionOutput,
     ToolRequestContext,
+)
+from materialsagent.domain.ports.tool_registry import (
+    AuthorizationDecision,
+    ToolAction,
+    ToolDefinition,
+    ToolRef,
 )
 from materialsagent.domain.ports.unit_of_work import (
     PersistenceError,
@@ -250,7 +264,7 @@ class ToolExecutionService:
     def __init__(
         self,
         unit_of_work_factory: UnitOfWorkFactory,
-        registry: StaticToolRegistry,
+        registry: ToolRegistry,
         *,
         clock: Callable[[], datetime] | None = None,
         id_factory: Callable[[], str] | None = None,
@@ -481,23 +495,21 @@ class ToolExecutionService:
                 llm_call = unit_of_work.llm_calls.get(
                     revision.source_llm_call_id
                 )
-                summary = (
-                    None
-                    if llm_call is None
-                    else llm_call.structured_output_summary
-                )
-                if (
-                    llm_call is None
-                    or llm_call.status != "SUCCEEDED"
-                    or not isinstance(summary, Mapping)
-                    or summary.get("route") != "TOOL_EXECUTION"
-                    or not isinstance(summary.get("tool_id"), str)
-                ):
+                if llm_call is None or llm_call.status != "SUCCEEDED":
+                    raise TaskNotRetryableError(task_id=task_id)
+                bound_ref = task.bound_tool_ref
+                if bound_ref is None:
                     raise TaskNotRetryableError(task_id=task_id)
                 try:
-                    registration = self._registry.resolve(summary["tool_id"])
+                    registration = self._registry.resolve(bound_ref.tool_id)
                 except UnknownToolError:
-                    raise TaskNotRetryableError(task_id=task_id) from None
+                    raise ToolExecutionNotAllowedError(task_id=task_id) from None
+                authorization = self._authorize_bound_action(
+                    registration=registration,
+                    action=ToolAction.RETRY,
+                    bound_ref=bound_ref,
+                    task_id=task_id,
+                )
                 used_seeds = {
                     parameters["seed"]
                     for item in runs
@@ -537,9 +549,14 @@ class ToolExecutionService:
                         default=0,
                     )
                     + 1,
-                    tool_id=registration.metadata.tool_id,
-                    tool_version=registration.metadata.tool_version,
-                    schema_version=registration.metadata.schema_version,
+                    tool_id=authorization.authorized_ref.tool_id,
+                    tool_version=authorization.authorized_ref.version,
+                    schema_hash=authorization.authorized_ref.schema_hash,
+                    normalized_input_snapshot=dict(revision.normalized_input),
+                    execution_policy_snapshot=(
+                        authorization.execution_policy_snapshot
+                    ),
+                    input_revision_no=revision.revision,
                     execution_input=validated_input.to_json(),
                     requested_outputs=list(validated_input.requested_outputs),
                     created_at=timestamp,
@@ -635,7 +652,28 @@ class ToolExecutionService:
                     raise ApplicationConflictError(
                         task_id=None if pending is None else pending.task_id
                     )
-                registration = self._registry.resolve(pending.tool_id)
+                bound_ref = task.bound_tool_ref
+                if bound_ref is None:
+                    raise ToolExecutionNotAllowedError(task_id=task.task_id)
+                try:
+                    registration = self._registry.resolve(pending.tool_id)
+                except UnknownToolError:
+                    raise ToolExecutionNotAllowedError(
+                        task_id=task.task_id
+                    ) from None
+                authorization = self._authorize_bound_action(
+                    registration=registration,
+                    action=ToolAction.RETRY,
+                    bound_ref=bound_ref,
+                    task_id=task.task_id,
+                )
+                reserved_ref = ToolRef(
+                    tool_id=pending.tool_id,
+                    version=pending.tool_version,
+                    schema_hash=pending.schema_hash,
+                )
+                if authorization.authorized_ref != reserved_ref:
+                    raise ToolExecutionNotAllowedError(task_id=task.task_id)
                 parameters = pending.execution_input.get(
                     "runtime_parameters"
                 )
@@ -800,9 +838,14 @@ class ToolExecutionService:
         validated_input: ToolExecutionInput | None = None
         conversation_id: str | None = None
         initial_chain_activated: bool | None = None
+        original_ready_task: Task | None = None
+        expected_running_task: Task | None = None
         try:
             with self._unit_of_work_factory() as unit_of_work:
-                task = unit_of_work.tasks.get_owned(task_id, actor_context.actor_id)
+                task = unit_of_work.tasks.get_owned_for_update(
+                    task_id,
+                    actor_context.actor_id,
+                )
                 revision = unit_of_work.task_input_revisions.get(
                     task_input_revision_id
                 )
@@ -825,6 +868,16 @@ class ToolExecutionService:
                     and task.selected_tool_run_id is None
                     and task.selected_result_id is None
                 )
+                ready_activation = (
+                    task.task_type == "TOOL_EXECUTION"
+                    and task.current_status == "READY"
+                    and task.error_code is None
+                    and task.safe_error_message is None
+                    and task.selected_tool_run_id is None
+                    and task.selected_result_id is None
+                )
+                if ready_activation:
+                    original_ready_task = task
                 legacy_activation = (
                     task.task_type == "TOOL_EXECUTION"
                     and task.current_status == "FAILED"
@@ -832,30 +885,37 @@ class ToolExecutionService:
                     and task.selected_tool_run_id is None
                     and task.selected_result_id is None
                 )
-                if not (activated_chain or legacy_activation):
+                if not (
+                    activated_chain
+                    or ready_activation
+                    or legacy_activation
+                ):
                     raise ApplicationConflictError(task_id=task_id)
                 llm_call = unit_of_work.llm_calls.get(
                     revision.source_llm_call_id
-                )
-                summary = (
-                    llm_call.structured_output_summary
-                    if llm_call is not None
-                    else None
                 )
                 if (
                     llm_call is None
                     or llm_call.task_id != task_id
                     or llm_call.status != "SUCCEEDED"
-                    or not isinstance(summary, Mapping)
-                    or summary.get("route") != "TOOL_EXECUTION"
-                    or not isinstance(summary.get("tool_id"), str)
                 ):
                     raise ResourceNotFoundError(task_id=task_id)
-                try:
-                    registration = self._registry.resolve(summary["tool_id"])
-                except UnknownToolError:
-                    raise ResourceNotFoundError(task_id=task_id) from None
+                bound_ref = task.bound_tool_ref
+                if bound_ref is None:
+                    raise ResourceNotFoundError(task_id=task_id)
                 existing = unit_of_work.tool_runs.list_for_task(task_id)
+                if existing:
+                    raise ApplicationConflictError(task_id=task_id)
+                try:
+                    registration = self._registry.resolve(bound_ref.tool_id)
+                except UnknownToolError:
+                    raise ToolExecutionNotAllowedError(task_id=task_id) from None
+                authorization = self._authorize_bound_action(
+                    registration=registration,
+                    action=ToolAction.EXECUTE,
+                    bound_ref=bound_ref,
+                    task_id=task_id,
+                )
                 attempt_no = max((item.attempt_no for item in existing), default=0) + 1
                 used_seeds = {
                     runtime_parameters["seed"]
@@ -884,22 +944,45 @@ class ToolExecutionService:
                     )
                 except ValueError:
                     raise ApplicationValidationError(task_id=task_id) from None
+                timestamp = self._clock()
                 pending = ToolRun.pending(
                     tool_run_id=tool_run_id,
                     task_id=task_id,
                     request_id=request_id,
                     task_input_revision_id=task_input_revision_id,
                     attempt_no=attempt_no,
-                    tool_id=registration.metadata.tool_id,
-                    tool_version=registration.metadata.tool_version,
-                    schema_version=registration.metadata.schema_version,
+                    tool_id=authorization.authorized_ref.tool_id,
+                    tool_version=authorization.authorized_ref.version,
+                    schema_hash=authorization.authorized_ref.schema_hash,
+                    normalized_input_snapshot=dict(revision.normalized_input),
+                    execution_policy_snapshot=(
+                        authorization.execution_policy_snapshot
+                    ),
+                    input_revision_no=revision.revision,
                     execution_input=validated_input.to_json(),
                     requested_outputs=list(validated_input.requested_outputs),
-                    created_at=self._clock(),
+                    created_at=timestamp,
                 )
                 conversation_id = task.conversation_id
-                initial_chain_activated = activated_chain
+                initial_chain_activated = (
+                    activated_chain or ready_activation
+                )
                 unit_of_work.tool_runs.add(pending)
+                if ready_activation:
+                    expected_running_task = replace(
+                        task,
+                        current_status="RUNNING",
+                        started_at=task.started_at or timestamp,
+                        updated_at=timestamp,
+                        completed_at=None,
+                        error_code=None,
+                        safe_error_message=None,
+                    )
+                    if unit_of_work.tasks.update(
+                        expected_running_task,
+                        expected_status="READY",
+                    ) is None:
+                        raise ApplicationConflictError(task_id=task_id)
                 unit_of_work.commit()
                 return (
                     pending,
@@ -917,12 +1000,36 @@ class ToolExecutionService:
                 validated_input=validated_input,
                 conversation_id=conversation_id,
                 initial_chain_activated=initial_chain_activated,
+                original_ready_task=original_ready_task,
+                expected_running_task=expected_running_task,
             )
             if recovered is not None:
                 return recovered
             raise from_persistence_error(error, task_id=task_id) from None
         except Exception as error:
             raise from_persistence_error(error, task_id=task_id) from None
+
+    def _authorize_bound_action(
+        self,
+        *,
+        registration: ToolDefinition,
+        action: ToolAction,
+        bound_ref: ToolRef,
+        task_id: str,
+    ) -> AuthorizationDecision:
+        try:
+            return self._registry.authorize(
+                registration=registration,
+                action=action,
+                bound_ref=bound_ref,
+            )
+        except ToolAuthorizationError as error:
+            error_type = (
+                ToolSchemaDriftError
+                if error.reason is ToolAuthorizationDenialReason.SCHEMA_DRIFT
+                else ToolExecutionNotAllowedError
+            )
+            raise error_type(task_id=task_id) from None
 
     def _recover_initial_pending_attempt(
         self,
@@ -933,6 +1040,8 @@ class ToolExecutionService:
         validated_input: ToolExecutionInput | None,
         conversation_id: str | None,
         initial_chain_activated: bool | None,
+        original_ready_task: Task | None,
+        expected_running_task: Task | None,
     ) -> tuple[ToolRun, ToolExecutionInput, str, bool] | None:
         if (
             expected_pending is None
@@ -947,14 +1056,43 @@ class ToolExecutionService:
                     expected_pending.tool_run_id,
                     actor_context.actor_id,
                 )
+                current_task = (
+                    None
+                    if (
+                        original_ready_task is None
+                        and expected_running_task is None
+                    )
+                    else unit_of_work.tasks.get_owned(
+                        task_id,
+                        actor_context.actor_id,
+                    )
+                )
         except PersistenceError:
             return None
+        if original_ready_task is not None or expected_running_task is not None:
+            if (
+                original_ready_task is None
+                or expected_running_task is None
+            ):
+                raise ApplicationConflictError(task_id=task_id)
+            if current is None and current_task == original_ready_task:
+                return None
+            if (
+                current is not None
+                and current.current_status == "PENDING"
+                and current == expected_pending
+                and current_task == expected_running_task
+            ):
+                return (
+                    current,
+                    validated_input,
+                    conversation_id,
+                    initial_chain_activated,
+                )
+            raise ApplicationConflictError(task_id=task_id)
         if current is None:
             return None
-        if (
-            current.current_status != "PENDING"
-            or current != expected_pending
-        ):
+        if current.current_status != "PENDING" or current != expected_pending:
             raise ApplicationConflictError(task_id=task_id)
         return (
             current,
@@ -1058,7 +1196,10 @@ class ToolExecutionService:
                 "attempt_no",
                 "tool_id",
                 "tool_version",
-                "schema_version",
+                "schema_hash",
+                "normalized_input_snapshot",
+                "execution_policy_snapshot",
+                "input_revision_no",
                 "requested_outputs",
                 "execution_input",
                 "created_at",

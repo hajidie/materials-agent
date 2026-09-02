@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import TracebackType
 
 from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from materialsagent.domain.ports.unit_of_work import (
@@ -41,6 +42,10 @@ from materialsagent.infrastructure.db.conversation_task import (
     SQLAlchemyMessageRepository,
     SQLAlchemyTaskInputRevisionRepository,
     SQLAlchemyTaskRepository,
+    TaskInputRevisionRow,
+    TaskRow,
+    _revision_from_row,
+    _task_from_row,
 )
 
 
@@ -193,7 +198,12 @@ class SQLAlchemyUnitOfWork:
     def commit(self) -> None:
         session = self._active_session()
         try:
+            self._validate_routing_states(session)
             session.commit()
+            self._clear_routing_state_tracking(session)
+        except PersistenceConflictError:
+            self.rollback()
+            raise
         except IntegrityError:
             self.rollback()
             raise PersistenceConflictError("Persistence conflict.") from None
@@ -208,7 +218,49 @@ class SQLAlchemyUnitOfWork:
         session = self._active_session()
         try:
             session.rollback()
+            self._clear_routing_state_tracking(session)
         except DBAPIError:
             raise DatabaseUnavailableError("Database unavailable.") from None
         except SQLAlchemyError:
             raise PersistenceError("Persistence operation failed.") from None
+
+    @staticmethod
+    def _validate_routing_states(session: Session) -> None:
+        session_info = getattr(session, "info", None)
+        if session_info is None:
+            return
+        task_ids = session_info.get("routing_state_task_ids")
+        if task_ids is None:
+            return
+        if not isinstance(task_ids, set):
+            raise PersistenceConflictError("Persistence conflict.")
+        if not task_ids:
+            return
+        session.flush()
+        for task_id in task_ids:
+            row = session.get(TaskRow, task_id)
+            if row is None or row.current_status not in {"READY", "NEEDS_INPUT"}:
+                continue
+            latest_revision = session.scalar(
+                select(TaskInputRevisionRow)
+                .where(TaskInputRevisionRow.task_id == task_id)
+                .order_by(
+                    TaskInputRevisionRow.revision.desc(),
+                    TaskInputRevisionRow.task_input_revision_id.desc(),
+                )
+                .limit(1)
+            )
+            try:
+                _task_from_row(row).validate_routing_state(
+                    None
+                    if latest_revision is None
+                    else _revision_from_row(latest_revision)
+                )
+            except ValueError:
+                raise PersistenceConflictError("Persistence conflict.") from None
+
+    @staticmethod
+    def _clear_routing_state_tracking(session: Session) -> None:
+        session_info = getattr(session, "info", None)
+        if session_info is not None:
+            session_info.pop("routing_state_task_ids", None)

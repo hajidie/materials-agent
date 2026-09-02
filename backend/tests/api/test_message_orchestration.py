@@ -1,12 +1,26 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from types import SimpleNamespace
 from uuid import uuid4
 
+import pytest
 from sqlalchemy import func, select, text
 
 from materialsagent.application.chat_orchestration import (
+    ChatOrchestrationProjection,
     ChatOrchestrationService,
 )
+from materialsagent.application.context import ActorContext
+from materialsagent.application.errors import ApplicationInternalError
+from materialsagent.application.messages import PreparedSubmission
+from materialsagent.api.routes.conversations import (
+    MessageSubmissionRequest,
+    submit_message,
+)
+from materialsagent.domain.models.message import Message
+from materialsagent.domain.models.task import Task
+from materialsagent.domain.models.task_input_revision import TaskInputRevision
 from materialsagent.infrastructure.db.conversation_task import (
     MessageRow,
     TaskInputRevisionRow,
@@ -21,6 +35,209 @@ from materialsagent.infrastructure.llm.mock import (
 from backend.tests.api.test_assets import _MemoryStorage
 
 
+ROUTE_TIME = datetime(2026, 9, 2, 9, 0, tzinfo=timezone.utc)
+ROUTE_SCHEMA_HASH = (
+    "f821240f782ce788bc723fd1acd02a2e58cedbf68b70b1414e2accd16d989d07"
+)
+
+
+def _ready_route_projection(
+    *,
+    submission_mode: str,
+    include_revision: bool = True,
+) -> tuple[PreparedSubmission, ChatOrchestrationProjection]:
+    task = Task(
+        task_id="task_route",
+        conversation_id="conversation_route",
+        actor_id="actor_route",
+        task_type="TOOL_EXECUTION",
+        current_status="READY",
+        selected_tool_run_id=None,
+        selected_result_id=None,
+        created_at=ROUTE_TIME,
+        started_at=ROUTE_TIME,
+        updated_at=ROUTE_TIME,
+        completed_at=None,
+        error_code=None,
+        safe_error_message=None,
+        tool_id="zta35g_sem_virtual_lab",
+        bound_tool_version="1",
+        bound_schema_hash=ROUTE_SCHEMA_HASH,
+    )
+    message = Message.user(
+        message_id="message_route",
+        conversation_id=task.conversation_id,
+        task_id=task.task_id,
+        actor_id=task.actor_id,
+        request_id="request_route",
+        content_text="complete tool input",
+        created_at=ROUTE_TIME,
+    )
+    revision = (
+        None
+        if not include_revision
+        else TaskInputRevision(
+            task_input_revision_id="revision_route",
+            task_id=task.task_id,
+            request_id=message.request_id,
+            source_llm_call_id="llm_route",
+            source_message_ids=[message.message_id],
+            revision=(2 if submission_mode == "SUPPLEMENT_TASK" else 1),
+            raw_input={"material": "ZTA35G"},
+            normalized_input={"material": "ZTA35G"},
+            missing_fields=[],
+            ambiguous_fields=[],
+            validation_errors=[],
+            created_at=ROUTE_TIME,
+        )
+    )
+    submission = PreparedSubmission(
+        conversation_id=task.conversation_id,
+        user_message=message,
+        task=task,
+        submission_mode=submission_mode,
+    )
+    return submission, ChatOrchestrationProjection(
+        conversation_id=task.conversation_id,
+        user_message=message,
+        task=task,
+        llm_call=None,
+        assistant_message=None,
+        revision=revision,
+    )
+
+
+class _DirectSubmissionService:
+    def __init__(self, submission: PreparedSubmission) -> None:
+        self.submission = submission
+
+    def prepare_submission(self, *_args, **_kwargs) -> PreparedSubmission:
+        return self.submission
+
+
+class _DirectOrchestrationService:
+    def __init__(self, projection: ChatOrchestrationProjection) -> None:
+        self.projection = projection
+
+    def orchestrate_submission(
+        self,
+        *_args,
+        **_kwargs,
+    ) -> ChatOrchestrationProjection:
+        return self.projection
+
+
+class _WorkflowInvoked(RuntimeError):
+    pass
+
+
+class _DirectWorkflowService:
+    def execute(self, actor: ActorContext, **kwargs):
+        raise _WorkflowInvoked((actor, kwargs))
+
+
+@pytest.mark.parametrize(
+    "submission_mode",
+    ["NEW_TASK", "SUPPLEMENT_TASK"],
+)
+def test_non_replayed_ready_route_invokes_complete_tool_workflow(
+    submission_mode: str,
+) -> None:
+    submission, projection = _ready_route_projection(
+        submission_mode=submission_mode,
+    )
+    actor = ActorContext(actor_id="actor_route", user_id=None)
+
+    with pytest.raises(_WorkflowInvoked) as raised:
+        submit_message(
+            conversation_id="conversation_route",
+            body=MessageSubmissionRequest(
+                submission_mode=submission_mode,
+                content_text="complete tool input",
+                target_task_id=(
+                    "task_route"
+                    if submission_mode == "SUPPLEMENT_TASK"
+                    else None
+                ),
+            ),
+            request=SimpleNamespace(
+                state=SimpleNamespace(request_id="request_route")
+            ),
+            actor_context=actor,
+            service=_DirectSubmissionService(submission),
+            orchestration_service=_DirectOrchestrationService(projection),
+            tool_workflow_service=_DirectWorkflowService(),
+            idempotency_key="message-route-key",
+        )
+
+    assert raised.value.args[0] == (
+        actor,
+        {
+            "task_id": "task_route",
+            "task_input_revision_id": "revision_route",
+            "request_id": "request_route",
+        },
+    )
+
+
+def test_ready_route_without_workflow_stays_ready_without_fake_result() -> None:
+    submission, projection = _ready_route_projection(
+        submission_mode="NEW_TASK",
+    )
+
+    response = submit_message(
+        conversation_id="conversation_route",
+        body=MessageSubmissionRequest(
+            submission_mode="NEW_TASK",
+            content_text="complete tool input",
+        ),
+        request=SimpleNamespace(
+            state=SimpleNamespace(request_id="request_route")
+        ),
+        actor_context=ActorContext(actor_id="actor_route", user_id=None),
+        service=_DirectSubmissionService(submission),
+        orchestration_service=_DirectOrchestrationService(projection),
+        tool_workflow_service=None,
+        idempotency_key="message-route-key",
+    )
+
+    assert response.data.task.status == "READY"
+    assert response.data.result_summary is None
+    assert response.data.explanation is None
+
+
+@pytest.mark.parametrize("workflow_available", [True, False])
+def test_ready_route_rejects_missing_revision(
+    workflow_available: bool,
+) -> None:
+    submission, projection = _ready_route_projection(
+        submission_mode="NEW_TASK",
+        include_revision=False,
+    )
+
+    with pytest.raises(ApplicationInternalError):
+        submit_message(
+            conversation_id="conversation_route",
+            body=MessageSubmissionRequest(
+                submission_mode="NEW_TASK",
+                content_text="complete tool input",
+            ),
+            request=SimpleNamespace(
+                state=SimpleNamespace(request_id="request_route")
+            ),
+            actor_context=ActorContext(
+                actor_id="actor_route",
+                user_id=None,
+            ),
+            service=_DirectSubmissionService(submission),
+            orchestration_service=_DirectOrchestrationService(projection),
+            tool_workflow_service=(
+                _DirectWorkflowService() if workflow_available else None
+            ),
+            idempotency_key="message-route-key",
+        )
+
+
 def _create_conversation(client) -> str:
     response = client.post("/api/v1/conversations", json={})
     assert response.status_code == 201
@@ -33,6 +250,18 @@ def _submit(client, conversation_id: str, content_text: str):
         headers={"Idempotency-Key": f"message-{uuid4().hex}"},
         json={
             "submission_mode": "NEW_TASK",
+            "content_text": content_text,
+        },
+    )
+
+
+def _supplement(client, conversation_id: str, task_id: str, content_text: str):
+    return client.post(
+        f"/api/v1/conversations/{conversation_id}/messages",
+        headers={"Idempotency-Key": f"message-{uuid4().hex}"},
+        json={
+            "submission_mode": "SUPPLEMENT_TASK",
+            "target_task_id": task_id,
             "content_text": content_text,
         },
     )
@@ -143,7 +372,55 @@ def test_missing_and_ambiguous_messages_return_formal_needs_input_projection(
     ]
 
 
-def test_hard_invalid_message_returns_422_with_persisted_failed_resource(
+def test_bound_missing_input_is_supplemented_without_first_route_rebinding(
+    api_harness,
+) -> None:
+    actor_id = "actor_local"
+    api_harness.persist_actor(actor_id)
+
+    with api_harness.create_client(actor_id) as client:
+        conversation_id = _create_conversation(client)
+        first = _submit(client, conversation_id, "缺 aging_temperature")
+        first_data = first.json()["data"]
+        task_id = first_data["task"]["task_id"]
+        supplement = _supplement(
+            client,
+            conversation_id,
+            task_id,
+            "时效温度 730 °C",
+        )
+
+    assert first.status_code == 200
+    assert supplement.status_code == 200
+    assert supplement.json()["data"]["task"]["status"] == "READY"
+    messages, tasks, revisions, calls = _rows(api_harness)
+    assert len(revisions) == 2
+    assert revisions[0].revision == 1
+    assert revisions[1].revision == 2
+    assert revisions[1].raw_input == {
+        "aging_temperature": {"value": 730, "unit": "°C"}
+    }
+    assert revisions[1].normalized_input["solution_temperature"] == {
+        "value": 1000,
+        "unit": "°C",
+    }
+    assert tasks[0].tool_id == "zta35g_sem_virtual_lab"
+    calls_by_purpose = {call.purpose: call for call in calls}
+    assert set(calls_by_purpose) == {
+        "CHAT_ORCHESTRATION",
+        "TOOL_INPUT_EXTRACTION",
+    }
+    extraction_call = calls_by_purpose["TOOL_INPUT_EXTRACTION"]
+    assert extraction_call.catalog_snapshot_refs is None
+    assert extraction_call.catalog_hash is None
+    assert extraction_call.tool_context_ref == {
+        "tool_id": "zta35g_sem_virtual_lab",
+        "version": tasks[0].bound_tool_version,
+        "schema_hash": tasks[0].bound_schema_hash,
+    }
+
+
+def test_hard_invalid_message_returns_agent_internal_without_binding(
     api_harness,
 ) -> None:
     actor_id = "actor_local"
@@ -153,27 +430,22 @@ def test_hard_invalid_message_returns_422_with_persisted_failed_resource(
         conversation_id = _create_conversation(client)
         response = _submit(client, conversation_id, "越界温度")
 
-    assert response.status_code == 422
+    assert response.status_code == 500
     body = response.json()
-    assert body["error"]["code"] == "VALIDATION_FAILED"
-    assert body["error"]["details"] == [
-        {
-            "field": "solution_temperature",
-            "code": "PROCESS_PARAMETERS_OUT_OF_RANGE",
-            "message": "The value is outside the supported inclusive range.",
-        }
-    ]
+    assert body["error"]["code"] == "AGENT_INTERNAL_ERROR"
     assert body["resource"]["conversation_id"] == conversation_id
     assert body["resource"]["task_id"]
     messages, tasks, revisions, calls = _rows(api_harness)
     assert len(messages) == 1
-    assert len(revisions) == 1
-    assert calls[0].status == "SUCCEEDED"
+    assert len(revisions) == 0
+    assert calls[0].status == "FAILED"
+    assert calls[0].error_code == "LLM_SCHEMA_MISMATCH"
     assert tasks[0].current_status == "FAILED"
-    assert tasks[0].error_code == "VALIDATION_FAILED"
+    assert tasks[0].error_code == "AGENT_INTERNAL_ERROR"
+    assert tasks[0].tool_id is None
 
 
-def test_complete_valid_tool_message_returns_persisted_503_without_fake_result(
+def test_complete_valid_tool_message_returns_bound_ready_without_fake_result(
     api_harness,
 ) -> None:
     actor_id = "actor_local"
@@ -182,33 +454,24 @@ def test_complete_valid_tool_message_returns_persisted_503_without_fake_result(
     with api_harness.create_client(actor_id) as client:
         conversation_id = _create_conversation(client)
         response = _submit(client, conversation_id, "完整合法 Tool 请求")
-        task_response = client.get(
-            f"/api/v1/tasks/{response.json()['resource']['task_id']}"
-        )
+        task_response = client.get(f"/api/v1/tasks/{response.json()['data']['task']['task_id']}")
 
-    assert response.status_code == 503
+    assert response.status_code == 200
     body = response.json()
-    assert body["error"] == {
-        "code": "TOOL_UNAVAILABLE",
-        "message": "当前阶段尚未开放材料工具执行。",
-        "details": [],
-    }
-    assert body["resource"]["conversation_id"] == conversation_id
-    assert body["resource"]["task_id"]
-    assert body["resource"]["tool_run_id"] is None
-    assert body["resource"]["result_id"] is None
+    assert body["data"]["conversation_id"] == conversation_id
+    assert body["data"]["task"]["status"] == "READY"
     assert task_response.status_code == 200
     task_data = task_response.json()["data"]
     assert task_data["task_type"] == "TOOL_EXECUTION"
-    assert task_data["status"] == "FAILED"
-    assert task_data["error_code"] == "TOOL_UNAVAILABLE"
+    assert task_data["status"] == "READY"
+    assert task_data["error_code"] is None
     assert task_data["selected_tool_run_id"] is None
     assert task_data["selected_result_id"] is None
     messages, tasks, revisions, calls = _rows(api_harness)
     assert len(messages) == 1
     assert len(revisions) == 1
     assert calls[0].status == "SUCCEEDED"
-    assert tasks[0].error_code == "TOOL_UNAVAILABLE"
+    assert tasks[0].tool_id == "zta35g_sem_virtual_lab"
     with api_harness.engine.connect() as connection:
         assert connection.scalar(text("SELECT count(*) FROM tool_run")) == 0
         assert connection.scalar(text("SELECT to_regclass('public.asset')")) == "asset"
@@ -246,11 +509,9 @@ def test_enabled_m7_without_runtime_boundary_has_zero_tool_side_effects(
         conversation_id = _create_conversation(client)
         response = _submit(client, conversation_id, "完整合法 Tool 请求")
 
-    assert response.status_code == 503
+    assert response.status_code == 200
     body = response.json()
-    assert body["error"]["code"] == "TOOL_UNAVAILABLE"
-    assert body["resource"]["tool_run_id"] is None
-    assert body["resource"]["result_id"] is None
+    assert body["data"]["task"]["status"] == "READY"
     assert storage.calls == 0
     assert storage.put_calls == 0
     assert storage.objects == {}
@@ -259,8 +520,8 @@ def test_enabled_m7_without_runtime_boundary_has_zero_tool_side_effects(
     assert len(tasks) == 1
     assert len(revisions) == 1
     assert len(calls) == 1
-    assert tasks[0].current_status == "FAILED"
-    assert tasks[0].error_code == "TOOL_UNAVAILABLE"
+    assert tasks[0].current_status == "READY"
+    assert tasks[0].error_code is None
     assert tasks[0].selected_tool_run_id is None
     assert tasks[0].selected_result_id is None
     with api_harness.engine.connect() as connection:
@@ -310,8 +571,8 @@ def test_injected_enabled_chat_service_is_disabled_without_complete_workflow(
         conversation_id = _create_conversation(client)
         response = _submit(client, conversation_id, "完整合法 Tool 请求")
 
-    assert response.status_code == 503
-    assert response.json()["error"]["code"] == "TOOL_UNAVAILABLE"
+    assert response.status_code == 200
+    assert response.json()["data"]["task"]["status"] == "READY"
     with api_harness.engine.connect() as connection:
         assert connection.scalar(text("SELECT count(*) FROM tool_run")) == 0
         assert connection.scalar(text("SELECT count(*) FROM asset")) == 0
@@ -321,7 +582,7 @@ def test_injected_enabled_chat_service_is_disabled_without_complete_workflow(
         ) == 0
 
 
-def test_solution_time_minutes_are_visible_only_as_committed_revision_on_503(
+def test_solution_time_minutes_are_visible_only_as_committed_ready_revision(
     api_harness,
 ) -> None:
     actor_id = "actor_local"
@@ -331,9 +592,9 @@ def test_solution_time_minutes_are_visible_only_as_committed_revision_on_503(
         conversation_id = _create_conversation(client)
         response = _submit(client, conversation_id, "solution_time = 180 min")
 
-    assert response.status_code == 503
+    assert response.status_code == 200
     _, _, revisions, _ = _rows(api_harness)
-    assert revisions[0].raw_input["parameters"]["solution_time"] == {
+    assert revisions[0].raw_input["solution_time"] == {
         "value": 180,
         "unit": "min",
     }
@@ -352,7 +613,7 @@ def test_timeout_provider_and_protocol_errors_use_safe_persisted_envelopes(
     scenarios = (
         ("Mock timeout", 504, "UPSTREAM_TIMEOUT"),
         ("Mock provider failure", 503, "CHAT_ORCHESTRATION_FAILED"),
-        ("Mock protocol failure", 502, "CHAT_ORCHESTRATION_FAILED"),
+        ("Mock protocol failure", 500, "AGENT_INTERNAL_ERROR"),
     )
     with api_harness.create_client(actor_id) as client:
         responses = []

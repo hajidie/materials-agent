@@ -30,7 +30,7 @@ function result(overrides: Partial<ResultSummary> = {}): ResultSummary {
     error: null,
     tool_id: "zta35g_sem_virtual_lab",
     tool_version: "private-version",
-    schema_version: "private-schema",
+    schema_hash: "f821240f782ce788bc723fd1acd02a2e58cedbf68b70b1414e2accd16d989d07",
     created_at: timestamp,
     ...overrides,
   };

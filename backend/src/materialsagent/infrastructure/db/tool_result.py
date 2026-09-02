@@ -61,8 +61,8 @@ class ToolResultRow(Base):
             name="ck_tool_result_tool_version_not_blank",
         ),
         CheckConstraint(
-            "length(btrim(schema_version)) > 0",
-            name="ck_tool_result_schema_version_not_blank",
+            "schema_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_tool_result_schema_hash_sha256",
         ),
         CheckConstraint(
             "status IN ('SUCCEEDED', 'PARTIALLY_SUCCEEDED', 'FAILED')",
@@ -150,7 +150,7 @@ class ToolResultRow(Base):
     )
     tool_id: Mapped[str] = mapped_column(Text, nullable=False)
     tool_version: Mapped[str] = mapped_column(Text, nullable=False)
-    schema_version: Mapped[str] = mapped_column(Text, nullable=False)
+    schema_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -218,7 +218,7 @@ def _result_from_row(row: ToolResultRow) -> ToolResult:
         error=None if row.error is None else dict(row.error),
         tool_id=row.tool_id,
         tool_version=row.tool_version,
-        schema_version=row.schema_version,
+        schema_hash=row.schema_hash,
         created_at=row.created_at,
     )
 
@@ -313,7 +313,7 @@ class SQLAlchemyToolResultRepository:
                     ),
                     tool_id=result.tool_id,
                     tool_version=result.tool_version,
-                    schema_version=result.schema_version,
+                    schema_hash=result.schema_hash,
                     created_at=result.created_at,
                 )
             )

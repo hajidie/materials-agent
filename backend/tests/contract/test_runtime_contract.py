@@ -205,6 +205,8 @@ def test_registry_is_only_version_source_and_unknown_tool_is_rejected() -> None:
 
     catalog = ToolCatalogService(registry).list_entries()
     assert len(catalog) == 1
+    assert catalog[0]["version"] == "1"
+    assert len(catalog[0]["schema_hash"]) == 64
     assert catalog[0]["tool_version"] == registered.metadata.tool_version
     assert catalog[0]["schema_version"] == registered.metadata.schema_version
     assert catalog[0]["material_scope"] == "ZTA35G"

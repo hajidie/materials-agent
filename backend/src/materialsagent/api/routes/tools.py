@@ -70,7 +70,7 @@ def _project_tool_run(
         "attempt_no": tool_run.attempt_no,
         "tool_id": tool_run.tool_id,
         "tool_version": tool_run.tool_version,
-        "schema_version": tool_run.schema_version,
+        "schema_hash": tool_run.schema_hash,
         "requested_outputs": list(tool_run.requested_outputs),
         "completed_outputs": list(tool_run.completed_outputs),
         "failed_outputs": list(tool_run.failed_outputs),

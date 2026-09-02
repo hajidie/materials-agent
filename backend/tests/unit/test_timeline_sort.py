@@ -25,6 +25,7 @@ from materialsagent.domain.models.task import Task
 from materialsagent.domain.models.task_input_revision import TaskInputRevision
 from materialsagent.domain.models.tool_result import ToolResult
 from materialsagent.domain.models.tool_run import ToolRun
+from materialsagent.domain.ports.tool_registry import ExecutionPolicy
 from materialsagent.domain.ports.timeline_query import (
     TimelineKey,
     TimelineQueryPage,
@@ -32,6 +33,7 @@ from materialsagent.domain.ports.timeline_query import (
 
 
 BASE = datetime(2026, 7, 24, 3, 0, tzinfo=timezone.utc)
+SCHEMA_HASH = "f821240f782ce788bc723fd1acd02a2e58cedbf68b70b1414e2accd16d989d07"
 
 
 def _conversation() -> Conversation:
@@ -334,7 +336,10 @@ def _terminal_run(
         attempt_no=attempt_no,
         tool_id="zta35g_sem_virtual_lab",
         tool_version="0.1.0",
-        schema_version="1.0",
+        schema_hash=SCHEMA_HASH,
+        normalized_input_snapshot={},
+        execution_policy_snapshot=ExecutionPolicy.ANY_TASK,
+        input_revision_no=1,
         execution_input={"private": "must-not-be-projected"},
         requested_outputs=["sem_image"],
         created_at=created_at,
@@ -384,7 +389,7 @@ def _selected_result(**overrides: object) -> ToolResult:
         "error": None,
         "tool_id": "zta35g_sem_virtual_lab",
         "tool_version": "0.1.0",
-        "schema_version": "1.0",
+        "schema_hash": SCHEMA_HASH,
         "created_at": BASE + timedelta(seconds=5),
     }
     values.update(overrides)

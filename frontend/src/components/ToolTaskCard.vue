@@ -46,6 +46,7 @@ const taskStatusBadges: Record<TaskStatus, string> = {
   PENDING: "生成中",
   RUNNING: "生成中",
   NEEDS_INPUT: "待补充",
+  READY: "待执行",
   SUCCEEDED: "已完成",
   PARTIALLY_SUCCEEDED: "部分完成",
   FAILED: "失败",
@@ -77,6 +78,7 @@ function statusTone(status: TaskStatus | ResultStatus): StatusTone {
     case "PARTIALLY_SUCCEEDED":
       return "partial";
     case "PENDING":
+    case "READY":
     case "RUNNING":
       return "pending";
     case "NEEDS_INPUT":
@@ -89,6 +91,7 @@ function statusTone(status: TaskStatus | ResultStatus): StatusTone {
 const isTaskActive = computed(
   () =>
     props.item.task.status === "PENDING" ||
+    props.item.task.status === "READY" ||
     props.item.task.status === "RUNNING",
 );
 

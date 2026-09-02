@@ -156,8 +156,8 @@ class TaskQueryService:
                 or selected_result.tool_id != selected_run.tool_id
                 or selected_result.tool_version
                 != selected_run.tool_version
-                or selected_result.schema_version
-                != selected_run.schema_version
+                or selected_result.schema_hash
+                != selected_run.schema_hash
             ):
                 raise ApplicationInternalError(task_id=task.task_id)
             if len(assets) != len(links):

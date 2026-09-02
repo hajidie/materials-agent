@@ -73,6 +73,9 @@ class PublicTaskSummary:
     completed_at: datetime | None
     error_code: str | None
     safe_error_message: str | None
+    tool_id: str | None = None
+    bound_tool_version: str | None = None
+    bound_schema_hash: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +84,7 @@ class PublicToolRunSummary:
     attempt_no: int
     tool_id: str
     tool_version: str
-    schema_version: str
+    schema_hash: str
     status: str
     requested_outputs: tuple[str, ...]
     completed_outputs: tuple[str, ...]
@@ -116,7 +119,7 @@ class PublicResultSummary:
     error: dict[str, object] | None
     tool_id: str
     tool_version: str
-    schema_version: str
+    schema_hash: str
     created_at: datetime
 
 
@@ -138,6 +141,7 @@ class NeedsInputSummary:
     missing_fields: tuple[str, ...]
     ambiguous_fields: tuple[dict[str, object], ...]
     normalized_input: dict[str, object] | None
+    candidate_tool_refs: tuple[dict[str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +206,9 @@ def _public_task(task: Task) -> PublicTaskSummary:
         completed_at=task.completed_at,
         error_code=task.error_code,
         safe_error_message=task.safe_error_message,
+        tool_id=task.tool_id,
+        bound_tool_version=task.bound_tool_version,
+        bound_schema_hash=task.bound_schema_hash,
     )
 
 
@@ -271,7 +278,7 @@ def project_tool_run(
         attempt_no=tool_run.attempt_no,
         tool_id=tool_run.tool_id,
         tool_version=tool_run.tool_version,
-        schema_version=tool_run.schema_version,
+        schema_hash=tool_run.schema_hash,
         status=tool_run.current_status,
         requested_outputs=tuple(tool_run.requested_outputs),
         completed_outputs=tuple(tool_run.completed_outputs),
@@ -317,7 +324,7 @@ def _public_result(result: ToolResult) -> PublicResultSummary:
         ),
         tool_id=result.tool_id,
         tool_version=result.tool_version,
-        schema_version=result.schema_version,
+        schema_hash=result.schema_hash,
         created_at=result.created_at,
     )
 
@@ -364,6 +371,9 @@ def _needs_input(
             None
             if latest.normalized_input is None
             else dict(latest.normalized_input)
+        ),
+        candidate_tool_refs=tuple(
+            dict(item) for item in latest.candidate_tool_refs
         ),
     )
 
@@ -698,8 +708,8 @@ class TimelineQueryService:
                     or selected_result.tool_id != selected_run.tool_id
                     or selected_result.tool_version
                     != selected_run.tool_version
-                    or selected_result.schema_version
-                    != selected_run.schema_version
+                    or selected_result.schema_hash
+                    != selected_run.schema_hash
                 ):
                     raise ApplicationInternalError(task_id=task.task_id)
 

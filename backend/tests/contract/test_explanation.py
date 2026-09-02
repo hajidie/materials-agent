@@ -59,7 +59,7 @@ def _input(*, with_performance: bool = True) -> ExplanationInput:
         },
         tool_id="zta35g_sem_virtual_lab",
         tool_version="0.1.0",
-        schema_version="1.0",
+        schema_hash="f821240f782ce788bc723fd1acd02a2e58cedbf68b70b1414e2accd16d989d07",
     )
 
 

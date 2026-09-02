@@ -43,7 +43,7 @@ def _prompt_digest(value: ExplanationInput) -> str:
         "process_parameters": _plain_json(value.process_parameters),
         "tool_id": value.tool_id,
         "tool_version": value.tool_version,
-        "schema_version": value.schema_version,
+        "schema_hash": value.schema_hash,
     }
     encoded = json.dumps(
         safe_value,

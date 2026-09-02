@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
-from typing import Literal
-
 import pytest
 from pydantic import SecretStr
 
+from materialsagent.application.tool_registry import ToolRegistry
+from materialsagent.application.zta35g_tool import build_zta35g_tool_definition
 from materialsagent.domain.ports.chat_orchestration import (
     ChatOrchestrationInput,
-    NeedsInputCandidate,
-    ToolCandidate,
+    ToolCandidateSet,
+)
+from materialsagent.domain.ports.tool_registry import (
+    NeedsInputNormalization,
+    ReadyNormalization,
 )
 from materialsagent.infrastructure.config import DeepSeekConfig
 
@@ -38,7 +41,12 @@ def _chat_input(content: str) -> ChatOrchestrationInput:
         conversation_id="conversation_harness_eval",
         request_id="request_harness_eval",
         content_text=content,
+        routing_catalog=_registry().routing_snapshot(),
     )
+
+
+def _registry() -> ToolRegistry:
+    return ToolRegistry((build_zta35g_tool_definition(),))
 
 
 class _FixtureReplayRunnable:
@@ -78,17 +86,16 @@ def test_provider_visible_messages_define_output_and_missing_material_semantics(
     assert [message["role"] for message in messages] == ["system", "user"]
     system = messages[0]["content"]
     for semantic_anchor in (
-        "ordinary user language",
-        "yield strength",
-        "elongation",
-        "user-requested deliverables",
-        "intermediate SEM",
-        "explicit exclusions",
-        "Include both",
-        "NEEDS_INPUT",
-        "Do not infer ZTA35G",
-        '"material":null',
-        '"missing_fields":["material"]',
+        "routing catalog",
+        "KNOWLEDGE_ANSWER",
+        "TOOL_CANDIDATES",
+        "one to five unique candidates",
+        "Preserve missing values as null",
+        "Never return task status",
+        "zta35g_sem_virtual_lab",
+        "solution_temperature",
+        '"additionalProperties":false',
+        "schema_hash",
     ):
         assert semantic_anchor in system
     assert messages[1]["content"] == "自然语言样例输入"
@@ -97,7 +104,6 @@ def test_provider_visible_messages_define_output_and_missing_material_semantics(
 @pytest.mark.parametrize(
     (
         "user_text",
-        "route",
         "material",
         "requested_outputs",
         "parameters",
@@ -106,7 +112,6 @@ def test_provider_visible_messages_define_output_and_missing_material_semantics(
     [
         (
             "对ZTA35G按固溶1000°C 3h、时效730°C 3h生成一张SEM图，只要图像。",
-            "TOOL_EXECUTION",
             "ZTA35G",
             ("sem_image",),
             _COMPLETE_PARAMETERS,
@@ -114,7 +119,6 @@ def test_provider_visible_messages_define_output_and_missing_material_semantics(
         ),
         (
             "对ZTA35G用固溶1000°C 3h、时效730°C 3h预测屈服强度和延伸率，只要性能数据。",
-            "TOOL_EXECUTION",
             "ZTA35G",
             ("mechanical_properties",),
             _COMPLETE_PARAMETERS,
@@ -122,7 +126,6 @@ def test_provider_visible_messages_define_output_and_missing_material_semantics(
         ),
         (
             "对ZTA35G按固溶1000°C 3h、时效730°C 3h同时生成SEM图像，并预测屈服强度和延伸率。",
-            "TOOL_EXECUTION",
             "ZTA35G",
             ("sem_image", "mechanical_properties"),
             _COMPLETE_PARAMETERS,
@@ -130,7 +133,6 @@ def test_provider_visible_messages_define_output_and_missing_material_semantics(
         ),
         (
             "这块ZTA35G经1000°C固溶3小时、730°C时效3小时后组织长什么样？顺便告诉我有多强、还能拉伸多少。",
-            "TOOL_EXECUTION",
             "ZTA35G",
             ("sem_image", "mechanical_properties"),
             _COMPLETE_PARAMETERS,
@@ -138,7 +140,6 @@ def test_provider_visible_messages_define_output_and_missing_material_semantics(
         ),
         (
             "ZTA35G固溶1000°C 3h、时效730°C 3h，只看显微组织，别做强度和塑性预测。",
-            "TOOL_EXECUTION",
             "ZTA35G",
             ("sem_image",),
             _COMPLETE_PARAMETERS,
@@ -146,7 +147,6 @@ def test_provider_visible_messages_define_output_and_missing_material_semantics(
         ),
         (
             "ZTA35G固溶1000°C 3h、时效730°C 3h，只给屈服强度和延伸率，SEM仅作内部步骤，不要交付图像。",
-            "TOOL_EXECUTION",
             "ZTA35G",
             ("mechanical_properties",),
             _COMPLETE_PARAMETERS,
@@ -154,7 +154,6 @@ def test_provider_visible_messages_define_output_and_missing_material_semantics(
         ),
         (
             "ZTA35G固溶1000°C 3h、时效730°C后，生成显微组织图并给出屈服强度和延伸率。",
-            "NEEDS_INPUT",
             "ZTA35G",
             ("sem_image", "mechanical_properties"),
             {
@@ -167,7 +166,6 @@ def test_provider_visible_messages_define_output_and_missing_material_semantics(
         ),
         (
             "这个材料固溶1000°C 3h、时效730°C 3h后，生成显微组织图并给出屈服强度和延伸率。",
-            "NEEDS_INPUT",
             None,
             ("sem_image", "mechanical_properties"),
             _COMPLETE_PARAMETERS,
@@ -187,7 +185,6 @@ def test_provider_visible_messages_define_output_and_missing_material_semantics(
 )
 def test_offline_adapter_contract_maps_fixture_payload_once(
     user_text: str,
-    route: Literal["TOOL_EXECUTION", "NEEDS_INPUT"],
     material: str | None,
     requested_outputs: tuple[str, ...],
     parameters: dict[str, object],
@@ -198,20 +195,18 @@ def test_offline_adapter_contract_maps_fixture_payload_once(
     )
 
     payload: dict[str, object] = {
-        "route": route,
-        "tool_id": "zta35g_sem_virtual_lab",
-        "material": material,
-        "candidate_parameters": parameters,
-        "requested_outputs": list(requested_outputs),
-    }
-    if route == "NEEDS_INPUT":
-        payload.update(
+        "route": "TOOL_CANDIDATES",
+        "candidates": [
             {
-                "missing_fields": list(missing_fields),
-                "ambiguous_fields": [],
-                "follow_up_suggestion": "请补充缺失信息。",
-            }
-        )
+                "tool_id": "zta35g_sem_virtual_lab",
+                "candidate_input": {
+                    "material": material,
+                    **parameters,
+                    "requested_outputs": list(requested_outputs),
+                },
+            },
+        ],
+    }
     runnable = _FixtureReplayRunnable(user_text, payload)
 
     outcome = DeepSeekChatAdapter(
@@ -219,10 +214,52 @@ def test_offline_adapter_contract_maps_fixture_payload_once(
         structured_runnable=runnable,
     ).orchestrate(_chat_input(user_text))
 
-    expected_type = NeedsInputCandidate if missing_fields else ToolCandidate
-    assert isinstance(outcome.result, expected_type)
-    assert outcome.result.requested_outputs == requested_outputs
-    if isinstance(outcome.result, NeedsInputCandidate):
-        assert outcome.result.missing_fields == missing_fields
-        assert outcome.result.material == material
+    assert isinstance(outcome.result, ToolCandidateSet)
+    assert len(outcome.result.candidates) == 1
+    candidate_input = outcome.result.candidates[0].candidate_input
+    assert candidate_input["requested_outputs"] == requested_outputs
+    assert candidate_input["material"] == material
+    snapshot = _chat_input(user_text).routing_catalog
+    definition = _registry().resolve(
+        outcome.result.candidates[0].tool_id,
+        snapshot=snapshot,
+    )
+    normalized = definition.normalize(candidate_input, prior_normalized_input=None)
+    assert isinstance(
+        normalized,
+        NeedsInputNormalization if missing_fields else ReadyNormalization,
+    )
+    assert tuple(
+        key for key, value in parameters.items() if value is None
+    ) == missing_fields or missing_fields == ("material",)
     assert runnable.call_count == 1
+
+
+def test_legacy_nested_candidate_parameters_cannot_pass_real_tool_normalizer() -> None:
+    from materialsagent.infrastructure.llm.deepseek_chat import DeepSeekChatAdapter
+
+    payload = {
+        "route": "TOOL_CANDIDATES",
+        "candidates": [
+            {
+                "tool_id": "zta35g_sem_virtual_lab",
+                "candidate_input": {
+                    "material": "ZTA35G",
+                    "candidate_parameters": _COMPLETE_PARAMETERS,
+                    "requested_outputs": ["sem_image"],
+                },
+            }
+        ],
+    }
+    outcome = DeepSeekChatAdapter(
+        _config(),
+        structured_runnable=_FixtureReplayRunnable("legacy", payload),
+    ).orchestrate(_chat_input("legacy"))
+    proposal = outcome.result.candidates[0]
+    definition = _registry().resolve(
+        proposal.tool_id,
+        snapshot=_chat_input("legacy").routing_catalog,
+    )
+
+    with pytest.raises(ValueError):
+        definition.normalize(proposal.candidate_input, prior_normalized_input=None)

@@ -28,7 +28,9 @@ M4_REVISION = "0004_llm_call"
 M5_REVISION = "0005_tool_run"
 IMMEDIATE_PREVIOUS_REVISION = "0006_asset"
 M8_REVISION = "0008_idempotency_record"
-EXPECTED_REVISION = "0009_timeline_query_indexes"
+M9_REVISION = "0009_timeline_query_indexes"
+M10_REVISION = "0010_registry_routing_state"
+EXPECTED_REVISION = "0011_tool_run_provenance"
 ALEMBIC_INI = Path(__file__).resolve().parents[3] / "alembic.ini"
 NEW_TASK_TIME_CHECKS = {
     "ck_task_started_at_not_before_created_at",
@@ -250,6 +252,9 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "actor_id",
                 "task_type",
                 "current_status",
+                "tool_id",
+                "bound_tool_version",
+                "bound_schema_hash",
                 "selected_tool_run_id",
                 "selected_result_id",
                 "created_at",
@@ -284,6 +289,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "missing_fields",
                 "ambiguous_fields",
                 "validation_errors",
+                "candidate_tool_refs",
                 "created_at",
             },
             "llm_call": {
@@ -298,6 +304,9 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "prompt_template_id",
                 "prompt_template_version",
                 "prompt_digest",
+                "catalog_snapshot_refs",
+                "catalog_hash",
+                "tool_context_ref",
                 "generation_parameters",
                 "structured_output_summary",
                 "usage",
@@ -315,10 +324,13 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "task_id",
                 "request_id",
                 "task_input_revision_id",
+                "input_revision_no",
                 "attempt_no",
                 "tool_id",
                 "tool_version",
-                "schema_version",
+                "schema_hash",
+                "normalized_input_snapshot",
+                "execution_policy_snapshot",
                 "requested_outputs",
                 "completed_outputs",
                 "failed_outputs",
@@ -378,7 +390,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "error",
                 "tool_id",
                 "tool_version",
-                "schema_version",
+                "schema_hash",
                 "created_at",
             },
             "result_asset_link": {
@@ -421,6 +433,9 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             "completed_at",
             "error_code",
             "safe_error_message",
+            "tool_id",
+            "bound_tool_version",
+            "bound_schema_hash",
         }:
             assert task_columns[nullable_name]["nullable"] is True
         for timestamp_name in {
@@ -471,6 +486,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             assert isinstance(tool_run_columns[array_name]["type"], ARRAY)
         for jsonb_name in {
             "execution_input",
+            "normalized_input_snapshot",
             "actual_runtime_parameters",
             "diagnostics",
             "output_summary",
@@ -564,6 +580,10 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "ck_task_completed_at_not_before_started_at",
                 "ck_task_conversation_id_not_blank",
                 "ck_task_current_status_allowed",
+                "ck_task_tool_binding_all_or_none",
+                "ck_task_tool_id_not_blank",
+                "ck_task_bound_tool_version_not_blank",
+                "ck_task_bound_schema_hash_sha256",
                 "ck_task_selected_result_id_not_blank",
                 "ck_task_selected_result_requires_tool_run",
                 "ck_task_selected_tool_run_id_not_blank",
@@ -589,6 +609,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             },
             "task_input_revision": {
                 "ck_task_input_revision_ambiguous_fields_array",
+                "ck_task_input_revision_candidate_tool_refs_array",
                 "ck_task_input_revision_normalized_input_object",
                 "ck_task_input_revision_raw_input_object",
                 "ck_task_input_revision_request_id_not_blank",
@@ -601,6 +622,8 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             },
             "llm_call": {
                 "ck_llm_call_completed_not_before_started",
+                "ck_llm_call_catalog_hash_sha256",
+                "ck_llm_call_catalog_snapshot_refs_array",
                 "ck_llm_call_conversation_id_not_blank",
                 "ck_llm_call_duration_nonnegative",
                 "ck_llm_call_error_code_not_blank",
@@ -624,6 +647,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "ck_llm_call_structured_output_summary_object",
                 "ck_llm_call_succeeded_without_error",
                 "ck_llm_call_task_id_not_blank",
+                "ck_llm_call_tool_context_ref_object",
                 "ck_llm_call_usage_object",
             },
             "tool_run": {
@@ -634,10 +658,13 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "ck_tool_run_duration_nonnegative",
                 "ck_tool_run_error_code_not_blank",
                 "ck_tool_run_execution_input_object",
+                "ck_tool_run_execution_policy_snapshot_allowed",
                 "ck_tool_run_failed_shape",
                 "ck_tool_run_failed_subset",
                 "ck_tool_run_id_not_blank",
+                "ck_tool_run_input_revision_no_positive",
                 "ck_tool_run_model_bundle_not_blank",
+                "ck_tool_run_normalized_input_snapshot_object",
                 "ck_tool_run_output_sets_disjoint",
                 "ck_tool_run_output_summary_object",
                 "ck_tool_run_request_id_not_blank",
@@ -645,7 +672,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "ck_tool_run_revision_id_not_blank",
                 "ck_tool_run_runtime_parameters_object",
                 "ck_tool_run_safe_error_not_blank",
-                "ck_tool_run_schema_version_not_blank",
+                "ck_tool_run_schema_hash_sha256",
                 "ck_tool_run_started_not_before_created",
                 "ck_tool_run_status_allowed",
                 "ck_tool_run_status_time_shape",
@@ -681,6 +708,23 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "ck_asset_type_sem_image",
                 "ck_asset_width_positive",
             },
+            "tool_result": {
+                "ck_tool_result_actor_id_not_blank",
+                "ck_tool_result_data_object",
+                "ck_tool_result_error_object",
+                "ck_tool_result_id_not_blank",
+                "ck_tool_result_output_sets",
+                "ck_tool_result_provenance_object",
+                "ck_tool_result_requested_nonempty",
+                "ck_tool_result_schema_hash_sha256",
+                "ck_tool_result_status_allowed",
+                "ck_tool_result_status_shape",
+                "ck_tool_result_task_id_not_blank",
+                "ck_tool_result_tool_id_not_blank",
+                "ck_tool_result_tool_run_id_not_blank",
+                "ck_tool_result_tool_version_not_blank",
+                "ck_tool_result_warnings_array",
+            },
         }
         for table_name, expected_names in expected_check_names.items():
             constraints = inspector.get_check_constraints(table_name)
@@ -694,6 +738,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             "PENDING",
             "RUNNING",
             "NEEDS_INPUT",
+            "READY",
             "SUCCEEDED",
             "PARTIALLY_SUCCEEDED",
             "FAILED",
@@ -1004,53 +1049,163 @@ def test_m7_result_and_explanation_migration_round_trip(
     command.upgrade(config, "0006_asset")
     historical_engine = create_engine_from_settings(temporary_database)
     try:
-        from backend.tests.integration.db.test_result_commit import _seed
-
-        receipt, assets = _seed(
-            historical_engine,
-            requested=("sem_image",),
-            completed=("sem_image",),
-            failed=(),
-        )
+        created_at = datetime(2026, 7, 23, 1, 0, tzinfo=timezone.utc)
+        with historical_engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO actor (actor_id, actor_origin, created_at) "
+                    "VALUES ('actor_1', 'LOCAL_ANONYMOUS', :created_at)"
+                ),
+                {"created_at": created_at},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO conversation (conversation_id, actor_id, title, "
+                    "created_at, updated_at) VALUES ('conversation_1', 'actor_1', "
+                    "NULL, :created_at, :created_at)"
+                ),
+                {"created_at": created_at},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO task (task_id, conversation_id, actor_id, "
+                    "task_type, current_status, selected_tool_run_id, "
+                    "selected_result_id, created_at, started_at, updated_at, "
+                    "completed_at, error_code, safe_error_message) VALUES "
+                    "('task_1', 'conversation_1', 'actor_1', 'TOOL_EXECUTION', "
+                    "'RUNNING', NULL, NULL, :created_at, :created_at, "
+                    ":created_at, NULL, NULL, NULL)"
+                ),
+                {"created_at": created_at},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO task_input_revision (task_input_revision_id, "
+                    "task_id, request_id, source_llm_call_id, source_message_ids, "
+                    "revision, raw_input, normalized_input, missing_fields, "
+                    "ambiguous_fields, validation_errors, created_at) VALUES "
+                    "('revision_1', 'task_1', 'request_1', NULL, "
+                    "ARRAY['message_1'], 1, '{}'::jsonb, "
+                    "'{\"material\":\"ZTA35G\"}'::jsonb, ARRAY[]::text[], "
+                    "'[]'::jsonb, '[]'::jsonb, :created_at)"
+                ),
+                {"created_at": created_at},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO tool_run (tool_run_id, task_id, request_id, "
+                    "task_input_revision_id, attempt_no, tool_id, tool_version, "
+                    "schema_version, requested_outputs, completed_outputs, "
+                    "failed_outputs, execution_input, actual_runtime_parameters, "
+                    "diagnostics, output_summary, current_status, model_bundle_id, "
+                    "created_at, started_at, completed_at, duration_ms, error_code, "
+                    "safe_error_message) VALUES ('tool_run_1', 'task_1', "
+                    "'request_1', 'revision_1', 1, 'zta35g_sem_virtual_lab', "
+                    "'0.1.0', '1.0', ARRAY['sem_image'], ARRAY['sem_image'], "
+                    "ARRAY[]::text[], '{}'::jsonb, '{}'::jsonb, '[]'::jsonb, "
+                    "'{}'::jsonb, 'SUCCEEDED', NULL, :created_at, :started_at, "
+                    ":completed_at, 1000, NULL, NULL)"
+                ),
+                {
+                    "created_at": created_at,
+                    "started_at": created_at + timedelta(seconds=1),
+                    "completed_at": created_at + timedelta(seconds=2),
+                },
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO asset (asset_id, task_id, producer_tool_run_id, "
+                    "actor_id, operation_id, current_status, asset_type, source_type, "
+                    "role, object_key, media_type, width, height, bit_depth, sha256, "
+                    "size_bytes, encoding_rule, pending_since, created_at, "
+                    "available_at, failed_at, orphaned_at, error_code, "
+                    "safe_error_message, orphan_reason, orphan_details) VALUES "
+                    "('asset_1', 'task_1', 'tool_run_1', 'actor_1', "
+                    "'operation_1', 'AVAILABLE', 'sem_image', 'GENERATED', "
+                    "'requested_output', 'assets/test/asset_1.png', 'image/png', "
+                    "512, 512, 8, :sha256, 1480, 'linear-png', :created_at, "
+                    ":created_at, :available_at, NULL, NULL, NULL, NULL, NULL, NULL)"
+                ),
+                {
+                    "sha256": "c" * 64,
+                    "created_at": created_at,
+                    "available_at": created_at + timedelta(seconds=3),
+                },
+            )
     finally:
         historical_engine.dispose()
 
     command.upgrade(config, "0007_tool_result_explanation")
     engine = create_engine_from_settings(temporary_database)
     try:
-        from backend.tests.integration.db.test_result_commit import (
-            ACTOR,
-            BASE,
-            _factory,
-        )
-        from materialsagent.application.explanation_service import (
-            ExplanationService,
-        )
-        from materialsagent.application.result_service import ResultService
-        from materialsagent.infrastructure.llm.mock_explanation import (
-            MockExplanationAdapter,
-        )
-
-        result = ResultService(
-            _factory(engine),
-            clock=lambda: BASE + timedelta(seconds=5),
-            id_factory=lambda: "result_migration_1",
-        ).commit_result(
-            ACTOR,
-            receipt=receipt,
-            assets=assets,
-        )
-        explanation = ExplanationService(
-            _factory(engine),
-            MockExplanationAdapter(mode="success"),
-            clock=lambda: BASE + timedelta(seconds=6),
-            explanation_id_factory=lambda: "explanation_migration_1",
-            llm_call_id_factory=lambda: "llm_explanation_migration_1",
-        ).explain(
-            ACTOR,
-            result_id=result.result_id,
-        )
-        assert explanation.status == "SUCCEEDED"
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO tool_result (result_id, task_id, tool_run_id, "
+                    "actor_id, status, requested_outputs, completed_outputs, "
+                    "failed_outputs, data, warnings, provenance, error, tool_id, "
+                    "tool_version, schema_version, created_at) VALUES "
+                    "('result_migration_1', 'task_1', 'tool_run_1', 'actor_1', "
+                    "'SUCCEEDED', ARRAY['sem_image'], ARRAY['sem_image'], "
+                    "ARRAY[]::text[], '{}'::jsonb, '[]'::jsonb, '{}'::jsonb, NULL, "
+                    "'zta35g_sem_virtual_lab', '0.1.0', '1.0', :created_at)"
+                ),
+                {"created_at": created_at + timedelta(seconds=4)},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO result_asset_link (result_id, asset_id, "
+                    "artifact_order, created_at) VALUES ('result_migration_1', "
+                    "'asset_1', 0, :created_at)"
+                ),
+                {"created_at": created_at + timedelta(seconds=4)},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO llm_call (llm_call_id, task_id, conversation_id, "
+                    "request_id, purpose, input_result_id, provider, model_name, "
+                    "prompt_template_id, prompt_template_version, prompt_digest, "
+                    "generation_parameters, structured_output_summary, usage, "
+                    "provider_request_id, status, created_at, started_at, "
+                    "completed_at, duration_ms, error_code, safe_error_message) "
+                    "VALUES ('llm_explanation_migration_1', 'task_1', "
+                    "'conversation_1', 'request_explanation_1', "
+                    "'TOOL_RESULT_EXPLANATION', 'result_migration_1', 'mock', "
+                    "'mock-v1', 'tool-result-explanation', '1', :digest, "
+                    "'{}'::jsonb, NULL, NULL, NULL, 'SUCCEEDED', :created_at, "
+                    ":started_at, :completed_at, 1000, NULL, NULL)"
+                ),
+                {
+                    "digest": "d" * 64,
+                    "created_at": created_at + timedelta(seconds=4),
+                    "started_at": created_at + timedelta(seconds=5),
+                    "completed_at": created_at + timedelta(seconds=6),
+                },
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO natural_language_explanation (explanation_id, "
+                    "task_id, result_id, llm_call_id, attempt_no, status, language, "
+                    "text, created_at, started_at, completed_at, duration_ms, "
+                    "error_code, safe_error_message) VALUES "
+                    "('explanation_migration_1', 'task_1', 'result_migration_1', "
+                    "'llm_explanation_migration_1', 1, 'SUCCEEDED', 'zh-CN', "
+                    "'Migration preserved explanation.', :created_at, :started_at, "
+                    ":completed_at, 1000, NULL, NULL)"
+                ),
+                {
+                    "created_at": created_at + timedelta(seconds=4),
+                    "started_at": created_at + timedelta(seconds=5),
+                    "completed_at": created_at + timedelta(seconds=6),
+                },
+            )
+            connection.execute(
+                text(
+                    "UPDATE task SET selected_tool_run_id = 'tool_run_1', "
+                    "selected_result_id = 'result_migration_1' "
+                    "WHERE task_id = 'task_1'"
+                )
+            )
 
         inspector = inspect(engine)
         assert {
@@ -1499,3 +1654,579 @@ def test_m9_timeline_indexes_round_trip_without_changing_rows(
 
     command.upgrade(config, "head")
     assert _current_revision(temporary_database) == EXPECTED_REVISION
+
+
+def _seed_m10_run_for_m11(
+    connection: Connection,
+    *,
+    suffix: str,
+    tool_id: str,
+    run_schema_version: str = "1.0",
+    result_schema_version: str | None = None,
+) -> None:
+    created_at = datetime(2026, 9, 2, 7, 0, tzinfo=timezone.utc)
+    schema_hash = "f821240f782ce788bc723fd1acd02a2e58cedbf68b70b1414e2accd16d989d07"
+    connection.execute(
+        text(
+            "INSERT INTO actor (actor_id, actor_origin, created_at) "
+            "VALUES (:actor_id, 'LOCAL_ANONYMOUS', :created_at)"
+        ),
+        {"actor_id": f"actor_{suffix}", "created_at": created_at},
+    )
+    connection.execute(
+        text(
+            "INSERT INTO conversation (conversation_id, actor_id, title, "
+            "created_at, updated_at) VALUES (:conversation_id, :actor_id, "
+            "NULL, :created_at, :created_at)"
+        ),
+        {
+            "conversation_id": f"conversation_{suffix}",
+            "actor_id": f"actor_{suffix}",
+            "created_at": created_at,
+        },
+    )
+    connection.execute(
+        text(
+            "INSERT INTO task (task_id, conversation_id, actor_id, task_type, "
+            "current_status, selected_tool_run_id, selected_result_id, created_at, "
+            "started_at, updated_at, completed_at, error_code, safe_error_message, "
+            "tool_id, bound_tool_version, bound_schema_hash) VALUES (:task_id, "
+            ":conversation_id, :actor_id, 'TOOL_EXECUTION', 'PENDING', NULL, NULL, "
+            ":created_at, NULL, :created_at, NULL, NULL, NULL, "
+            "'zta35g_sem_virtual_lab', '1', :schema_hash)"
+        ),
+        {
+            "task_id": f"task_{suffix}",
+            "conversation_id": f"conversation_{suffix}",
+            "actor_id": f"actor_{suffix}",
+            "created_at": created_at,
+            "schema_hash": schema_hash,
+        },
+    )
+    connection.execute(
+        text(
+            "INSERT INTO task_input_revision (task_input_revision_id, task_id, "
+            "request_id, source_llm_call_id, source_message_ids, revision, raw_input, "
+            "normalized_input, missing_fields, ambiguous_fields, validation_errors, "
+            "created_at, candidate_tool_refs) VALUES (:revision_id, :task_id, "
+            ":request_id, NULL, ARRAY[CAST(:message_id AS text)], 1, '{}'::jsonb, "
+            "'{\"material\":\"ZTA35G\"}'::jsonb, ARRAY[]::text[], '[]'::jsonb, "
+            "'[]'::jsonb, :created_at, '[]'::jsonb)"
+        ),
+        {
+            "revision_id": f"revision_{suffix}",
+            "task_id": f"task_{suffix}",
+            "request_id": f"request_{suffix}",
+            "message_id": f"message_{suffix}",
+            "created_at": created_at,
+        },
+    )
+    connection.execute(
+        text(
+            "INSERT INTO tool_run (tool_run_id, task_id, request_id, "
+            "task_input_revision_id, attempt_no, tool_id, tool_version, "
+            "schema_version, requested_outputs, completed_outputs, failed_outputs, "
+            "execution_input, actual_runtime_parameters, diagnostics, output_summary, "
+            "current_status, model_bundle_id, created_at, started_at, completed_at, "
+            "duration_ms, error_code, safe_error_message) VALUES (:run_id, :task_id, "
+            ":request_id, :revision_id, 1, :tool_id, '0.1.0', :schema_version, "
+            "ARRAY['sem_image'], ARRAY['sem_image'], ARRAY[]::text[], "
+            "'{\"runtime_parameters\":{\"seed\":101}}'::jsonb, '{}'::jsonb, "
+            "'[]'::jsonb, '{}'::jsonb, 'SUCCEEDED', NULL, :created_at, "
+            ":started_at, :completed_at, 1000, NULL, NULL)"
+        ),
+        {
+            "run_id": f"run_{suffix}",
+            "task_id": f"task_{suffix}",
+            "request_id": f"request_{suffix}",
+            "revision_id": f"revision_{suffix}",
+            "tool_id": tool_id,
+            "schema_version": run_schema_version,
+            "created_at": created_at,
+            "started_at": created_at + timedelta(seconds=1),
+            "completed_at": created_at + timedelta(seconds=2),
+        },
+    )
+    if result_schema_version is not None:
+        connection.execute(
+            text(
+                "INSERT INTO tool_result (result_id, task_id, tool_run_id, actor_id, "
+                "status, requested_outputs, completed_outputs, failed_outputs, data, "
+                "warnings, provenance, error, tool_id, tool_version, schema_version, "
+                "created_at) VALUES (:result_id, :task_id, :run_id, :actor_id, "
+                "'SUCCEEDED', ARRAY['sem_image'], ARRAY['sem_image'], "
+                "ARRAY[]::text[], '{}'::jsonb, '[]'::jsonb, '{}'::jsonb, NULL, "
+                ":tool_id, '0.1.0', :schema_version, :created_at)"
+            ),
+            {
+                "result_id": f"result_{suffix}",
+                "task_id": f"task_{suffix}",
+                "run_id": f"run_{suffix}",
+                "actor_id": f"actor_{suffix}",
+                "tool_id": tool_id,
+                "schema_version": result_schema_version,
+                "created_at": created_at + timedelta(seconds=2),
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    (
+        "suffix",
+        "tool_id",
+        "run_schema_version",
+        "result_schema_version",
+        "message",
+    ),
+    [
+        (
+            "m11_unknown",
+            "unknown_tool",
+            "1.0",
+            None,
+            "unknown Tool IDs",
+        ),
+        (
+            "m11_unknown_schema",
+            "zta35g_sem_virtual_lab",
+            "2.0",
+            None,
+            "unknown historical ZTA schema versions",
+        ),
+        (
+            "m11_conflict",
+            "zta35g_sem_virtual_lab",
+            "1.0",
+            "2.0",
+            "ToolRun and ToolResult provenance conflict",
+        ),
+    ],
+)
+def test_m11_aborts_on_unknown_or_conflicting_historical_provenance(
+    temporary_database: AppSettings,
+    suffix: str,
+    tool_id: str,
+    run_schema_version: str,
+    result_schema_version: str | None,
+    message: str,
+) -> None:
+    config = _make_alembic_config(temporary_database)
+    command.upgrade(config, M10_REVISION)
+    engine = create_engine_from_settings(temporary_database)
+    try:
+        with engine.begin() as connection:
+            _seed_m10_run_for_m11(
+                connection,
+                suffix=suffix,
+                tool_id=tool_id,
+                run_schema_version=run_schema_version,
+                result_schema_version=result_schema_version,
+            )
+    finally:
+        engine.dispose()
+
+    with pytest.raises(RuntimeError, match=message):
+        command.upgrade(config, "head")
+    assert _current_revision(temporary_database) == M10_REVISION
+
+
+def test_m11_allows_empty_object_execution_snapshots(
+    temporary_database: AppSettings,
+) -> None:
+    config = _make_alembic_config(temporary_database)
+    command.upgrade(config, M10_REVISION)
+    engine = create_engine_from_settings(temporary_database)
+    try:
+        with engine.begin() as connection:
+            _seed_m10_run_for_m11(
+                connection,
+                suffix="m11_empty_snapshot",
+                tool_id="zta35g_sem_virtual_lab",
+            )
+            connection.execute(
+                text(
+                    "UPDATE task_input_revision SET normalized_input = '{}'::jsonb "
+                    "WHERE task_input_revision_id = "
+                    "'revision_m11_empty_snapshot'"
+                )
+            )
+            connection.execute(
+                text(
+                    "UPDATE tool_run SET execution_input = '{}'::jsonb "
+                    "WHERE tool_run_id = 'run_m11_empty_snapshot'"
+                )
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    upgraded = create_engine_from_settings(temporary_database)
+    try:
+        with upgraded.connect() as connection:
+            snapshots = connection.execute(
+                text(
+                    "SELECT normalized_input_snapshot, execution_input "
+                    "FROM tool_run WHERE tool_run_id = "
+                    "'run_m11_empty_snapshot'"
+                )
+            ).mappings().one()
+            assert snapshots == {
+                "normalized_input_snapshot": {},
+                "execution_input": {},
+            }
+    finally:
+        upgraded.dispose()
+
+
+def test_m11_downgrade_refuses_unknown_tool_ids(
+    temporary_database: AppSettings,
+) -> None:
+    config = _make_alembic_config(temporary_database)
+    command.upgrade(config, M10_REVISION)
+    engine = create_engine_from_settings(temporary_database)
+    try:
+        with engine.begin() as connection:
+            _seed_m10_run_for_m11(
+                connection,
+                suffix="m11_downgrade",
+                tool_id="zta35g_sem_virtual_lab",
+            )
+    finally:
+        engine.dispose()
+    command.upgrade(config, "head")
+    upgraded = create_engine_from_settings(temporary_database)
+    try:
+        with upgraded.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE tool_run SET tool_id = 'unknown_tool' "
+                    "WHERE tool_run_id = 'run_m11_downgrade'"
+                )
+            )
+    finally:
+        upgraded.dispose()
+
+    with pytest.raises(RuntimeError, match="unknown Tool IDs"):
+        command.downgrade(config, M10_REVISION)
+    assert _current_revision(temporary_database) == EXPECTED_REVISION
+
+
+def test_m10_backfills_only_known_zta_tasks_and_refuses_ready_downgrade(
+    temporary_database: AppSettings,
+) -> None:
+    config = _make_alembic_config(temporary_database)
+    command.upgrade(config, M9_REVISION)
+    engine = create_engine_from_settings(temporary_database)
+    created_at = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO actor (actor_id, actor_origin, created_at) "
+                    "VALUES ('actor_m10', 'LOCAL_ANONYMOUS', :created_at)"
+                ),
+                {"created_at": created_at},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO conversation ("
+                    "conversation_id, actor_id, title, created_at, updated_at"
+                    ") VALUES ('conversation_m10', 'actor_m10', NULL, "
+                    ":created_at, :created_at)"
+                ),
+                {"created_at": created_at},
+            )
+            for task_id, task_type in (
+                ("task_m10_tool", "TOOL_EXECUTION"),
+                ("task_m10_knowledge", "KNOWLEDGE_QA"),
+            ):
+                connection.execute(
+                    text(
+                        "INSERT INTO task ("
+                        "task_id, conversation_id, actor_id, task_type, "
+                        "current_status, selected_tool_run_id, "
+                        "selected_result_id, created_at, started_at, "
+                        "updated_at, completed_at, error_code, safe_error_message"
+                        ") VALUES (:task_id, 'conversation_m10', 'actor_m10', "
+                        ":task_type, 'PENDING', NULL, NULL, :created_at, NULL, "
+                        ":created_at, NULL, NULL, NULL)"
+                    ),
+                    {"task_id": task_id, "task_type": task_type, "created_at": created_at},
+                )
+            connection.execute(
+                text(
+                    "INSERT INTO task_input_revision ("
+                    "task_input_revision_id, task_id, request_id, "
+                    "source_llm_call_id, source_message_ids, revision, raw_input, "
+                    "normalized_input, missing_fields, ambiguous_fields, "
+                    "validation_errors, created_at"
+                    ") VALUES ('revision_m10', 'task_m10_tool', 'request_m10', "
+                    "NULL, ARRAY['message_m10'], 1, '{}'::jsonb, "
+                    "'{\"material\":\"ZTA35G\"}'::jsonb, "
+                    "ARRAY[]::text[], '[]'::jsonb, '[]'::jsonb, :created_at)"
+                ),
+                {"created_at": created_at},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO tool_run ("
+                    "tool_run_id, task_id, request_id, task_input_revision_id, "
+                    "attempt_no, tool_id, tool_version, schema_version, "
+                    "requested_outputs, completed_outputs, failed_outputs, "
+                    "execution_input, actual_runtime_parameters, diagnostics, "
+                    "output_summary, current_status, model_bundle_id, created_at, "
+                    "started_at, completed_at, duration_ms, error_code, safe_error_message"
+                    ") VALUES ('run_m10', 'task_m10_tool', 'request_m10', "
+                    "'revision_m10', 1, 'zta35g_sem_virtual_lab', '0.1.0', '1.0', "
+                    "ARRAY['sem_image'], ARRAY['sem_image'], ARRAY[]::text[], "
+                    "'{\"runtime_parameters\":{\"seed\":101}}'::jsonb, "
+                    "'{}'::jsonb, '[]'::jsonb, '{}'::jsonb, "
+                    "'SUCCEEDED', NULL, :created_at, :started_at, :completed_at, "
+                    "1000, NULL, NULL)"
+                ),
+                {
+                    "created_at": created_at,
+                    "started_at": created_at + timedelta(seconds=1),
+                    "completed_at": created_at + timedelta(seconds=2),
+                },
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO tool_result ("
+                    "result_id, task_id, tool_run_id, actor_id, status, "
+                    "requested_outputs, completed_outputs, failed_outputs, data, "
+                    "warnings, provenance, error, tool_id, tool_version, "
+                    "schema_version, created_at"
+                    ") VALUES ('result_m10', 'task_m10_tool', 'run_m10', "
+                    "'actor_m10', 'SUCCEEDED', ARRAY['sem_image'], "
+                    "ARRAY['sem_image'], ARRAY[]::text[], '{}'::jsonb, "
+                    "'[]'::jsonb, '{}'::jsonb, NULL, 'zta35g_sem_virtual_lab', "
+                    "'0.1.0', '1.0', :created_at)"
+                ),
+                {"created_at": created_at + timedelta(seconds=2)},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO llm_call ("
+                    "llm_call_id, task_id, conversation_id, request_id, purpose, "
+                    "input_result_id, provider, model_name, prompt_template_id, "
+                    "prompt_template_version, prompt_digest, generation_parameters, "
+                    "structured_output_summary, usage, provider_request_id, status, "
+                    "created_at, started_at, completed_at, duration_ms, error_code, "
+                    "safe_error_message"
+                    ") VALUES ('llm_m10', 'task_m10_tool', 'conversation_m10', "
+                    "'request_m10', 'CHAT_ORCHESTRATION', NULL, 'mock', 'mock-v1', "
+                    "NULL, NULL, NULL, '{}'::jsonb, "
+                    "'{\"route\":\"TOOL_EXECUTION\",\"tool_id\":\"zta35g_sem_virtual_lab\"}'::jsonb, "
+                    "NULL, NULL, 'PENDING', :created_at, NULL, NULL, NULL, NULL, NULL)"
+                ),
+                {"created_at": created_at},
+            )
+            connection.execute(
+                text(
+                    "UPDATE task SET selected_tool_run_id = 'run_m10', "
+                    "selected_result_id = 'result_m10' WHERE task_id = 'task_m10_tool'"
+                )
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    upgraded = create_engine_from_settings(temporary_database)
+    try:
+        with upgraded.begin() as connection:
+            binding = connection.execute(
+                text(
+                    "SELECT tool_id, bound_tool_version, bound_schema_hash "
+                    "FROM task WHERE task_id = 'task_m10_tool'"
+                )
+            ).mappings().one()
+            assert binding["tool_id"] == "zta35g_sem_virtual_lab"
+            assert binding["bound_tool_version"] == "1"
+            assert binding["bound_schema_hash"] == (
+                "f821240f782ce788bc723fd1acd02a2e58cedbf68b70b1414e2accd16d989d07"
+            )
+            run_provenance = connection.execute(
+                text(
+                    "SELECT schema_hash, normalized_input_snapshot, "
+                    "execution_policy_snapshot, input_revision_no "
+                    "FROM tool_run WHERE tool_run_id = 'run_m10'"
+                )
+            ).mappings().one()
+            assert run_provenance == {
+                "schema_hash": (
+                    "f821240f782ce788bc723fd1acd02a2e58cedbf68b70b1414e2accd16d989d07"
+                ),
+                "normalized_input_snapshot": {"material": "ZTA35G"},
+                "execution_policy_snapshot": "ANY_TASK",
+                "input_revision_no": 1,
+            }
+            assert connection.scalar(
+                text(
+                    "SELECT schema_hash FROM tool_result "
+                    "WHERE result_id = 'result_m10'"
+                )
+            ) == run_provenance["schema_hash"]
+            assert connection.scalar(
+                text("SELECT count(*) FROM llm_call WHERE llm_call_id = 'llm_m10'")
+            ) == 1
+            assert connection.scalar(
+                text("SELECT count(*) FROM tool_run WHERE tool_run_id = 'run_m10'")
+            ) == 1
+            assert connection.scalar(
+                text("SELECT count(*) FROM tool_result WHERE result_id = 'result_m10'")
+            ) == 1
+            assert connection.execute(
+                text(
+                    "SELECT tool_id, bound_tool_version, bound_schema_hash "
+                    "FROM task WHERE task_id = 'task_m10_knowledge'"
+                )
+            ).mappings().one() == {
+                "tool_id": None,
+                "bound_tool_version": None,
+                "bound_schema_hash": None,
+            }
+            connection.execute(
+                text(
+                    "UPDATE task SET current_status = 'READY' "
+                    "WHERE task_id = 'task_m10_tool'"
+                )
+            )
+    finally:
+        upgraded.dispose()
+
+    with pytest.raises(RuntimeError, match="READY Tasks"):
+        command.downgrade(config, M9_REVISION)
+
+    assert _current_revision(temporary_database) == M10_REVISION
+    legacy_engine = create_engine_from_settings(temporary_database)
+    try:
+        with legacy_engine.connect() as connection:
+            assert connection.scalar(
+                text(
+                    "SELECT schema_version FROM tool_run "
+                    "WHERE tool_run_id = 'run_m10'"
+                )
+            ) == "1.0"
+            assert connection.scalar(
+                text(
+                    "SELECT schema_version FROM tool_result "
+                    "WHERE result_id = 'result_m10'"
+                )
+            ) == "1.0"
+    finally:
+        legacy_engine.dispose()
+
+    ready_engine = create_engine_from_settings(temporary_database)
+    try:
+        with ready_engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE task SET current_status = 'PENDING' "
+                    "WHERE task_id = 'task_m10_tool'"
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO llm_call ("
+                    "llm_call_id, task_id, conversation_id, request_id, purpose, "
+                    "input_result_id, provider, model_name, prompt_template_id, "
+                    "prompt_template_version, prompt_digest, generation_parameters, "
+                    "structured_output_summary, usage, provider_request_id, status, "
+                    "created_at, started_at, completed_at, duration_ms, error_code, "
+                    "safe_error_message"
+                    ") VALUES ('llm_m10_extract', 'task_m10_tool', 'conversation_m10', "
+                    "'request_m10_extract', 'TOOL_INPUT_EXTRACTION', NULL, 'mock', "
+                    "'mock-v1', NULL, NULL, NULL, '{}'::jsonb, NULL, NULL, NULL, "
+                    "'PENDING', :created_at, NULL, NULL, NULL, NULL, NULL)"
+                ),
+                {"created_at": created_at},
+            )
+    finally:
+        ready_engine.dispose()
+
+    with pytest.raises(RuntimeError, match="TOOL_INPUT_EXTRACTION LLMCalls"):
+        command.downgrade(config, M9_REVISION)
+
+    extraction_engine = create_engine_from_settings(temporary_database)
+    try:
+        with extraction_engine.begin() as connection:
+            connection.execute(
+                text("DELETE FROM llm_call WHERE llm_call_id = 'llm_m10_extract'")
+            )
+    finally:
+        extraction_engine.dispose()
+
+    command.downgrade(config, M9_REVISION)
+    downgraded = create_engine_from_settings(temporary_database)
+    try:
+        assert {
+            "tool_id",
+            "bound_tool_version",
+            "bound_schema_hash",
+        }.isdisjoint(_column_map(inspect(downgraded), "task"))
+    finally:
+        downgraded.dispose()
+
+
+def test_m10_aborts_on_conflicting_historical_tool_id(
+    temporary_database: AppSettings,
+) -> None:
+    config = _make_alembic_config(temporary_database)
+    command.upgrade(config, M9_REVISION)
+    engine = create_engine_from_settings(temporary_database)
+    created_at = datetime(2026, 9, 1, 13, 0, tzinfo=timezone.utc)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO actor (actor_id, actor_origin, created_at) "
+                    "VALUES ('actor_m10_conflict', 'LOCAL_ANONYMOUS', :created_at)"
+                ),
+                {"created_at": created_at},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO conversation ("
+                    "conversation_id, actor_id, title, created_at, updated_at"
+                    ") VALUES ('conversation_m10_conflict', 'actor_m10_conflict', "
+                    "NULL, :created_at, :created_at)"
+                ),
+                {"created_at": created_at},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO task ("
+                    "task_id, conversation_id, actor_id, task_type, current_status, "
+                    "selected_tool_run_id, selected_result_id, created_at, started_at, "
+                    "updated_at, completed_at, error_code, safe_error_message"
+                    ") VALUES ('task_m10_conflict', 'conversation_m10_conflict', "
+                    "'actor_m10_conflict', 'TOOL_EXECUTION', 'PENDING', NULL, NULL, "
+                    ":created_at, NULL, :created_at, NULL, NULL, NULL)"
+                ),
+                {"created_at": created_at},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO llm_call ("
+                    "llm_call_id, task_id, conversation_id, request_id, purpose, "
+                    "input_result_id, provider, model_name, prompt_template_id, "
+                    "prompt_template_version, prompt_digest, generation_parameters, "
+                    "structured_output_summary, usage, provider_request_id, status, "
+                    "created_at, started_at, completed_at, duration_ms, error_code, "
+                    "safe_error_message"
+                    ") VALUES ('llm_m10_conflict', 'task_m10_conflict', "
+                    "'conversation_m10_conflict', 'request_m10_conflict', "
+                    "'CHAT_ORCHESTRATION', NULL, 'mock', 'mock-v1', NULL, NULL, "
+                    "NULL, '{}'::jsonb, "
+                    "'{\"route\":\"TOOL_EXECUTION\",\"tool_id\":\"other_tool\"}'::jsonb, "
+                    "NULL, NULL, 'PENDING', :created_at, NULL, NULL, NULL, NULL, NULL)"
+                ),
+                {"created_at": created_at},
+            )
+    finally:
+        engine.dispose()
+
+    with pytest.raises(RuntimeError, match="historical Tool IDs conflict"):
+        command.upgrade(config, "head")
+    assert _current_revision(temporary_database) == M9_REVISION

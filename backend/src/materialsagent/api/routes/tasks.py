@@ -63,6 +63,7 @@ class TaskView(StrictModel):
     task_type: Literal["KNOWLEDGE_QA", "TOOL_EXECUTION"] | None
     status: Literal[
         "PENDING",
+        "READY",
         "RUNNING",
         "NEEDS_INPUT",
         "SUCCEEDED",
@@ -78,6 +79,9 @@ class TaskView(StrictModel):
     completed_at: str | None
     error_code: str | None
     safe_error_message: str | None
+    tool_id: str | None
+    bound_tool_version: str | None
+    bound_schema_hash: str | None
     needs_input: NeedsInputView | None
     tool_run_count: int
     tool_runs: list[ToolRunSummaryView]
@@ -171,6 +175,9 @@ def get_task(
             completed_at=_utc_text(task.completed_at),
             error_code=task.error_code,
             safe_error_message=task.safe_error_message,
+            tool_id=task.tool_id,
+            bound_tool_version=task.bound_tool_version,
+            bound_schema_hash=task.bound_schema_hash,
             needs_input=(
                 None
                 if projection.needs_input is None
@@ -183,6 +190,9 @@ def get_task(
                     ),
                     normalized_input=(
                         projection.needs_input.normalized_input
+                    ),
+                    candidate_tool_refs=list(
+                        projection.needs_input.candidate_tool_refs
                     ),
                 )
             ),

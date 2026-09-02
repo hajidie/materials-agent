@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
+import json
 from typing import Any
 
 import pytest
@@ -39,6 +40,7 @@ class _Store:
     tasks: dict[str, Task]
     revisions: dict[str, object]
     llm_calls: dict[str, object]
+    idempotency_records: dict[str, object]
 
 
 class _ConversationRepository:
@@ -107,6 +109,9 @@ class _TaskRepository:
         if task is None or task.actor_id != actor_id:
             return None
         return task
+
+    def get_owned_for_update(self, task_id: str, actor_id: str) -> Task | None:
+        return self.get_owned(task_id, actor_id)
 
     def update(self, task: Task, *, expected_status: str) -> Task | None:
         current = self.get(task.task_id)
@@ -196,6 +201,28 @@ class _LLMCallRepository:
         return call
 
 
+class _IdempotencyRepository:
+    def __init__(self, store: _Store) -> None:
+        self._store = store
+
+    def get_by_first_request_id(self, request_id: str) -> object | None:
+        return next(
+            (
+                record
+                for record in self._store.idempotency_records.values()
+                if record.first_request_id == request_id
+            ),
+            None,
+        )
+
+    def bind_task_input_revision(self, record, revision_id: str):
+        if record.task_input_revision_id is not None:
+            return None
+        bound = replace(record, task_input_revision_id=revision_id)
+        self._store.idempotency_records[record.idempotency_record_id] = bound
+        return bound
+
+
 class _UnitOfWork:
     def __init__(self, factory: _UnitOfWorkFactory) -> None:
         self._factory = factory
@@ -204,6 +231,7 @@ class _UnitOfWork:
         self.tasks = _TaskRepository(factory.store)
         self.task_input_revisions = _RevisionRepository(factory.store)
         self.llm_calls = _LLMCallRepository(factory.store)
+        self.idempotency_records = _IdempotencyRepository(factory.store)
         self._snapshot: tuple[dict[str, object], ...] | None = None
         self._committed = False
 
@@ -216,6 +244,7 @@ class _UnitOfWork:
             dict(self._factory.store.tasks),
             dict(self._factory.store.revisions),
             dict(self._factory.store.llm_calls),
+            dict(self._factory.store.idempotency_records),
         )
         return self
 
@@ -226,6 +255,11 @@ class _UnitOfWork:
 
     def commit(self) -> None:
         self._factory.commit_count += 1
+        if self._factory.commit_count == self._factory.uncertain_commit_call:
+            self._committed = True
+            assert self._factory.uncertain_commit_mutator is not None
+            self._factory.uncertain_commit_mutator(self._factory.store)
+            raise PersistenceError("Persistence operation failed.")
         if self._factory.commit_count in self._factory.fail_commit_calls:
             raise PersistenceError("Persistence operation failed.")
         self._committed = True
@@ -239,12 +273,14 @@ class _UnitOfWork:
             tasks,
             revisions,
             llm_calls,
+            idempotency_records,
         ) = self._snapshot
         self._factory.store.conversations = conversations
         self._factory.store.messages = messages
         self._factory.store.tasks = tasks
         self._factory.store.revisions = revisions
         self._factory.store.llm_calls = llm_calls
+        self._factory.store.idempotency_records = idempotency_records
 
 
 class _UnitOfWorkFactory:
@@ -253,12 +289,16 @@ class _UnitOfWorkFactory:
         store: _Store,
         *,
         fail_commit_calls: set[int] | None = None,
+        uncertain_commit_call: int | None = None,
+        uncertain_commit_mutator: Callable[[_Store], None] | None = None,
     ) -> None:
         self.store = store
         self.active = 0
         self.instances: list[_UnitOfWork] = []
         self.commit_count = 0
         self.fail_commit_calls = fail_commit_calls or set()
+        self.uncertain_commit_call = uncertain_commit_call
+        self.uncertain_commit_mutator = uncertain_commit_mutator
 
     def __call__(self) -> _UnitOfWork:
         unit_of_work = _UnitOfWork(self)
@@ -274,6 +314,16 @@ class _SequenceClock:
         value = BASE_TIME + timedelta(seconds=self._index)
         self._index += 1
         return value
+
+
+class _SequenceIdFactory:
+    def __init__(self) -> None:
+        self._counts: dict[str, int] = {}
+
+    def __call__(self, prefix: str) -> str:
+        next_value = self._counts.get(prefix, 0) + 1
+        self._counts[prefix] = next_value
+        return f"{prefix}_{next_value}"
 
 
 def _submission() -> tuple[ActorContext, PreparedSubmission, _Store]:
@@ -306,6 +356,7 @@ def _submission() -> tuple[ActorContext, PreparedSubmission, _Store]:
         tasks={task.task_id: task},
         revisions={},
         llm_calls={},
+        idempotency_records={},
     )
     return actor, PreparedSubmission(
         conversation_id=conversation.conversation_id,
@@ -354,9 +405,26 @@ def _service(
     factory: _UnitOfWorkFactory,
     responder: Callable[[object], dict[str, object]],
 ) -> object:
+    def generic_responder(value: object) -> dict[str, object]:
+        payload = responder(value)
+        if payload.get("route") not in {"TOOL_EXECUTION", "NEEDS_INPUT"}:
+            return payload
+        candidate_input = {
+            "material": payload["material"],
+            **payload["candidate_parameters"],
+            "requested_outputs": payload["requested_outputs"],
+        }
+        return {
+            "route": "TOOL_CANDIDATES",
+            "candidates": [{
+                "tool_id": payload["tool_id"],
+                "candidate_input": candidate_input,
+            }],
+        }
+
     return _service_type()(
         factory,
-        MockChatOrchestrationAdapter(responder),
+        MockChatOrchestrationAdapter(generic_responder),
         clock=_SequenceClock(),
         id_factory=_id_factory,
     )
@@ -511,12 +579,9 @@ def test_needs_input_recomputes_hints_and_persists_formal_partial_revision() -> 
         "value": 3,
         "unit": "h",
     }
-    assert store.llm_calls["llm_unit"].structured_output_summary == {
-        "route": "NEEDS_INPUT",
-        "tool_id": "zta35g_sem_virtual_lab",
-        "missing_fields": ("aging_temperature",),
-        "ambiguous_fields": (),
-    }
+    assert store.llm_calls["llm_unit"].structured_output_summary["route"] == (
+        "TOOL_CANDIDATES"
+    )
 
 
 def test_ambiguity_is_formally_recomputed_without_becoming_missing_or_invalid() -> None:
@@ -594,7 +659,7 @@ def test_ambiguity_is_formally_recomputed_without_becoming_missing_or_invalid() 
         ),
     ],
 )
-def test_complete_hard_invalid_candidate_succeeds_llm_but_fails_task(
+def test_complete_hard_invalid_candidate_is_agent_internal_without_binding(
     payload_overrides: dict[str, object],
     expected_code: str,
 ) -> None:
@@ -607,14 +672,15 @@ def test_complete_hard_invalid_candidate_succeeds_llm_but_fails_task(
             lambda _: _valid_tool_payload(**payload_overrides),
         ).orchestrate_submission(actor, submission)
 
-    assert captured.value.status_code == 422
-    assert captured.value.code == "VALIDATION_FAILED"
-    assert captured.value.details[0]["code"] == expected_code
-    revision = next(iter(store.revisions.values()))
-    assert revision.validation_errors[0]["code"] == expected_code
-    assert store.llm_calls["llm_unit"].status == "SUCCEEDED"
+    assert captured.value.status_code == 500
+    assert captured.value.code == "AGENT_INTERNAL_ERROR"
+    assert expected_code
+    assert store.revisions == {}
+    assert store.llm_calls["llm_unit"].status == "FAILED"
+    assert store.llm_calls["llm_unit"].error_code == "LLM_SCHEMA_MISMATCH"
     assert store.tasks[submission.task.task_id].current_status == "FAILED"
-    assert store.tasks[submission.task.task_id].error_code == "VALIDATION_FAILED"
+    assert store.tasks[submission.task.task_id].error_code == "AGENT_INTERNAL_ERROR"
+    assert store.tasks[submission.task.task_id].tool_id is None
     assert len(store.messages) == 1
 
 
@@ -631,16 +697,14 @@ def test_tool_revision_preserves_raw_minutes_and_json_ready_hours(
     parameters = dict(_valid_tool_payload()["candidate_parameters"])
     parameters["solution_time"] = {"value": minutes, "unit": "min"}
 
-    with pytest.raises(Exception) as captured:
-        _service(
-            factory,
-            lambda _: _valid_tool_payload(candidate_parameters=parameters),
-        ).orchestrate_submission(actor, submission)
+    projection = _service(
+        factory,
+        lambda _: _valid_tool_payload(candidate_parameters=parameters),
+    ).orchestrate_submission(actor, submission)
 
-    assert captured.value.status_code == 503
-    assert captured.value.code == "TOOL_UNAVAILABLE"
+    assert projection.task.current_status == "READY"
     revision = next(iter(store.revisions.values()))
-    assert revision.raw_input["parameters"]["solution_time"] == {
+    assert revision.raw_input["solution_time"] == {
         "value": minutes,
         "unit": "min",
     }
@@ -650,29 +714,24 @@ def test_tool_revision_preserves_raw_minutes_and_json_ready_hours(
     }
 
 
-def test_complete_valid_tool_candidate_is_persisted_then_returns_unavailable() -> None:
+def test_complete_valid_tool_candidate_is_bound_and_ready() -> None:
     actor, submission, store = _submission()
     factory = _UnitOfWorkFactory(store)
 
-    with pytest.raises(Exception) as captured:
-        _service(factory, lambda _: _valid_tool_payload()).orchestrate_submission(
-            actor,
-            submission,
-        )
-
-    assert captured.value.status_code == 503
-    assert captured.value.code == "TOOL_UNAVAILABLE"
-    assert captured.value.conversation_id == submission.conversation_id
-    assert captured.value.task_id == submission.task.task_id
+    projection = _service(factory, lambda _: _valid_tool_payload()).orchestrate_submission(
+        actor,
+        submission,
+    )
     revision = next(iter(store.revisions.values()))
     assert revision.revision == 1
     assert revision.validation_errors == []
     assert store.llm_calls["llm_unit"].status == "SUCCEEDED"
     task = store.tasks[submission.task.task_id]
     assert task.task_type == "TOOL_EXECUTION"
-    assert task.current_status == "FAILED"
-    assert task.error_code == "TOOL_UNAVAILABLE"
-    assert task.completed_at is not None
+    assert task.current_status == "READY"
+    assert task.tool_id == "zta35g_sem_virtual_lab"
+    assert task.error_code is None
+    assert task.completed_at is None
     assert task.selected_tool_run_id is None
     assert task.selected_result_id is None
     assert len(store.messages) == 1
@@ -683,7 +742,19 @@ def test_complete_valid_tool_candidate_stays_running_when_m7_chain_is_enabled() 
     factory = _UnitOfWorkFactory(store)
     service = _service_type()(
         factory,
-        MockChatOrchestrationAdapter(lambda _: _valid_tool_payload()),
+        MockChatOrchestrationAdapter(
+            lambda _: {
+                "route": "TOOL_CANDIDATES",
+                "candidates": [{
+                    "tool_id": "zta35g_sem_virtual_lab",
+                    "candidate_input": {
+                        "material": "ZTA35G",
+                        **_valid_tool_payload()["candidate_parameters"],
+                        "requested_outputs": ["sem_image", "mechanical_properties"],
+                    },
+                }],
+            }
+        ),
         clock=_SequenceClock(),
         id_factory=_id_factory,
         tool_chain_enabled=True,
@@ -692,7 +763,7 @@ def test_complete_valid_tool_candidate_stays_running_when_m7_chain_is_enabled() 
     projection = service.orchestrate_submission(actor, submission)
 
     assert projection.task.task_type == "TOOL_EXECUTION"
-    assert projection.task.current_status == "RUNNING"
+    assert projection.task.current_status == "READY"
     assert projection.task.completed_at is None
     assert projection.task.error_code is None
     assert projection.task.safe_error_message is None
@@ -747,8 +818,8 @@ def test_protocol_failure_is_safe_and_does_not_persist_provider_payload() -> Non
             lambda _: {"route": "UNKNOWN", "payload": "SECRET"},
         ).orchestrate_submission(actor, submission)
 
-    assert captured.value.status_code == 502
-    assert captured.value.code == "CHAT_ORCHESTRATION_FAILED"
+    assert captured.value.status_code == 500
+    assert captured.value.code == "AGENT_INTERNAL_ERROR"
     assert "SECRET" not in str(captured.value)
     call = store.llm_calls["llm_unit"]
     assert call.status == "FAILED"
@@ -863,7 +934,7 @@ class _UnnormalizedPort:
     ("result_or_error", "expected_status", "expected_code"),
     [
         (RuntimeError("PRIVATE replacement failure"), 503, "CHAT_ORCHESTRATION_FAILED"),
-        (object(), 502, "CHAT_ORCHESTRATION_FAILED"),
+        (object(), 500, "AGENT_INTERNAL_ERROR"),
     ],
 )
 def test_replaceable_port_failures_always_finalize_running_facts(
@@ -905,8 +976,8 @@ def test_replaceable_port_failures_always_finalize_running_facts(
         ),
         (
             ChatOrchestrationProtocolError("PRIVATE protocol"),
-            502,
-            "CHAT_ORCHESTRATION_FAILED",
+            500,
+            "AGENT_INTERNAL_ERROR",
         ),
     ],
 )
@@ -1228,8 +1299,7 @@ def test_tool_unavailable_without_revision_is_rejected_on_repeat() -> None:
     actor, submission, store = _submission()
     factory = _UnitOfWorkFactory(store)
     service = _service(factory, lambda _: _valid_tool_payload())
-    with pytest.raises(Exception):
-        service.orchestrate_submission(actor, submission)
+    service.orchestrate_submission(actor, submission)
     store.revisions.clear()
 
     _assert_repeat_conflict(service, actor, submission)
@@ -1239,8 +1309,7 @@ def test_tool_unavailable_with_assistant_is_rejected_on_repeat() -> None:
     actor, submission, store = _submission()
     factory = _UnitOfWorkFactory(store)
     service = _service(factory, lambda _: _valid_tool_payload())
-    with pytest.raises(Exception):
-        service.orchestrate_submission(actor, submission)
+    service.orchestrate_submission(actor, submission)
     task = store.tasks[submission.task.task_id]
     store.messages["msg_unexpected"] = Message(
         message_id="msg_unexpected",
@@ -1253,13 +1322,13 @@ def test_tool_unavailable_with_assistant_is_rejected_on_repeat() -> None:
         content_text="不应存在。",
         structured_content=None,
         llm_call_id="llm_unit",
-        created_at=task.completed_at,
+        created_at=task.updated_at,
     )
 
     _assert_repeat_conflict(service, actor, submission)
 
 
-def test_validation_failed_without_validation_errors_is_rejected_on_repeat() -> None:
+def test_normalizer_failure_without_revision_is_rejected_on_repeat() -> None:
     actor, submission, store = _submission()
     factory = _UnitOfWorkFactory(store)
     parameters = dict(_valid_tool_payload()["candidate_parameters"])
@@ -1270,21 +1339,22 @@ def test_validation_failed_without_validation_errors_is_rejected_on_repeat() -> 
     )
     with pytest.raises(Exception):
         service.orchestrate_submission(actor, submission)
-    revision = next(iter(store.revisions.values()))
-    store.revisions[revision.task_input_revision_id] = replace(
-        revision,
-        validation_errors=[],
-    )
+    assert store.revisions == {}
 
-    _assert_repeat_conflict(service, actor, submission)
+    repeated = service.finalize_result(
+        actor,
+        submission,
+        llm_call_id="llm_unit",
+        result=KnowledgeAnswer("stale"),
+    )
+    assert repeated.task.error_code == "AGENT_INTERNAL_ERROR"
 
 
 def test_two_revisions_for_same_call_are_rejected_on_repeat() -> None:
     actor, submission, store = _submission()
     factory = _UnitOfWorkFactory(store)
     service = _service(factory, lambda _: _valid_tool_payload())
-    with pytest.raises(Exception):
-        service.orchestrate_submission(actor, submission)
+    service.orchestrate_submission(actor, submission)
     revision = next(iter(store.revisions.values()))
     duplicate = replace(
         revision,
@@ -1316,8 +1386,7 @@ def test_cross_task_revision_bound_to_same_call_is_rejected_on_repeat() -> None:
     actor, submission, store = _submission()
     factory = _UnitOfWorkFactory(store)
     service = _service(factory, lambda _: _valid_tool_payload())
-    with pytest.raises(Exception):
-        service.orchestrate_submission(actor, submission)
+    service.orchestrate_submission(actor, submission)
     revision = next(iter(store.revisions.values()))
     cross_task_revision = replace(
         revision,
@@ -1329,3 +1398,2524 @@ def test_cross_task_revision_bound_to_same_call_is_rejected_on_repeat() -> None:
     ] = cross_task_revision
 
     _assert_repeat_conflict(service, actor, submission)
+
+
+class _RoutingRegistrySpy:
+    def __init__(
+        self,
+        normalizations: dict[str, object],
+        *,
+        denied: tuple[str, ...] = (),
+    ) -> None:
+        from types import SimpleNamespace
+
+        from materialsagent.domain.ports.tool_registry import (
+            RoutingCatalogEntry,
+            RoutingCatalogSnapshot,
+            ToolRef,
+        )
+
+        self.events: list[str] = []
+        self._denied = set(denied)
+        self._snapshot = RoutingCatalogSnapshot(
+            entries=tuple(
+                RoutingCatalogEntry(
+                    tool_id=tool_id,
+                    version="1",
+                    schema_hash=(str(index + 1) * 64),
+                    display_name=tool_id,
+                    description=f"Route to {tool_id}.",
+                    input_schema={"type": "object"},
+                    candidate_input_schema={
+                        "type": "object",
+                        "properties": {"value": {"type": ["string", "null"]}},
+                    },
+                    supported_outputs=("result",),
+                )
+                for index, tool_id in enumerate(normalizations)
+            )
+        )
+        self._definitions = {}
+        for entry in self._snapshot.entries:
+            result = normalizations[entry.tool_id]
+
+            def normalize(
+                candidate_input,
+                prior_normalized_input=None,
+                *,
+                _result=result,
+                _tool_id=entry.tool_id,
+            ):
+                self.events.append("normalize")
+                assert prior_normalized_input is None
+                assert candidate_input == {"value": _tool_id}
+                return _result
+
+            self._definitions[entry.tool_id] = SimpleNamespace(
+                ref=ToolRef(entry.tool_id, entry.version, entry.schema_hash),
+                normalize=normalize,
+                normalizer=normalize,
+                supported_outputs=("result",),
+                candidate_input_schema=entry.candidate_input_schema,
+            )
+
+    def routing_snapshot(self):
+        self.events.append("catalog")
+        return self._snapshot
+
+    def resolve(self, tool_id, *, snapshot=None):
+        from materialsagent.application.tool_registry import UnknownToolError
+
+        self.events.append(f"resolve:{tool_id}")
+        definition = self._definitions.get(tool_id)
+        matching_entries = (
+            ()
+            if snapshot is None
+            else tuple(
+                entry for entry in snapshot.entries if entry.tool_id == tool_id
+            )
+        )
+        if definition is None or (
+            snapshot is not None
+            and (
+                len(matching_entries) != 1
+                or matching_entries[0].ref != definition.ref
+            )
+        ):
+            raise UnknownToolError("Unknown Tool.")
+        return definition
+
+    def authorize(self, *, registration, action, bound_ref):
+        from materialsagent.application.tool_registry import (
+            ToolAuthorizationDenialReason,
+            ToolAuthorizationError,
+        )
+        from materialsagent.domain.ports.tool_registry import (
+            AuthorizationDecision,
+            ExecutionPolicy,
+            ToolAction,
+        )
+
+        current_ref = registration.ref
+        self.events.append(f"authorize:{current_ref.tool_id}")
+        if current_ref.tool_id in self._denied:
+            raise ToolAuthorizationError(
+                ToolAuthorizationDenialReason.POLICY_ACTION_DENIED
+            )
+        if action is ToolAction.NEW_BINDING:
+            if bound_ref is not None:
+                raise ToolAuthorizationError(
+                    ToolAuthorizationDenialReason.BOUND_TOOL_MISMATCH
+                )
+        elif bound_ref is None or bound_ref.tool_id != current_ref.tool_id:
+            raise ToolAuthorizationError(
+                ToolAuthorizationDenialReason.BOUND_TOOL_MISMATCH
+            )
+        elif bound_ref.schema_hash != current_ref.schema_hash:
+            raise ToolAuthorizationError(
+                ToolAuthorizationDenialReason.SCHEMA_DRIFT
+            )
+        return AuthorizationDecision(current_ref, ExecutionPolicy.ANY_TASK)
+
+
+def _generic_route_service(factory, registry, responder):
+    def recorded(orchestration_input):
+        assert factory.active == 0
+        events = getattr(registry, "events", None)
+        if isinstance(events, list):
+            events.append("router")
+        return responder(orchestration_input)
+
+    return _service_type()(
+        factory,
+        MockChatOrchestrationAdapter(recorded),
+        tool_registry=registry,
+        clock=_SequenceClock(),
+        id_factory=_id_factory,
+    )
+
+
+def test_unique_complete_candidate_resolves_normalizes_then_binds_ready() -> None:
+    from materialsagent.domain.ports.tool_registry import ReadyNormalization
+
+    actor, submission, store = _submission()
+    factory = _UnitOfWorkFactory(store)
+    registry = _RoutingRegistrySpy(
+        {
+            "zta35g_sem_virtual_lab": ReadyNormalization(
+                normalized_input={
+                    "value": "normalized",
+                    "requested_outputs": ["result"],
+                },
+                requested_outputs=("result",),
+            )
+        }
+    )
+    projection = _generic_route_service(
+        factory,
+        registry,
+        lambda _: {
+            "route": "TOOL_CANDIDATES",
+            "candidates": [
+                {
+                    "tool_id": "zta35g_sem_virtual_lab",
+                    "candidate_input": {"value": "zta35g_sem_virtual_lab"},
+                }
+            ],
+        },
+    ).orchestrate_submission(actor, submission)
+
+    assert projection.task.current_status == "READY"
+    assert projection.task.tool_id == "zta35g_sem_virtual_lab"
+    assert projection.revision.normalized_input == {
+        "value": "normalized",
+        "requested_outputs": ["result"],
+    }
+    assert registry.events == [
+        "catalog",
+        "router",
+        "resolve:zta35g_sem_virtual_lab",
+        "normalize",
+        "authorize:zta35g_sem_virtual_lab",
+    ]
+
+
+def test_unique_incomplete_candidate_binds_before_needs_input_persistence() -> None:
+    from materialsagent.domain.ports.tool_registry import NeedsInputNormalization
+
+    actor, submission, store = _submission()
+    factory = _UnitOfWorkFactory(store)
+    registry = _RoutingRegistrySpy(
+        {
+            "zta35g_sem_virtual_lab": NeedsInputNormalization(
+                normalized_input={"value": None, "requested_outputs": ["result"]},
+                missing_fields=("value",),
+                ambiguous_fields=(),
+                follow_up_suggestion="Provide value.",
+            )
+        }
+    )
+    projection = _generic_route_service(
+        factory,
+        registry,
+        lambda _: {
+            "route": "TOOL_CANDIDATES",
+            "candidates": [
+                {
+                    "tool_id": "zta35g_sem_virtual_lab",
+                    "candidate_input": {"value": "zta35g_sem_virtual_lab"},
+                }
+            ],
+        },
+    ).orchestrate_submission(actor, submission)
+
+    assert projection.task.current_status == "NEEDS_INPUT"
+    assert projection.task.tool_id == "zta35g_sem_virtual_lab"
+    assert projection.revision.missing_fields == ["value"]
+
+
+def test_multiple_valid_candidates_remain_unbound_without_normalization() -> None:
+    from materialsagent.domain.ports.tool_registry import ReadyNormalization
+
+    actor, submission, store = _submission()
+    factory = _UnitOfWorkFactory(store)
+    ready = ReadyNormalization(
+        normalized_input={"unused": True, "requested_outputs": ["result"]},
+        requested_outputs=("result",),
+    )
+    registry = _RoutingRegistrySpy({"tool_one": ready, "tool_two": ready})
+    projection = _generic_route_service(
+        factory,
+        registry,
+        lambda _: {
+            "route": "TOOL_CANDIDATES",
+            "candidates": [
+                {"tool_id": "tool_one", "candidate_input": {"value": "tool_one"}},
+                {"tool_id": "tool_two", "candidate_input": {"value": "tool_two"}},
+            ],
+        },
+    ).orchestrate_submission(actor, submission)
+
+    assert projection.task.current_status == "NEEDS_INPUT"
+    assert projection.task.tool_id is None
+    assert len(projection.revision.candidate_tool_refs) == 2
+    assert "normalize" not in registry.events
+
+
+@pytest.mark.parametrize("unresolvable_kind", ["unknown_id", "mismatched_ref"])
+def test_any_unresolvable_candidate_rejects_the_entire_candidate_set(
+    unresolvable_kind: str,
+) -> None:
+    from materialsagent.domain.ports.tool_registry import (
+        ReadyNormalization,
+        RoutingCatalogSnapshot,
+    )
+
+    actor, submission, store = _submission()
+    factory = _UnitOfWorkFactory(store)
+    ready = ReadyNormalization(
+        normalized_input={"value": "normalized", "requested_outputs": ["result"]},
+        requested_outputs=("result",),
+    )
+    registry = _RoutingRegistrySpy({"tool_one": ready, "tool_two": ready})
+    rejected_tool_id = "unknown_tool"
+    if unresolvable_kind == "mismatched_ref":
+        rejected_tool_id = "tool_two"
+        first, second = registry._snapshot.entries
+        registry._snapshot = RoutingCatalogSnapshot(
+            entries=(first, replace(second, version="stale-snapshot-version")),
+        )
+    service = _generic_route_service(
+        factory,
+        registry,
+        lambda _: {
+            "route": "TOOL_CANDIDATES",
+            "candidates": [
+                {"tool_id": "tool_one", "candidate_input": {"value": "tool_one"}},
+                {
+                    "tool_id": rejected_tool_id,
+                    "candidate_input": {"value": rejected_tool_id},
+                },
+            ],
+        },
+    )
+
+    with pytest.raises(Exception) as captured:
+        service.orchestrate_submission(actor, submission)
+
+    assert captured.value.code == "AGENT_INTERNAL_ERROR"
+    task = store.tasks[submission.task.task_id]
+    assert task.bound_tool_ref is None
+    assert task.selected_tool_run_id is None
+    assert task.error_code == "AGENT_INTERNAL_ERROR"
+    assert store.llm_calls["llm_unit"].error_code == "LLM_SCHEMA_MISMATCH"
+    assert store.revisions == {}
+    assert "normalize" not in registry.events
+
+
+def test_knowledge_answer_never_resolves_normalizes_or_binds() -> None:
+    from materialsagent.domain.ports.tool_registry import ReadyNormalization
+
+    actor, submission, store = _submission()
+    factory = _UnitOfWorkFactory(store)
+    registry = _RoutingRegistrySpy(
+        {
+            "tool_one": ReadyNormalization(
+                normalized_input={"requested_outputs": ["result"]},
+                requested_outputs=("result",),
+            )
+        }
+    )
+    projection = _generic_route_service(
+        factory,
+        registry,
+        lambda _: {"route": "KNOWLEDGE_ANSWER", "answer_text": "Answer."},
+    ).orchestrate_submission(actor, submission)
+
+    assert projection.task.current_status == "SUCCEEDED"
+    assert projection.task.tool_id is None
+    assert registry.events == ["catalog", "router"]
+
+
+def _disabled_only_ml_registry():
+    from materialsagent.application.tool_registry import ToolRegistry
+    from materialsagent.domain.ports.tool_registry import (
+        ExecutionPolicy,
+        ToolStatus,
+    )
+    from backend.tests.support.heterogeneous_tools import (
+        build_ml_training_test_definition,
+    )
+
+    return ToolRegistry(
+        (
+            replace(
+                build_ml_training_test_definition(),
+                status=ToolStatus.DISABLED,
+                execution_policy=ExecutionPolicy.NONE,
+            ),
+        )
+    )
+
+
+def test_knowledge_answer_is_audited_with_an_empty_routing_catalog() -> None:
+    actor, submission, store = _submission()
+    registry = _disabled_only_ml_registry()
+
+    projection = _generic_route_service(
+        _UnitOfWorkFactory(store),
+        registry,
+        lambda orchestration_input: {
+            "route": "KNOWLEDGE_ANSWER",
+            "answer_text": (
+                "No active Tool is needed to answer this knowledge question."
+            ),
+        },
+    ).orchestrate_submission(actor, submission)
+
+    assert projection.task.current_status == "SUCCEEDED"
+    assert projection.task.bound_tool_ref is None
+    assert projection.llm_call is not None
+    assert projection.llm_call.catalog_snapshot_refs == ()
+    assert projection.llm_call.catalog_hash == sha256(b"[]").hexdigest()
+    assert projection.llm_call.structured_output_summary["route"] == (
+        "KNOWLEDGE_ANSWER"
+    )
+
+
+def test_tool_candidate_cannot_resolve_from_an_empty_routing_catalog() -> None:
+    actor, submission, store = _submission()
+    service = _generic_route_service(
+        _UnitOfWorkFactory(store),
+        _disabled_only_ml_registry(),
+        lambda _: {
+            "route": "TOOL_CANDIDATES",
+            "candidates": [
+                {
+                    "tool_id": "ml_training_test",
+                    "candidate_input": {
+                        "dataset": "dataset_fixture_1",
+                        "task_type": "regression",
+                        "split_ratio": 0.8,
+                        "target_column": "yield_strength",
+                        "shuffle": True,
+                    },
+                }
+            ],
+        },
+    )
+
+    with pytest.raises(Exception) as captured:
+        service.orchestrate_submission(actor, submission)
+
+    assert captured.value.code == "AGENT_INTERNAL_ERROR"
+    assert store.tasks[submission.task.task_id].bound_tool_ref is None
+    assert store.tasks[submission.task.task_id].selected_tool_run_id is None
+    assert store.revisions == {}
+    assert store.llm_calls["llm_unit"].catalog_snapshot_refs == ()
+    assert store.llm_calls["llm_unit"].error_code == "LLM_SCHEMA_MISMATCH"
+
+
+def test_unknown_candidate_becomes_agent_internal_error_without_binding() -> None:
+    from materialsagent.domain.ports.tool_registry import ReadyNormalization
+
+    actor, submission, store = _submission()
+    factory = _UnitOfWorkFactory(store)
+    registry = _RoutingRegistrySpy(
+        {
+            "known_tool": ReadyNormalization(
+                normalized_input={"requested_outputs": ["result"]},
+                requested_outputs=("result",),
+            )
+        }
+    )
+    service = _generic_route_service(
+        factory,
+        registry,
+        lambda _: {
+            "route": "TOOL_CANDIDATES",
+            "candidates": [
+                {"tool_id": "unknown_tool", "candidate_input": {"value": "unknown_tool"}}
+            ],
+        },
+    )
+
+    with pytest.raises(Exception) as captured:
+        service.orchestrate_submission(actor, submission)
+
+    assert captured.value.code == "AGENT_INTERNAL_ERROR"
+    task = store.tasks[submission.task.task_id]
+    call = store.llm_calls["llm_unit"]
+    assert task.tool_id is None
+    assert task.error_code == "AGENT_INTERNAL_ERROR"
+    assert call.error_code == "LLM_SCHEMA_MISMATCH"
+    assert store.revisions == {}
+
+
+def test_new_binding_is_normalized_before_current_authorization_denial() -> None:
+    from materialsagent.domain.ports.tool_registry import ReadyNormalization
+
+    actor, submission, store = _submission()
+    factory = _UnitOfWorkFactory(store)
+    registry = _RoutingRegistrySpy(
+        {
+            "disabled_tool": ReadyNormalization(
+                normalized_input={"requested_outputs": ["result"]},
+                requested_outputs=("result",),
+            )
+        },
+        denied=("disabled_tool",),
+    )
+    service = _generic_route_service(
+        factory,
+        registry,
+        lambda _: {
+            "route": "TOOL_CANDIDATES",
+            "candidates": [
+                {
+                    "tool_id": "disabled_tool",
+                    "candidate_input": {"value": "disabled_tool"},
+                }
+            ],
+        },
+    )
+
+    with pytest.raises(Exception) as captured:
+        service.orchestrate_submission(actor, submission)
+
+    assert captured.value.code == "AGENT_INTERNAL_ERROR"
+    assert store.tasks[submission.task.task_id].tool_id is None
+    assert store.llm_calls["llm_unit"].error_code == "LLM_SCHEMA_MISMATCH"
+    assert registry.events[-2:] == ["normalize", "authorize:disabled_tool"]
+
+
+def test_inconsistent_ready_normalization_is_rejected_before_binding() -> None:
+    from materialsagent.domain.ports.tool_registry import ReadyNormalization
+
+    actor, submission, store = _submission()
+    factory = _UnitOfWorkFactory(store)
+    registry = _RoutingRegistrySpy(
+        {
+            "tool_one": ReadyNormalization(
+                normalized_input={"value": "normalized", "requested_outputs": ["other"]},
+                requested_outputs=("result",),
+            )
+        }
+    )
+    service = _generic_route_service(
+        factory,
+        registry,
+        lambda _: {
+            "route": "TOOL_CANDIDATES",
+            "candidates": [
+                {"tool_id": "tool_one", "candidate_input": {"value": "tool_one"}}
+            ],
+        },
+    )
+
+    with pytest.raises(Exception) as captured:
+        service.orchestrate_submission(actor, submission)
+
+    assert captured.value.code == "AGENT_INTERNAL_ERROR"
+    assert store.tasks[submission.task.task_id].bound_tool_ref is None
+    assert store.revisions == {}
+
+
+def test_ready_normalization_cannot_omit_schema_declared_outputs() -> None:
+    from materialsagent.domain.ports.tool_registry import ReadyNormalization
+
+    actor, submission, store = _submission()
+    registry = _RoutingRegistrySpy(
+        {
+            "tool_one": ReadyNormalization(
+                normalized_input={"value": "normalized"},
+                requested_outputs=("result",),
+            )
+        }
+    )
+    registry._definitions["tool_one"].input_schema = {
+        "type": "object",
+        "properties": {"requested_outputs": {"type": "array"}},
+    }
+    service = _generic_route_service(
+        _UnitOfWorkFactory(store),
+        registry,
+        lambda _: {
+            "route": "TOOL_CANDIDATES",
+            "candidates": [
+                {"tool_id": "tool_one", "candidate_input": {"value": "tool_one"}}
+            ],
+        },
+    )
+
+    with pytest.raises(Exception) as captured:
+        service.orchestrate_submission(actor, submission)
+
+    assert captured.value.code == "AGENT_INTERNAL_ERROR"
+    assert store.tasks[submission.task.task_id].bound_tool_ref is None
+    assert store.revisions == {}
+
+
+@pytest.mark.parametrize(
+    ("mutation", "normalized_input", "missing_fields", "follow_up"),
+    [
+        (
+            "non_json",
+            {"value": None, "unsafe": float("nan"), "requested_outputs": ("result",)},
+            ("value",),
+            "Clarify.",
+        ),
+        (
+            "empty_unresolved",
+            {"value": None, "requested_outputs": ("result",)},
+            (),
+            "Clarify.",
+        ),
+        (
+            "blank_follow_up",
+            {"value": None, "requested_outputs": ("result",)},
+            ("value",),
+            "   ",
+        ),
+    ],
+)
+def test_forged_invalid_needs_input_is_rejected_before_binding(
+    mutation: str,
+    normalized_input: dict[str, object],
+    missing_fields: tuple[str, ...],
+    follow_up: str,
+) -> None:
+    from materialsagent.domain.ports.tool_registry import NeedsInputNormalization
+
+    forged = object.__new__(NeedsInputNormalization)
+    object.__setattr__(forged, "normalized_input", normalized_input)
+    object.__setattr__(forged, "missing_fields", missing_fields)
+    object.__setattr__(forged, "ambiguous_fields", ())
+    object.__setattr__(forged, "follow_up_suggestion", follow_up)
+    actor, submission, store = _submission()
+    service = _generic_route_service(
+        _UnitOfWorkFactory(store),
+        _RoutingRegistrySpy({"tool_one": forged}),
+        lambda _: {
+            "route": "TOOL_CANDIDATES",
+            "candidates": [
+                {"tool_id": "tool_one", "candidate_input": {"value": "tool_one"}}
+            ],
+        },
+    )
+
+    with pytest.raises(Exception) as captured:
+        service.orchestrate_submission(actor, submission)
+
+    assert mutation
+    assert captured.value.code == "AGENT_INTERNAL_ERROR"
+    assert store.tasks[submission.task.task_id].bound_tool_ref is None
+    assert store.revisions == {}
+
+
+def test_incomplete_forged_normalization_maps_to_controlled_schema_mismatch() -> None:
+    from materialsagent.domain.ports.tool_registry import NeedsInputNormalization
+
+    forged = object.__new__(NeedsInputNormalization)
+    object.__setattr__(
+        forged,
+        "normalized_input",
+        {"value": None, "requested_outputs": ("result",)},
+    )
+    object.__setattr__(forged, "missing_fields", ("value",))
+    object.__setattr__(forged, "ambiguous_fields", ())
+    actor, submission, store = _submission()
+    service = _generic_route_service(
+        _UnitOfWorkFactory(store),
+        _RoutingRegistrySpy({"tool_one": forged}),
+        lambda _: {
+            "route": "TOOL_CANDIDATES",
+            "candidates": [
+                {"tool_id": "tool_one", "candidate_input": {"value": "tool_one"}}
+            ],
+        },
+    )
+
+    with pytest.raises(Exception) as captured:
+        service.orchestrate_submission(actor, submission)
+
+    assert captured.value.code == "AGENT_INTERNAL_ERROR"
+    assert store.llm_calls["llm_unit"].error_code == "LLM_SCHEMA_MISMATCH"
+    assert store.tasks[submission.task.task_id].bound_tool_ref is None
+    assert store.revisions == {}
+
+
+@pytest.mark.parametrize("difference", ["binding", "structured_content"])
+def test_uncertain_knowledge_recovery_rejects_extra_terminal_state(
+    difference: str,
+) -> None:
+    actor, submission, store = _submission()
+
+    def mutate(committed: _Store) -> None:
+        if difference == "binding":
+            task = committed.tasks[submission.task.task_id]
+            committed.tasks[task.task_id] = replace(
+                task,
+                tool_id="tool_one",
+                bound_tool_version="1",
+                bound_schema_hash="1" * 64,
+            )
+            return
+        assistant = committed.messages["msg_assistant"]
+        committed.messages[assistant.message_id] = replace(
+            assistant,
+            structured_content={"unexpected": True},
+        )
+
+    factory = _UnitOfWorkFactory(
+        store,
+        uncertain_commit_call=3,
+        uncertain_commit_mutator=mutate,
+    )
+
+    with pytest.raises(Exception) as captured:
+        _service(
+            factory,
+            lambda _: {
+                "route": "KNOWLEDGE_ANSWER",
+                "answer_text": "受控答案。",
+            },
+        ).orchestrate_submission(actor, submission)
+
+    assert captured.value.code == "RESOURCE_CONFLICT"
+
+
+@pytest.mark.parametrize("mutation", ["binding", "revision", "state"])
+def test_uncertain_finalize_rejects_different_committed_tool_route(mutation: str) -> None:
+    from materialsagent.domain.ports.tool_registry import ReadyNormalization
+
+    actor, submission, store = _submission()
+
+    def mutate(committed: _Store) -> None:
+        task = committed.tasks[submission.task.task_id]
+        revision = committed.revisions["revision_unit"]
+        if mutation == "binding":
+            committed.tasks[task.task_id] = replace(
+                task,
+                tool_id="tool_two",
+                bound_tool_version="1",
+                bound_schema_hash="2" * 64,
+            )
+            return
+        if mutation == "revision":
+            committed.revisions["revision_unit"] = replace(
+                revision,
+                normalized_input={"value": "different", "requested_outputs": ["result"]},
+            )
+            return
+        committed.tasks[task.task_id] = replace(task, current_status="NEEDS_INPUT")
+        committed.revisions["revision_unit"] = replace(
+            revision,
+            normalized_input={"value": None, "requested_outputs": ["result"]},
+            missing_fields=["value"],
+        )
+        committed.messages["msg_assistant"] = Message(
+            message_id="msg_assistant",
+            conversation_id=submission.conversation_id,
+            task_id=submission.task.task_id,
+            actor_id=actor.actor_id,
+            request_id=submission.user_message.request_id,
+            role="ASSISTANT",
+            generation_source="LLM",
+            content_text="请补充缺失参数或明确存在歧义的参数。",
+            structured_content=None,
+            llm_call_id="llm_unit",
+            created_at=BASE_TIME + timedelta(seconds=10),
+        )
+
+    factory = _UnitOfWorkFactory(
+        store,
+        uncertain_commit_call=3,
+        uncertain_commit_mutator=mutate,
+    )
+    registry = _RoutingRegistrySpy(
+        {
+            "tool_one": ReadyNormalization(
+                normalized_input={"value": "normalized", "requested_outputs": ["result"]},
+                requested_outputs=("result",),
+            ),
+            "tool_two": ReadyNormalization(
+                normalized_input={"value": "other", "requested_outputs": ["result"]},
+                requested_outputs=("result",),
+            ),
+        }
+    )
+    service = _generic_route_service(
+        factory,
+        registry,
+        lambda _: {
+            "route": "TOOL_CANDIDATES",
+            "candidates": [
+                {"tool_id": "tool_one", "candidate_input": {"value": "tool_one"}}
+            ],
+        },
+    )
+
+    with pytest.raises(Exception) as captured:
+        service.orchestrate_submission(actor, submission)
+
+    assert captured.value.code == "RESOURCE_CONFLICT"
+
+
+def test_uncertain_finalize_recovers_exact_committed_tool_route() -> None:
+    from materialsagent.domain.ports.tool_registry import ReadyNormalization
+
+    actor, submission, store = _submission()
+    factory = _UnitOfWorkFactory(
+        store,
+        uncertain_commit_call=3,
+        uncertain_commit_mutator=lambda _store: None,
+    )
+    registry = _RoutingRegistrySpy(
+        {
+            "tool_one": ReadyNormalization(
+                normalized_input={"value": "normalized", "requested_outputs": ["result"]},
+                requested_outputs=("result",),
+            )
+        }
+    )
+
+    projection = _generic_route_service(
+        factory,
+        registry,
+        lambda _: {
+            "route": "TOOL_CANDIDATES",
+            "candidates": [
+                {"tool_id": "tool_one", "candidate_input": {"value": "tool_one"}}
+            ],
+        },
+    ).orchestrate_submission(actor, submission)
+
+    assert projection.task.current_status == "READY"
+    assert projection.task.tool_id == "tool_one"
+    assert projection.revision.normalized_input == {
+        "value": "normalized",
+        "requested_outputs": ["result"],
+    }
+
+
+def test_uncertain_finalize_recovers_schema_less_fixed_output_tool_route() -> None:
+    from materialsagent.application.tool_registry import ToolRegistry
+    from backend.tests.support.heterogeneous_tools import (
+        build_ml_training_test_definition,
+    )
+
+    actor, submission, store = _submission()
+    factory = _UnitOfWorkFactory(
+        store,
+        uncertain_commit_call=3,
+        uncertain_commit_mutator=lambda _store: None,
+    )
+    registry = ToolRegistry((build_ml_training_test_definition(),))
+    candidate_input = {
+        "dataset": "dataset_fixture_1",
+        "task_type": "regression",
+        "split_ratio": 0.8,
+        "target_column": "yield_strength",
+        "shuffle": True,
+    }
+
+    projection = _generic_route_service(
+        factory,
+        registry,
+        lambda _: {
+            "route": "TOOL_CANDIDATES",
+            "candidates": [
+                {
+                    "tool_id": "ml_training_test",
+                    "candidate_input": candidate_input,
+                }
+            ],
+        },
+    ).orchestrate_submission(actor, submission)
+
+    assert projection.task.current_status == "READY"
+    assert projection.task.bound_tool_ref == registry.resolve(
+        "ml_training_test"
+    ).ref
+    assert projection.revision is not None
+    assert projection.revision.normalized_input == candidate_input
+    assert "requested_outputs" not in projection.revision.normalized_input
+
+
+def test_uncertain_bound_needs_input_rejects_extra_assistant_structure() -> None:
+    from materialsagent.application.chat_orchestration import _ResolvedToolRoute
+    from materialsagent.domain.ports.chat_orchestration import (
+        ToolCandidateProposal,
+        ToolCandidateSet,
+    )
+    from materialsagent.domain.ports.tool_registry import (
+        NeedsInputNormalization,
+        ToolRef,
+    )
+
+    actor, submission, store = _submission()
+    factory = _UnitOfWorkFactory(store)
+    normalization = NeedsInputNormalization(
+        normalized_input={"value": None, "requested_outputs": ["result"]},
+        missing_fields=("value",),
+        ambiguous_fields=(),
+        follow_up_suggestion="Provide value.",
+    )
+    service = _generic_route_service(
+        factory,
+        _RoutingRegistrySpy({"tool_one": normalization}),
+        lambda _: {
+            "route": "TOOL_CANDIDATES",
+            "candidates": [
+                {"tool_id": "tool_one", "candidate_input": {"value": "tool_one"}}
+            ],
+        },
+    )
+    service.orchestrate_submission(actor, submission)
+    assistant = store.messages["msg_assistant"]
+    store.messages[assistant.message_id] = replace(
+        assistant,
+        structured_content={"unexpected": True},
+    )
+    proposal_set = ToolCandidateSet(
+        (ToolCandidateProposal("tool_one", {"value": "tool_one"}),)
+    )
+    with pytest.raises(Exception) as captured:
+        service._recover_successful_finalize(
+            actor,
+            submission,
+            llm_call_id="llm_unit",
+            result=_ResolvedToolRoute(
+                proposal_set=proposal_set,
+                candidate_refs=(ToolRef("tool_one", "1", "1" * 64),),
+                selected_ref=ToolRef("tool_one", "1", "1" * 64),
+                selected_input=proposal_set.candidates[0].candidate_input,
+                normalization=normalization,
+            ),
+            usage=None,
+            provider_request_id=None,
+        )
+
+    assert captured.value.code == "RESOURCE_CONFLICT"
+
+
+@pytest.mark.parametrize("difference", ["binding", "revision", "outputs", "state"])
+def test_uncertain_recovery_compares_full_intended_resolved_route(difference: str) -> None:
+    from materialsagent.application.chat_orchestration import _ResolvedToolRoute
+    from materialsagent.domain.ports.chat_orchestration import (
+        ToolCandidateProposal,
+        ToolCandidateSet,
+    )
+    from materialsagent.domain.ports.tool_registry import (
+        NeedsInputNormalization,
+        ReadyNormalization,
+        ToolRef,
+    )
+
+    actor, submission, store = _submission()
+    factory = _UnitOfWorkFactory(store)
+    original_ref = ToolRef("tool_one", "1", "1" * 64)
+    registry = _RoutingRegistrySpy(
+        {
+            "tool_one": ReadyNormalization(
+                normalized_input={"value": "normalized", "requested_outputs": ["result"]},
+                requested_outputs=("result",),
+            )
+        }
+    )
+    service = _generic_route_service(
+        factory,
+        registry,
+        lambda _: {
+            "route": "TOOL_CANDIDATES",
+            "candidates": [
+                {"tool_id": "tool_one", "candidate_input": {"value": "tool_one"}}
+            ],
+        },
+    )
+    service.orchestrate_submission(actor, submission)
+
+    normalization = ReadyNormalization(
+        normalized_input={"value": "normalized", "requested_outputs": ["result"]},
+        requested_outputs=("result",),
+    )
+    selected_ref = original_ref
+    if difference == "binding":
+        selected_ref = ToolRef("tool_two", "1", "2" * 64)
+    elif difference == "revision":
+        normalization = ReadyNormalization(
+            normalized_input={"value": "different", "requested_outputs": ["result"]},
+            requested_outputs=("result",),
+        )
+    elif difference == "outputs":
+        normalization = ReadyNormalization(
+            normalized_input={"value": "normalized", "requested_outputs": ["result"]},
+            requested_outputs=("other",),
+        )
+    elif difference == "state":
+        normalization = NeedsInputNormalization(
+            normalized_input={"value": None, "requested_outputs": ["result"]},
+            missing_fields=("value",),
+            ambiguous_fields=(),
+            follow_up_suggestion="Provide value.",
+        )
+    proposal_set = ToolCandidateSet(
+        (ToolCandidateProposal("tool_one", {"value": "tool_one"}),)
+    )
+    intended = _ResolvedToolRoute(
+        proposal_set=proposal_set,
+        candidate_refs=(original_ref,),
+        selected_ref=selected_ref,
+        selected_input=proposal_set.candidates[0].candidate_input,
+        normalization=normalization,
+    )
+    with pytest.raises(Exception) as captured:
+        service._recover_successful_finalize(
+            actor,
+            submission,
+            llm_call_id="llm_unit",
+            result=intended,
+            usage=None,
+            provider_request_id=None,
+        )
+
+    assert captured.value.code == "RESOURCE_CONFLICT"
+
+
+@pytest.mark.parametrize(
+    "difference",
+    ["candidate_refs", "follow_up", "structured_content"],
+)
+def test_uncertain_recovery_compares_ambiguous_refs_and_follow_up(difference: str) -> None:
+    from materialsagent.application.chat_orchestration import _ResolvedToolRoute
+    from materialsagent.domain.ports.chat_orchestration import (
+        ToolCandidateProposal,
+        ToolCandidateSet,
+    )
+    from materialsagent.domain.ports.tool_registry import ReadyNormalization, ToolRef
+
+    actor, submission, store = _submission()
+    factory = _UnitOfWorkFactory(store)
+    ready = ReadyNormalization(
+        normalized_input={"value": "unused", "requested_outputs": ["result"]},
+        requested_outputs=("result",),
+    )
+    registry = _RoutingRegistrySpy({"tool_one": ready, "tool_two": ready})
+    service = _generic_route_service(
+        factory,
+        registry,
+        lambda _: {
+            "route": "TOOL_CANDIDATES",
+            "candidates": [
+                {"tool_id": "tool_one", "candidate_input": {"value": "tool_one"}},
+                {"tool_id": "tool_two", "candidate_input": {"value": "tool_two"}},
+            ],
+        },
+    )
+    service.orchestrate_submission(actor, submission)
+
+    refs = (
+        ToolRef("tool_one", "1", "1" * 64),
+        ToolRef("tool_two", "1", "2" * 64),
+    )
+    if difference == "candidate_refs":
+        store.revisions["revision_unit"] = replace(
+            store.revisions["revision_unit"],
+            candidate_tool_refs=(refs[0], ToolRef("tool_three", "1", "3" * 64)),
+        )
+    elif difference == "follow_up":
+        store.messages["msg_assistant"] = replace(
+            store.messages["msg_assistant"],
+            content_text="Different follow-up.",
+        )
+    else:
+        store.messages["msg_assistant"] = replace(
+            store.messages["msg_assistant"],
+            structured_content={"unexpected": True},
+        )
+    proposal_set = ToolCandidateSet(
+        (
+            ToolCandidateProposal("tool_one", {"value": "tool_one"}),
+            ToolCandidateProposal("tool_two", {"value": "tool_two"}),
+        )
+    )
+    intended = _ResolvedToolRoute(
+        proposal_set=proposal_set,
+        candidate_refs=refs,
+        selected_ref=None,
+        selected_input=None,
+        normalization=None,
+    )
+
+    with pytest.raises(Exception) as captured:
+        service._recover_successful_finalize(
+            actor,
+            submission,
+            llm_call_id="llm_unit",
+            result=intended,
+            usage=None,
+            provider_request_id=None,
+        )
+
+    assert captured.value.code == "RESOURCE_CONFLICT"
+
+
+def test_bound_needs_input_supplement_never_invokes_first_route_router() -> None:
+    try:
+        extraction = __import__(
+            "materialsagent.domain.ports.tool_input_extraction",
+            fromlist=["ToolInputExtractionOutcome", "ToolInputExtractionRequestMetadata"],
+        )
+    except ModuleNotFoundError:
+        pytest.fail("The fixed-Tool input extraction protocol is not implemented.")
+
+    from materialsagent.domain.ports.tool_registry import (
+        NeedsInputNormalization,
+        ReadyNormalization,
+        ToolRef,
+    )
+
+    actor, submission, store = _submission()
+    bound_ref = ToolRef("tool_one", "1", "1" * 64)
+    task = replace(
+        submission.task,
+        task_type="TOOL_EXECUTION",
+        current_status="NEEDS_INPUT",
+        tool_id=bound_ref.tool_id,
+        bound_tool_version=bound_ref.version,
+        bound_schema_hash=bound_ref.schema_hash,
+    )
+    prior = TaskInputRevision(
+        task_input_revision_id="revision_prior",
+        task_id=task.task_id,
+        request_id="req_prior",
+        source_llm_call_id="llm_prior",
+        source_message_ids=[submission.user_message.message_id],
+        revision=1,
+        raw_input={"value": None},
+        normalized_input={"value": None, "requested_outputs": ["result"]},
+        missing_fields=["value"],
+        ambiguous_fields=[],
+        validation_errors=[],
+        created_at=BASE_TIME,
+    )
+    supplement_message = Message.user(
+        message_id="msg_supplement",
+        conversation_id=task.conversation_id,
+        task_id=task.task_id,
+        actor_id=task.actor_id,
+        request_id="req_supplement",
+        content_text="value is complete",
+        created_at=BASE_TIME + timedelta(seconds=1),
+    )
+    store.tasks[task.task_id] = task
+    store.messages[supplement_message.message_id] = supplement_message
+    store.revisions[prior.task_input_revision_id] = prior
+    from materialsagent.domain.models.idempotency_record import IdempotencyRecord
+
+    record = IdempotencyRecord(
+        idempotency_record_id="idem_supplement",
+        actor_id=actor.actor_id,
+        operation="TASK_INPUT_SUPPLEMENT",
+        idempotency_key="supplement-key",
+        request_digest="f" * 64,
+        first_request_id=supplement_message.request_id,
+        task_id=task.task_id,
+        message_id=supplement_message.message_id,
+        task_input_revision_id=None,
+        tool_run_id=None,
+        explanation_id=None,
+        created_at=supplement_message.created_at,
+        expires_at=None,
+    )
+    store.idempotency_records[record.idempotency_record_id] = record
+    supplement = PreparedSubmission(
+        conversation_id=task.conversation_id,
+        user_message=supplement_message,
+        task=task,
+        submission_mode="SUPPLEMENT_TASK",
+        idempotency_record_id="idem_supplement",
+    )
+    factory = _UnitOfWorkFactory(store)
+    registry = _RoutingRegistrySpy(
+        {
+            "tool_one": NeedsInputNormalization(
+                normalized_input={"value": None, "requested_outputs": ["result"]},
+                missing_fields=("value",),
+                ambiguous_fields=(),
+                follow_up_suggestion="Provide value.",
+            )
+        }
+    )
+
+    class RouterMustNotRun:
+        provider = "mock"
+        model_name = "mock-chat-orchestration-v1"
+
+        def request_metadata(self, _value):
+            pytest.fail("A bound supplement rebuilt the routing catalog.")
+
+        def orchestrate(self, _value):
+            pytest.fail("A bound supplement invoked the first-route Router.")
+
+    class Extractor:
+        provider = "mock"
+        model_name = "mock-tool-input-v1"
+
+        def request_metadata(self, _value):
+            return extraction.ToolInputExtractionRequestMetadata(
+                provider=self.provider,
+                model_name=self.model_name,
+                prompt_template_id="tool-input-extraction",
+                prompt_template_version="1",
+                prompt_digest="a" * 64,
+                generation_parameters={"temperature": 0, "max_tokens": 256},
+            )
+
+        def extract(self, command):
+            assert factory.active == 0
+            registry.events.append("extract")
+            assert command.tool_context_ref == bound_ref
+            assert command.candidate_input_schema == {
+                "type": "object",
+                "properties": {"value": {"type": ("string", "null")}},
+            }
+            assert command.missing_fields == ("value",)
+            assert command.ambiguous_fields == ()
+            assert command.content_text == "value is complete"
+            return extraction.ToolInputExtractionOutcome(
+                candidate_input_delta={"value": "complete"},
+                request_metadata=self.request_metadata(command),
+            )
+
+    definition = registry._definitions["tool_one"]
+    original_normalize = definition.normalize
+
+    def normalize(delta, prior_normalized_input=None):
+        registry.events.append("normalize")
+        assert delta == {"value": "complete"}
+        assert prior_normalized_input == {
+            "value": None,
+            "requested_outputs": ["result"],
+        }
+        return ReadyNormalization(
+            normalized_input={"value": "complete", "requested_outputs": ["result"]},
+            requested_outputs=("result",),
+        )
+
+    definition.normalize = normalize
+    definition.normalizer = normalize
+    service = _service_type()(
+        factory,
+        RouterMustNotRun(),
+        tool_input_extraction_port=Extractor(),
+        tool_registry=registry,
+        clock=_SequenceClock(),
+        id_factory=_id_factory,
+    )
+
+    projection = service.orchestrate_submission(actor, supplement)
+
+    assert original_normalize is not None
+    assert projection.task.current_status == "READY"
+    assert projection.task.bound_tool_ref == bound_ref
+    assert projection.revision.revision == 2
+    assert prior.revision == 1
+    assert projection.revision.raw_input == {"value": "complete"}
+    assert registry.events == [
+        "resolve:tool_one",
+        "authorize:tool_one",
+        "extract",
+        "normalize",
+    ]
+    saved_call = store.llm_calls["llm_unit"]
+    assert saved_call.purpose == "TOOL_INPUT_EXTRACTION"
+    assert saved_call.tool_context_ref == {
+        "tool_id": "tool_one",
+        "version": "1",
+        "schema_hash": "1" * 64,
+    }
+    assert saved_call.catalog_snapshot_refs is None
+    assert saved_call.catalog_hash is None
+    assert saved_call.structured_output_summary == {
+        "candidate_input_delta": {"value": "complete"}
+    }
+    assert store.idempotency_records[
+        "idem_supplement"
+    ].task_input_revision_id == projection.revision.task_input_revision_id
+    replayed = service.load_current_submission(actor, supplement)
+    assert replayed.task == projection.task
+    assert replayed.llm_call == saved_call
+    assert replayed.revision == projection.revision
+
+
+def _bound_supplement_case():
+    from materialsagent.domain.models.idempotency_record import IdempotencyRecord
+    from materialsagent.domain.ports.tool_registry import ToolRef
+
+    actor, original, store = _submission()
+    bound_ref = ToolRef("tool_one", "1", "1" * 64)
+    task = replace(
+        original.task,
+        task_type="TOOL_EXECUTION",
+        current_status="NEEDS_INPUT",
+        tool_id=bound_ref.tool_id,
+        bound_tool_version=bound_ref.version,
+        bound_schema_hash=bound_ref.schema_hash,
+    )
+    prior = TaskInputRevision(
+        task_input_revision_id="revision_prior",
+        task_id=task.task_id,
+        request_id="req_prior",
+        source_llm_call_id="llm_prior",
+        source_message_ids=[original.user_message.message_id],
+        revision=1,
+        raw_input={"value": None},
+        normalized_input={"value": None, "requested_outputs": ["result"]},
+        missing_fields=["value"],
+        ambiguous_fields=[],
+        validation_errors=[],
+        created_at=BASE_TIME,
+    )
+    message = Message.user(
+        message_id="msg_supplement",
+        conversation_id=task.conversation_id,
+        task_id=task.task_id,
+        actor_id=task.actor_id,
+        request_id="req_supplement",
+        content_text="value is complete",
+        created_at=BASE_TIME + timedelta(seconds=1),
+    )
+    record = IdempotencyRecord(
+        idempotency_record_id="idem_supplement",
+        actor_id=actor.actor_id,
+        operation="TASK_INPUT_SUPPLEMENT",
+        idempotency_key="supplement-key",
+        request_digest="f" * 64,
+        first_request_id=message.request_id,
+        task_id=task.task_id,
+        message_id=message.message_id,
+        task_input_revision_id=None,
+        tool_run_id=None,
+        explanation_id=None,
+        created_at=message.created_at,
+        expires_at=None,
+    )
+    store.tasks[task.task_id] = task
+    store.messages[message.message_id] = message
+    store.revisions[prior.task_input_revision_id] = prior
+    store.idempotency_records[record.idempotency_record_id] = record
+    return (
+        actor,
+        PreparedSubmission(
+            conversation_id=task.conversation_id,
+            user_message=message,
+            task=task,
+            submission_mode="SUPPLEMENT_TASK",
+            idempotency_record_id=record.idempotency_record_id,
+        ),
+        store,
+        prior,
+        bound_ref,
+    )
+
+
+class _RecordingToolInputExtractor:
+    provider = "mock"
+    model_name = "mock-tool-input-v1"
+
+    def __init__(self, events, delta=None, before_return=None):
+        self.events = events
+        self.delta = {"value": "complete"} if delta is None else delta
+        self.before_return = before_return
+        self.calls = 0
+        self.commands = []
+
+    def extract(self, command):
+        from materialsagent.domain.ports.tool_input_extraction import (
+            ToolInputExtractionOutcome,
+            ToolInputExtractionRequestMetadata,
+        )
+
+        self.calls += 1
+        self.commands.append(command)
+        self.events.append("extract")
+        if self.before_return is not None:
+            self.before_return(command)
+        return ToolInputExtractionOutcome(
+            candidate_input_delta=self.delta,
+            request_metadata=ToolInputExtractionRequestMetadata(
+                provider=self.provider,
+                model_name=self.model_name,
+                prompt_template_id="tool-input-extraction",
+                prompt_template_version="1",
+                prompt_digest="a" * 64,
+                generation_parameters={"temperature": 0, "max_tokens": 256},
+            ),
+        )
+
+
+class _RouterMustNotRun:
+    provider = "mock"
+    model_name = "mock-chat-orchestration-v1"
+
+    def request_metadata(self, _value):
+        pytest.fail("A bound supplement rebuilt a routing catalog.")
+
+    def orchestrate(self, _value):
+        pytest.fail("A bound supplement invoked the first-route Router.")
+
+
+def test_registry_schema_drift_denial_blocks_supplement_before_extraction() -> None:
+    from materialsagent.domain.ports.tool_registry import NeedsInputNormalization, ToolRef
+
+    actor, submission, store, prior, _ = _bound_supplement_case()
+    registry = _RoutingRegistrySpy(
+        {
+            "tool_one": NeedsInputNormalization(
+                normalized_input={"value": None, "requested_outputs": ["result"]},
+                missing_fields=("value",),
+                ambiguous_fields=(),
+                follow_up_suggestion="Provide value.",
+            )
+        }
+    )
+    registry._definitions["tool_one"].ref = ToolRef(
+        "tool_one", "2", "2" * 64
+    )
+    extractor = _RecordingToolInputExtractor(registry.events)
+    service = _service_type()(
+        _UnitOfWorkFactory(store),
+        _RouterMustNotRun(),
+        tool_input_extraction_port=extractor,
+        tool_registry=registry,
+    )
+
+    with pytest.raises(Exception) as captured:
+        service.orchestrate_submission(actor, submission)
+
+    assert captured.value.code == "TOOL_SCHEMA_DRIFT"
+    assert "新任务" in str(captured.value)
+    assert registry.events == ["resolve:tool_one", "authorize:tool_one"]
+    assert extractor.calls == 0
+    assert list(store.revisions.values()) == [prior]
+    assert store.llm_calls == {}
+
+
+def test_supplement_policy_denial_blocks_before_extraction() -> None:
+    from materialsagent.domain.ports.tool_registry import NeedsInputNormalization
+
+    actor, submission, store, prior, _ = _bound_supplement_case()
+    registry = _RoutingRegistrySpy(
+        {
+            "tool_one": NeedsInputNormalization(
+                normalized_input={"value": None, "requested_outputs": ["result"]},
+                missing_fields=("value",),
+                ambiguous_fields=(),
+                follow_up_suggestion="Provide value.",
+            )
+        },
+        denied=("tool_one",),
+    )
+    extractor = _RecordingToolInputExtractor(registry.events)
+    service = _service_type()(
+        _UnitOfWorkFactory(store),
+        _RouterMustNotRun(),
+        tool_input_extraction_port=extractor,
+        tool_registry=registry,
+    )
+
+    with pytest.raises(Exception) as captured:
+        service.orchestrate_submission(actor, submission)
+
+    assert captured.value.code == "TOOL_EXECUTION_NOT_ALLOWED"
+    assert registry.events == ["resolve:tool_one", "authorize:tool_one"]
+    assert extractor.calls == 0
+    assert list(store.revisions.values()) == [prior]
+    assert store.llm_calls == {}
+
+
+def test_supplement_rechecks_latest_revision_after_external_extraction() -> None:
+    from materialsagent.domain.ports.tool_registry import ReadyNormalization
+
+    actor, submission, store, prior, bound_ref = _bound_supplement_case()
+    original_task = store.tasks[submission.task.task_id]
+    factory = _UnitOfWorkFactory(store)
+    registry = _RoutingRegistrySpy(
+        {
+            "tool_one": ReadyNormalization(
+                normalized_input={"value": "complete", "requested_outputs": ["result"]},
+                requested_outputs=("result",),
+            )
+        }
+    )
+    definition = registry._definitions["tool_one"]
+
+    def normalize(_delta, prior_normalized_input=None):
+        assert prior_normalized_input == prior.normalized_input
+        return ReadyNormalization(
+            normalized_input={"value": "complete", "requested_outputs": ["result"]},
+            requested_outputs=("result",),
+        )
+
+    definition.normalize = normalize
+    definition.normalizer = normalize
+
+    competing_uows: list[_UnitOfWork] = []
+
+    def concurrent_revision(_command):
+        competing = factory()
+        competing_uows.append(competing)
+        with competing:
+            locked = competing.tasks.get_owned_for_update(
+                submission.task.task_id,
+                actor.actor_id,
+            )
+            assert locked is not None
+            competing.task_input_revisions.add(
+                replace(
+                    prior,
+                    task_input_revision_id="revision_concurrent",
+                    request_id="req_concurrent",
+                    source_llm_call_id="llm_concurrent",
+                    revision=2,
+                    raw_input={"value": None},
+                    normalized_input={
+                        "value": None,
+                        "requested_outputs": ["result"],
+                    },
+                    missing_fields=["value"],
+                )
+            )
+            updated = replace(
+                locked,
+                updated_at=BASE_TIME + timedelta(seconds=2),
+            )
+            assert competing.tasks.update(
+                updated,
+                expected_status="NEEDS_INPUT",
+            ) == updated
+            competing.commit()
+
+    extractor = _RecordingToolInputExtractor(
+        registry.events,
+        before_return=concurrent_revision,
+    )
+    service = _service_type()(
+        factory,
+        _RouterMustNotRun(),
+        tool_input_extraction_port=extractor,
+        tool_registry=registry,
+        clock=_SequenceClock(),
+        id_factory=_id_factory,
+    )
+
+    with pytest.raises(Exception) as captured:
+        service.orchestrate_submission(actor, submission)
+
+    assert captured.value.code == "RESOURCE_CONFLICT"
+    assert competing_uows and competing_uows[0]._committed
+    assert len(factory.instances) == 3
+    assert factory.active == 0
+    assert len(store.revisions) == 2
+    assert all(
+        revision.request_id != submission.user_message.request_id
+        for revision in store.revisions.values()
+    )
+    assert store.llm_calls == {}
+    assert store.tasks[submission.task.task_id].bound_tool_ref == bound_ref
+    assert original_task.bound_tool_ref == bound_ref
+
+
+def test_invalid_supplement_normalization_is_audited_without_new_revision() -> None:
+    from materialsagent.domain.ports.tool_registry import ReadyNormalization
+
+    actor, submission, store, prior, _ = _bound_supplement_case()
+    registry = _RoutingRegistrySpy(
+        {
+            "tool_one": ReadyNormalization(
+                normalized_input={"value": "complete", "requested_outputs": ["result"]},
+                requested_outputs=("result",),
+            )
+        }
+    )
+    definition = registry._definitions["tool_one"]
+    definition.normalize = lambda *_args, **_kwargs: object()
+    definition.normalizer = definition.normalize
+    extractor = _RecordingToolInputExtractor(registry.events)
+    service = _service_type()(
+        _UnitOfWorkFactory(store),
+        _RouterMustNotRun(),
+        tool_input_extraction_port=extractor,
+        tool_registry=registry,
+        clock=_SequenceClock(),
+        id_factory=_id_factory,
+    )
+
+    with pytest.raises(Exception) as captured:
+        service.orchestrate_submission(actor, submission)
+
+    assert captured.value.code == "AGENT_INTERNAL_ERROR"
+    assert list(store.revisions.values()) == [prior]
+    assert store.tasks[submission.task.task_id].current_status == "FAILED"
+    assert len(store.llm_calls) == 1
+    failed_call = next(iter(store.llm_calls.values()))
+    assert failed_call.purpose == "TOOL_INPUT_EXTRACTION"
+    assert failed_call.status == "FAILED"
+    assert failed_call.error_code == "LLM_SCHEMA_MISMATCH"
+    assert failed_call.structured_output_summary is None
+
+
+@pytest.mark.parametrize("exception_type", [AttributeError, OverflowError])
+def test_supplement_normalizer_runtime_validation_errors_are_controlled(
+    exception_type: type[Exception],
+) -> None:
+    from materialsagent.domain.ports.tool_registry import ReadyNormalization
+
+    actor, submission, store, prior, _ = _bound_supplement_case()
+    registry = _RoutingRegistrySpy(
+        {
+            "tool_one": ReadyNormalization(
+                normalized_input={
+                    "value": "complete",
+                    "requested_outputs": ["result"],
+                },
+                requested_outputs=("result",),
+            )
+        }
+    )
+    definition = registry._definitions["tool_one"]
+
+    def fail_normalization(*_args, **_kwargs):
+        raise exception_type("PRIVATE invalid normalizer output")
+
+    definition.normalize = fail_normalization
+    definition.normalizer = fail_normalization
+    service = _service_type()(
+        _UnitOfWorkFactory(store),
+        _RouterMustNotRun(),
+        tool_input_extraction_port=_RecordingToolInputExtractor(
+            registry.events
+        ),
+        tool_registry=registry,
+        clock=_SequenceClock(),
+        id_factory=_id_factory,
+    )
+
+    with pytest.raises(Exception) as captured:
+        service.orchestrate_submission(actor, submission)
+
+    assert captured.value.code == "AGENT_INTERNAL_ERROR"
+    assert "PRIVATE" not in str(captured.value)
+    assert list(store.revisions.values()) == [prior]
+    assert store.tasks[submission.task.task_id].current_status == "FAILED"
+    assert len(store.llm_calls) == 1
+    failed_call = next(iter(store.llm_calls.values()))
+    assert failed_call.purpose == "TOOL_INPUT_EXTRACTION"
+    assert failed_call.status == "FAILED"
+    assert failed_call.error_code == "LLM_SCHEMA_MISMATCH"
+    assert failed_call.structured_output_summary is None
+
+
+def test_still_ambiguous_supplement_preserves_prior_controlled_candidates() -> None:
+    from materialsagent.domain.ports.tool_registry import NeedsInputNormalization
+
+    actor, submission, store, prior, _ = _bound_supplement_case()
+    ambiguous_prior = replace(
+        prior,
+        missing_fields=[],
+        ambiguous_fields=[{"field": "value", "candidates": [2, 3]}],
+    )
+    store.revisions[prior.task_input_revision_id] = ambiguous_prior
+    registry = _RoutingRegistrySpy(
+        {
+            "tool_one": NeedsInputNormalization(
+                normalized_input={"value": None, "requested_outputs": ["result"]},
+                missing_fields=(),
+                ambiguous_fields=("value",),
+                follow_up_suggestion="Choose a value.",
+            )
+        }
+    )
+    definition = registry._definitions["tool_one"]
+
+    def normalize(delta, prior_normalized_input=None):
+        assert delta == {"value": {"candidates": [2, 3]}}
+        assert prior_normalized_input == ambiguous_prior.normalized_input
+        return NeedsInputNormalization(
+            normalized_input={"value": None, "requested_outputs": ["result"]},
+            missing_fields=(),
+            ambiguous_fields=("value",),
+            follow_up_suggestion="Choose a value.",
+        )
+
+    definition.normalize = normalize
+    definition.normalizer = normalize
+    service = _service_type()(
+        _UnitOfWorkFactory(store),
+        _RouterMustNotRun(),
+        tool_input_extraction_port=_RecordingToolInputExtractor(
+            registry.events,
+            delta={},
+        ),
+        tool_registry=registry,
+        clock=_SequenceClock(),
+        id_factory=_id_factory,
+    )
+
+    projection = service.orchestrate_submission(actor, submission)
+
+    assert projection.task.current_status == "NEEDS_INPUT"
+    assert projection.revision.revision == 2
+    assert projection.revision.ambiguous_fields == [
+        {"field": "value", "candidates": [2, 3]}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("controlled_candidates", "misleading_candidates"),
+    [
+        ([1, 0], [True, False]),
+        ([True, False], [1, 0]),
+        (
+            [{"nested": [1.0]}, {"nested": [2]}],
+            [{"nested": [1]}, {"nested": [2.0]}],
+        ),
+    ],
+)
+def test_ambiguity_history_uses_type_sensitive_standard_json_equivalence(
+    controlled_candidates: list[object],
+    misleading_candidates: list[object],
+) -> None:
+    from materialsagent.application.chat_orchestration import (
+        ChatOrchestrationService,
+        _BoundSupplementSnapshot,
+    )
+    from materialsagent.domain.ports.tool_registry import ToolRef
+
+    _, _, _, prior, _ = _bound_supplement_case()
+    exact_raw = {
+        "value": {"candidates": controlled_candidates},
+        "unit": "h",
+    }
+    misleading_raw = {
+        "value": {"candidates": misleading_candidates},
+        "unit": "h",
+    }
+    older_exact_revision = replace(
+        prior,
+        task_input_revision_id="revision_older_exact",
+        revision=1,
+        raw_input={
+            "value": {
+                "legacy": {"candidates": controlled_candidates},
+                "marker": "older exact shape",
+            }
+        },
+    )
+    exact_revision = replace(
+        prior,
+        task_input_revision_id="revision_exact",
+        revision=2,
+        raw_input={"value": exact_raw},
+    )
+    misleading_revision = replace(
+        prior,
+        task_input_revision_id="revision_misleading",
+        revision=3,
+        raw_input={"value": misleading_raw},
+    )
+    latest_revision = replace(
+        prior,
+        task_input_revision_id="revision_latest",
+        revision=4,
+        raw_input={"other": "new delta"},
+        missing_fields=[],
+        ambiguous_fields=[
+            {"field": "value", "candidates": controlled_candidates}
+        ],
+    )
+    snapshot = _BoundSupplementSnapshot(
+        bound_tool_ref=ToolRef("tool_one", "1", "1" * 64),
+        latest_revision=latest_revision,
+        revision_history=(
+            older_exact_revision,
+            exact_revision,
+            misleading_revision,
+            latest_revision,
+        ),
+        prior_normalized_input=latest_revision.normalized_input,
+    )
+
+    reconstructed = ChatOrchestrationService._supplement_normalization_delta(
+        {},
+        snapshot,
+    )
+
+    assert json.dumps(
+        reconstructed,
+        sort_keys=True,
+        separators=(",", ":"),
+    ) == json.dumps(
+        {"value": exact_raw},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("controlled_candidates", "misleading_candidates"),
+    [
+        ([1, 2], [True, 2]),
+        ([1, 2], [1.0, 2.0]),
+    ],
+)
+def test_service_skips_newer_type_mismatch_for_real_zta_normalizer(
+    controlled_candidates: list[object],
+    misleading_candidates: list[object],
+) -> None:
+    from materialsagent.application.tool_registry import ToolRegistry
+    from materialsagent.application.zta35g_tool import (
+        build_zta35g_tool_definition,
+    )
+    from materialsagent.domain.ports.tool_registry import (
+        NeedsInputNormalization,
+        ToolRef,
+    )
+
+    actor, submission, store, prior, _ = _bound_supplement_case()
+    base_definition = build_zta35g_tool_definition()
+    real_normalizer = base_definition.normalizer
+    assert real_normalizer is not None
+    observed_normalizer_inputs: list[dict[str, object]] = []
+
+    def recording_real_normalizer(candidate_input, prior_normalized_input=None):
+        observed_normalizer_inputs.append(
+            json.loads(json.dumps(candidate_input, ensure_ascii=False))
+        )
+        return real_normalizer(candidate_input, prior_normalized_input)
+
+    registry = ToolRegistry(
+        (
+            replace(
+                base_definition,
+                version="2",
+                normalizer=recording_real_normalizer,
+            ),
+        )
+    )
+    current = registry.resolve("zta35g_sem_virtual_lab")
+    original_binding = ToolRef(
+        current.ref.tool_id,
+        "1",
+        current.ref.schema_hash,
+    )
+    exact_solution_time = {
+        "value": {"candidates": controlled_candidates},
+        "unit": "h",
+    }
+    initial_candidate = {
+        "material": "ZTA35G",
+        "solution_temperature": {"value": 1000, "unit": "°C"},
+        "solution_time": exact_solution_time,
+        "aging_temperature": {"value": 730, "unit": "°C"},
+        "aging_time": {"value": 3, "unit": "h"},
+        "requested_outputs": ["sem_image"],
+    }
+    initial = base_definition.normalize(initial_candidate)
+    assert isinstance(initial, NeedsInputNormalization)
+    latest = base_definition.normalize(
+        {
+            "solution_time": exact_solution_time,
+            "aging_temperature": {"value": 740, "unit": "°C"},
+        },
+        prior_normalized_input=initial.normalized_input,
+    )
+    assert isinstance(latest, NeedsInputNormalization)
+    bound_task = replace(
+        store.tasks[submission.task.task_id],
+        tool_id=original_binding.tool_id,
+        bound_tool_version=original_binding.version,
+        bound_schema_hash=original_binding.schema_hash,
+    )
+    exact_revision = replace(
+        prior,
+        task_input_revision_id="revision_exact_zta",
+        revision=1,
+        raw_input=initial_candidate,
+        normalized_input=dict(initial.normalized_input),
+        missing_fields=[],
+        ambiguous_fields=[
+            {
+                "field": "solution_time",
+                "candidates": controlled_candidates,
+            }
+        ],
+    )
+    misleading_revision = replace(
+        exact_revision,
+        task_input_revision_id="revision_misleading_zta",
+        request_id="req_misleading_zta",
+        source_llm_call_id="llm_misleading_zta",
+        revision=2,
+        raw_input={
+            "solution_time": {
+                "value": {"candidates": misleading_candidates},
+                "unit": "h",
+            }
+        },
+        ambiguous_fields=[
+            {
+                "field": "solution_time",
+                "candidates": misleading_candidates,
+            }
+        ],
+        created_at=BASE_TIME + timedelta(seconds=1),
+    )
+    latest_revision = replace(
+        exact_revision,
+        task_input_revision_id="revision_latest_zta",
+        request_id="req_latest_zta",
+        source_llm_call_id="llm_latest_zta",
+        revision=3,
+        raw_input={
+            "aging_temperature": {"value": 740, "unit": "°C"}
+        },
+        normalized_input=dict(latest.normalized_input),
+        created_at=BASE_TIME + timedelta(seconds=2),
+    )
+    store.tasks[bound_task.task_id] = bound_task
+    store.revisions = {
+        item.task_input_revision_id: item
+        for item in (
+            exact_revision,
+            misleading_revision,
+            latest_revision,
+        )
+    }
+    submission = replace(submission, task=bound_task)
+    provider_delta = {"aging_time": {"value": 4, "unit": "h"}}
+    extractor = _RecordingToolInputExtractor([], delta=provider_delta)
+    service = _service_type()(
+        _UnitOfWorkFactory(store),
+        _RouterMustNotRun(),
+        tool_input_extraction_port=extractor,
+        tool_registry=registry,
+        clock=_SequenceClock(),
+        id_factory=_id_factory,
+    )
+
+    projection = service.orchestrate_submission(actor, submission)
+
+    assert json.dumps(
+        observed_normalizer_inputs,
+        sort_keys=True,
+        separators=(",", ":"),
+    ) == json.dumps(
+        [
+            {
+                "aging_time": {"value": 4, "unit": "h"},
+                "solution_time": exact_solution_time,
+            }
+        ],
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    command = extractor.commands[0]
+    assert command.tool_context_ref == current.ref
+    assert not hasattr(command, "prior_normalized_input")
+    assert not hasattr(command, "raw_input")
+    assert projection.task.bound_tool_ref == original_binding
+    assert projection.llm_call.tool_context_ref == {
+        "tool_id": current.ref.tool_id,
+        "version": current.ref.version,
+        "schema_hash": current.ref.schema_hash,
+    }
+    assert projection.llm_call.structured_output_summary == {
+        "candidate_input_delta": provider_delta
+    }
+    assert projection.revision.raw_input == provider_delta
+    assert projection.revision.revision == 4
+    assert projection.revision.ambiguous_fields == [
+        {"field": "solution_time", "candidates": controlled_candidates}
+    ]
+
+
+def test_zta35g_supplement_keeps_untouched_prior_ambiguity_for_real_normalizer() -> None:
+    from materialsagent.application.tool_registry import ToolRegistry
+    from materialsagent.application.zta35g_tool import (
+        build_zta35g_tool_definition,
+    )
+    from materialsagent.domain.ports.tool_registry import NeedsInputNormalization
+
+    actor, submission, store, prior, _ = _bound_supplement_case()
+    definition = build_zta35g_tool_definition()
+    registry = ToolRegistry((definition,))
+    current = registry.resolve("zta35g_sem_virtual_lab")
+    candidate = {
+        "material": "ZTA35G",
+        "solution_temperature": {"value": 1000, "unit": "°C"},
+        "solution_time": {
+            "value": {"candidates": [2, 3]},
+            "unit": "h",
+        },
+        "aging_temperature": {"value": 730, "unit": "°C"},
+        "aging_time": {"value": 3, "unit": "h"},
+        "requested_outputs": ["sem_image"],
+    }
+    initial = current.normalize(candidate)
+    assert isinstance(initial, NeedsInputNormalization)
+    bound_task = replace(
+        store.tasks[submission.task.task_id],
+        tool_id=current.ref.tool_id,
+        bound_tool_version=current.ref.version,
+        bound_schema_hash=current.ref.schema_hash,
+    )
+    zta_prior = replace(
+        prior,
+        raw_input=candidate,
+        normalized_input=dict(initial.normalized_input),
+        missing_fields=[],
+        ambiguous_fields=[
+            {"field": "solution_time", "candidates": [2, 3]}
+        ],
+    )
+    store.tasks[bound_task.task_id] = bound_task
+    store.revisions[prior.task_input_revision_id] = zta_prior
+    supplement = replace(submission, task=bound_task)
+    service = _service_type()(
+        _UnitOfWorkFactory(store),
+        _RouterMustNotRun(),
+        tool_input_extraction_port=_RecordingToolInputExtractor(
+            [],
+            delta={
+                "aging_temperature": {"value": 740, "unit": "°C"}
+            },
+        ),
+        tool_registry=registry,
+        clock=_SequenceClock(),
+        id_factory=_id_factory,
+    )
+
+    projection = service.orchestrate_submission(actor, supplement)
+
+    assert projection.task.current_status == "NEEDS_INPUT"
+    assert projection.task.bound_tool_ref == current.ref
+    assert projection.revision.raw_input == {
+        "aging_temperature": {"value": 740, "unit": "°C"}
+    }
+    assert projection.revision.normalized_input["aging_temperature"] == {
+        "value": 740,
+        "unit": "°C",
+    }
+    assert projection.revision.normalized_input["solution_time"] is None
+    assert projection.revision.ambiguous_fields == [
+        {"field": "solution_time", "candidates": [2, 3]}
+    ]
+
+
+def test_two_zta35g_supplements_recover_older_untouched_ambiguity_shape() -> None:
+    from materialsagent.application.tool_registry import ToolRegistry
+    from materialsagent.application.zta35g_tool import (
+        build_zta35g_tool_definition,
+    )
+    from materialsagent.domain.models.idempotency_record import IdempotencyRecord
+    from materialsagent.domain.ports.tool_registry import NeedsInputNormalization
+
+    actor, first_submission, store, prior, _ = _bound_supplement_case()
+    registry = ToolRegistry((build_zta35g_tool_definition(),))
+    current = registry.resolve("zta35g_sem_virtual_lab")
+    initial_candidate = {
+        "material": "ZTA35G",
+        "solution_temperature": {"value": 1000, "unit": "°C"},
+        "solution_time": {
+            "value": {"candidates": [2, 3]},
+            "unit": "h",
+        },
+        "aging_temperature": {"value": 730, "unit": "°C"},
+        "aging_time": {"value": 3, "unit": "h"},
+        "requested_outputs": ["sem_image"],
+    }
+    initial = current.normalize(initial_candidate)
+    assert isinstance(initial, NeedsInputNormalization)
+    bound_task = replace(
+        store.tasks[first_submission.task.task_id],
+        tool_id=current.ref.tool_id,
+        bound_tool_version=current.ref.version,
+        bound_schema_hash=current.ref.schema_hash,
+    )
+    store.tasks[bound_task.task_id] = bound_task
+    store.revisions[prior.task_input_revision_id] = replace(
+        prior,
+        raw_input=initial_candidate,
+        normalized_input=dict(initial.normalized_input),
+        missing_fields=[],
+        ambiguous_fields=[
+            {"field": "solution_time", "candidates": [2, 3]}
+        ],
+    )
+    first_submission = replace(first_submission, task=bound_task)
+    extractor = _RecordingToolInputExtractor(
+        [],
+        delta={"aging_temperature": {"value": 740, "unit": "°C"}},
+    )
+    service = _service_type()(
+        _UnitOfWorkFactory(store),
+        _RouterMustNotRun(),
+        tool_input_extraction_port=extractor,
+        tool_registry=registry,
+        clock=_SequenceClock(),
+        id_factory=_SequenceIdFactory(),
+    )
+
+    first = service.orchestrate_submission(actor, first_submission)
+
+    second_message = Message.user(
+        message_id="msg_second_supplement",
+        conversation_id=first.task.conversation_id,
+        task_id=first.task.task_id,
+        actor_id=actor.actor_id,
+        request_id="req_second_supplement",
+        content_text="aging time is 4 h",
+        created_at=BASE_TIME + timedelta(seconds=5),
+    )
+    second_record = IdempotencyRecord(
+        idempotency_record_id="idem_second_supplement",
+        actor_id=actor.actor_id,
+        operation="TASK_INPUT_SUPPLEMENT",
+        idempotency_key="second-supplement-key",
+        request_digest="e" * 64,
+        first_request_id=second_message.request_id,
+        task_id=first.task.task_id,
+        message_id=second_message.message_id,
+        task_input_revision_id=None,
+        tool_run_id=None,
+        explanation_id=None,
+        created_at=second_message.created_at,
+        expires_at=None,
+    )
+    store.messages[second_message.message_id] = second_message
+    store.idempotency_records[
+        second_record.idempotency_record_id
+    ] = second_record
+    second_submission = PreparedSubmission(
+        conversation_id=first.task.conversation_id,
+        user_message=second_message,
+        task=first.task,
+        submission_mode="SUPPLEMENT_TASK",
+        idempotency_record_id=second_record.idempotency_record_id,
+    )
+    extractor.delta = {"aging_time": {"value": 4, "unit": "h"}}
+
+    second = service.orchestrate_submission(actor, second_submission)
+
+    assert first.revision.raw_input == {
+        "aging_temperature": {"value": 740, "unit": "°C"}
+    }
+    assert second.revision.raw_input == {
+        "aging_time": {"value": 4, "unit": "h"}
+    }
+    assert second.revision.revision == 3
+    assert second.revision.normalized_input["aging_temperature"] == {
+        "value": 740,
+        "unit": "°C",
+    }
+    assert second.revision.normalized_input["aging_time"] == {
+        "value": 4,
+        "unit": "h",
+    }
+    assert second.revision.ambiguous_fields == [
+        {"field": "solution_time", "candidates": [2, 3]}
+    ]
+    assert [
+        call.structured_output_summary
+        for call in store.llm_calls.values()
+    ] == [
+        {
+            "candidate_input_delta": {
+                "aging_temperature": {"value": 740, "unit": "°C"}
+            }
+        },
+        {
+            "candidate_input_delta": {
+                "aging_time": {"value": 4, "unit": "h"}
+            }
+        },
+    ]
+
+
+def test_same_schema_new_tool_version_supplements_without_rewriting_binding() -> None:
+    from materialsagent.domain.ports.tool_registry import ReadyNormalization, ToolRef
+
+    actor, submission, store, prior, bound_ref = _bound_supplement_case()
+    registry = _RoutingRegistrySpy(
+        {
+            "tool_one": ReadyNormalization(
+                normalized_input={"value": "complete", "requested_outputs": ["result"]},
+                requested_outputs=("result",),
+            )
+        }
+    )
+    definition = registry._definitions["tool_one"]
+    current_ref = ToolRef("tool_one", "2", bound_ref.schema_hash)
+    definition.ref = current_ref
+
+    def normalize(delta, prior_normalized_input=None):
+        assert delta == {"value": "complete"}
+        assert prior_normalized_input == prior.normalized_input
+        return ReadyNormalization(
+            normalized_input={"value": "complete", "requested_outputs": ["result"]},
+            requested_outputs=("result",),
+        )
+
+    definition.normalize = normalize
+    definition.normalizer = normalize
+    extractor = _RecordingToolInputExtractor(registry.events)
+    service = _service_type()(
+        _UnitOfWorkFactory(store),
+        _RouterMustNotRun(),
+        tool_input_extraction_port=extractor,
+        tool_registry=registry,
+        clock=_SequenceClock(),
+        id_factory=_id_factory,
+    )
+
+    projection = service.orchestrate_submission(actor, submission)
+
+    assert projection.task.bound_tool_ref == bound_ref
+    assert extractor.commands[0].tool_context_ref == current_ref
+    assert projection.llm_call.tool_context_ref == {
+        "tool_id": current_ref.tool_id,
+        "version": current_ref.version,
+        "schema_hash": current_ref.schema_hash,
+    }
+
+
+def _uncertain_supplement_service(
+    store: _Store,
+    mutate: Callable[[_Store], None],
+    *,
+    invalid_normalizer: bool = False,
+):
+    from materialsagent.domain.ports.tool_registry import NeedsInputNormalization
+
+    normalization = NeedsInputNormalization(
+        normalized_input={"value": None, "requested_outputs": ["result"]},
+        missing_fields=("value",),
+        ambiguous_fields=(),
+        follow_up_suggestion="Provide value.",
+    )
+    registry = _RoutingRegistrySpy({"tool_one": normalization})
+    definition = registry._definitions["tool_one"]
+    if invalid_normalizer:
+        definition.normalize = lambda *_args, **_kwargs: object()
+    else:
+        definition.normalize = lambda *_args, **_kwargs: normalization
+    definition.normalizer = definition.normalize
+    extractor = _RecordingToolInputExtractor(registry.events)
+    factory = _UnitOfWorkFactory(
+        store,
+        uncertain_commit_call=1,
+        uncertain_commit_mutator=mutate,
+    )
+    service = _service_type()(
+        factory,
+        _RouterMustNotRun(),
+        tool_input_extraction_port=extractor,
+        tool_registry=registry,
+        clock=_SequenceClock(),
+        id_factory=_id_factory,
+    )
+    return service, extractor
+
+
+def test_uncertain_supplement_success_recovers_exact_committed_projection() -> None:
+    actor, submission, store, prior, bound_ref = _bound_supplement_case()
+    service, extractor = _uncertain_supplement_service(
+        store,
+        lambda _store: None,
+    )
+
+    projection = service.orchestrate_submission(actor, submission)
+
+    assert extractor.calls == 1
+    assert projection.task.current_status == "NEEDS_INPUT"
+    assert projection.task.bound_tool_ref == bound_ref
+    assert projection.llm_call.status == "SUCCEEDED"
+    assert projection.llm_call.purpose == "TOOL_INPUT_EXTRACTION"
+    assert projection.revision.revision == prior.revision + 1
+    assert projection.assistant_message == store.messages["msg_assistant"]
+    assert store.idempotency_records[
+        "idem_supplement"
+    ].task_input_revision_id == projection.revision.task_input_revision_id
+    assert service.load_current_submission(actor, submission) == projection
+
+
+@pytest.mark.parametrize(
+    "difference",
+    ["call", "task", "revision", "assistant", "idempotency"],
+)
+def test_uncertain_supplement_success_rejects_mismatched_committed_facts(
+    difference: str,
+) -> None:
+    actor, submission, store, _, _ = _bound_supplement_case()
+
+    def mutate(committed: _Store) -> None:
+        if difference == "call":
+            committed.llm_calls["llm_unit"] = replace(
+                committed.llm_calls["llm_unit"],
+                provider_request_id="different-provider-request",
+            )
+        elif difference == "task":
+            committed.tasks[submission.task.task_id] = replace(
+                committed.tasks[submission.task.task_id],
+                bound_tool_version="different-version",
+            )
+        elif difference == "revision":
+            committed.revisions["revision_unit"] = replace(
+                committed.revisions["revision_unit"],
+                raw_input={"value": "different"},
+            )
+        elif difference == "assistant":
+            committed.messages["msg_assistant"] = replace(
+                committed.messages["msg_assistant"],
+                content_text="Different follow-up.",
+            )
+        else:
+            committed.idempotency_records["idem_supplement"] = replace(
+                committed.idempotency_records["idem_supplement"],
+                task_input_revision_id="revision_different",
+            )
+
+    service, _ = _uncertain_supplement_service(store, mutate)
+
+    with pytest.raises(Exception) as captured:
+        service.orchestrate_submission(actor, submission)
+
+    assert captured.value.code == "RESOURCE_CONFLICT"
+
+
+def test_uncertain_supplement_failure_recovers_exact_failed_audit() -> None:
+    actor, submission, store, prior, bound_ref = _bound_supplement_case()
+    service, extractor = _uncertain_supplement_service(
+        store,
+        lambda _store: None,
+        invalid_normalizer=True,
+    )
+
+    with pytest.raises(Exception) as captured:
+        service.orchestrate_submission(actor, submission)
+
+    assert captured.value.code == "AGENT_INTERNAL_ERROR"
+    assert extractor.calls == 1
+    assert store.tasks[submission.task.task_id].current_status == "FAILED"
+    assert store.tasks[submission.task.task_id].bound_tool_ref == bound_ref
+    assert store.llm_calls["llm_unit"].purpose == "TOOL_INPUT_EXTRACTION"
+    assert store.llm_calls["llm_unit"].status == "FAILED"
+    assert list(store.revisions.values()) == [prior]
+    assert store.idempotency_records[
+        "idem_supplement"
+    ].task_input_revision_id is None
+    replay = service.load_current_submission(actor, submission)
+    assert replay.llm_call == store.llm_calls["llm_unit"]
+    assert replay.revision is None
+    assert replay.assistant_message is None
+
+
+@pytest.mark.parametrize(
+    "difference",
+    ["call", "task", "revision", "assistant", "idempotency"],
+)
+def test_uncertain_supplement_failure_rejects_mismatched_committed_facts(
+    difference: str,
+) -> None:
+    actor, submission, store, prior, _ = _bound_supplement_case()
+
+    def mutate(committed: _Store) -> None:
+        if difference == "call":
+            committed.llm_calls["llm_unit"] = replace(
+                committed.llm_calls["llm_unit"],
+                safe_error_message="Different safe failure.",
+            )
+        elif difference == "task":
+            committed.tasks[submission.task.task_id] = replace(
+                committed.tasks[submission.task.task_id],
+                bound_tool_version="different-version",
+            )
+        elif difference == "revision":
+            committed.revisions["revision_unexpected"] = replace(
+                prior,
+                task_input_revision_id="revision_unexpected",
+                request_id=submission.user_message.request_id,
+                source_llm_call_id="llm_unit",
+                revision=2,
+            )
+        elif difference == "assistant":
+            committed.messages["msg_assistant"] = Message(
+                message_id="msg_assistant",
+                conversation_id=submission.conversation_id,
+                task_id=submission.task.task_id,
+                actor_id=actor.actor_id,
+                request_id=submission.user_message.request_id,
+                role="ASSISTANT",
+                generation_source="LLM",
+                content_text="Unexpected follow-up.",
+                structured_content=None,
+                llm_call_id="llm_unit",
+                created_at=BASE_TIME + timedelta(seconds=2),
+            )
+        else:
+            committed.idempotency_records["idem_supplement"] = replace(
+                committed.idempotency_records["idem_supplement"],
+                task_input_revision_id="revision_unexpected",
+            )
+
+    service, _ = _uncertain_supplement_service(
+        store,
+        mutate,
+        invalid_normalizer=True,
+    )
+
+    with pytest.raises(Exception) as captured:
+        service.orchestrate_submission(actor, submission)
+
+    assert captured.value.code == "RESOURCE_CONFLICT"
+
+
+def test_ml_candidate_binds_once_and_fixed_tool_supplement_becomes_ready() -> None:
+    from materialsagent.application.tool_registry import ToolRegistry
+    from materialsagent.application.zta35g_tool import build_zta35g_tool_definition
+    from materialsagent.domain.models.idempotency_record import IdempotencyRecord
+    from backend.tests.support.heterogeneous_tools import (
+        build_ml_training_test_definition,
+    )
+
+    normalization_calls: list[tuple[dict[str, object], dict[str, object] | None]] = []
+
+    def record_normalization(candidate, prior):
+        normalization_calls.append(
+            (
+                dict(candidate),
+                None if prior is None else dict(prior),
+            )
+        )
+
+    def forbidden_zta_normalizer(*_args, **_kwargs):
+        pytest.fail("The ML route invoked the ZTA35G normalizer.")
+
+    zta = replace(
+        build_zta35g_tool_definition(),
+        normalizer=forbidden_zta_normalizer,
+    )
+    ml = build_ml_training_test_definition(
+        normalization_observer=record_normalization,
+    )
+    registry = ToolRegistry((zta, ml))
+    actor, submission, store = _submission()
+    factory = _UnitOfWorkFactory(store)
+    ids = _SequenceIdFactory()
+    router_calls: list[object] = []
+
+    def route_to_incomplete_ml(orchestration_input):
+        assert factory.active == 0
+        router_calls.append(orchestration_input)
+        assert {
+            entry.tool_id for entry in orchestration_input.routing_catalog.entries
+        } == {"zta35g_sem_virtual_lab", "ml_training_test"}
+        return {
+            "route": "TOOL_CANDIDATES",
+            "candidates": [
+                {
+                    "tool_id": "ml_training_test",
+                    "candidate_input": {
+                        "dataset": "dataset_fixture_1",
+                        "task_type": "regression",
+                        "split_ratio": None,
+                        "target_column": "yield_strength",
+                        "shuffle": True,
+                    },
+                }
+            ],
+        }
+
+    extraction_events: list[str] = []
+    extractor = _RecordingToolInputExtractor(
+        extraction_events,
+        delta={"split_ratio": 0.8},
+    )
+    service = _service_type()(
+        factory,
+        MockChatOrchestrationAdapter(route_to_incomplete_ml),
+        tool_input_extraction_port=extractor,
+        tool_registry=registry,
+        clock=_SequenceClock(),
+        id_factory=ids,
+    )
+
+    first = service.orchestrate_submission(actor, submission)
+
+    ml_ref = registry.resolve("ml_training_test").ref
+    assert first.task.current_status == "NEEDS_INPUT"
+    assert first.task.bound_tool_ref == ml_ref
+    assert first.revision is not None
+    assert first.revision.normalized_input == {
+        "dataset": "dataset_fixture_1",
+        "task_type": "regression",
+        "split_ratio": None,
+        "target_column": "yield_strength",
+        "shuffle": True,
+    }
+    assert first.revision.missing_fields == ["split_ratio"]
+
+    supplement_message = Message.user(
+        message_id="msg_ml_supplement",
+        conversation_id=first.task.conversation_id,
+        task_id=first.task.task_id,
+        actor_id=first.task.actor_id,
+        request_id="req_ml_supplement",
+        content_text="Use an 80 percent training split.",
+        created_at=BASE_TIME + timedelta(seconds=30),
+    )
+    record = IdempotencyRecord(
+        idempotency_record_id="idem_ml_supplement",
+        actor_id=actor.actor_id,
+        operation="TASK_INPUT_SUPPLEMENT",
+        idempotency_key="ml-supplement-key",
+        request_digest="d" * 64,
+        first_request_id=supplement_message.request_id,
+        task_id=first.task.task_id,
+        message_id=supplement_message.message_id,
+        task_input_revision_id=None,
+        tool_run_id=None,
+        explanation_id=None,
+        created_at=supplement_message.created_at,
+        expires_at=None,
+    )
+    store.messages[supplement_message.message_id] = supplement_message
+    store.idempotency_records[record.idempotency_record_id] = record
+    supplement = PreparedSubmission(
+        conversation_id=first.task.conversation_id,
+        user_message=supplement_message,
+        task=first.task,
+        submission_mode="SUPPLEMENT_TASK",
+        idempotency_record_id=record.idempotency_record_id,
+    )
+
+    completed = service.orchestrate_submission(actor, supplement)
+
+    assert completed.task.current_status == "READY"
+    assert completed.task.bound_tool_ref == ml_ref
+    assert completed.revision is not None
+    assert completed.revision.revision == 2
+    assert completed.revision.normalized_input == {
+        "dataset": "dataset_fixture_1",
+        "task_type": "regression",
+        "split_ratio": 0.8,
+        "target_column": "yield_strength",
+        "shuffle": True,
+    }
+    assert len(router_calls) == 1
+    assert extraction_events == ["extract"]
+    assert normalization_calls == [
+        (
+            {
+                "dataset": "dataset_fixture_1",
+                "task_type": "regression",
+                "split_ratio": None,
+                "target_column": "yield_strength",
+                "shuffle": True,
+            },
+            None,
+        ),
+        (
+            {"split_ratio": 0.8},
+            {
+                "dataset": "dataset_fixture_1",
+                "task_type": "regression",
+                "split_ratio": None,
+                "target_column": "yield_strength",
+                "shuffle": True,
+            },
+        ),
+    ]

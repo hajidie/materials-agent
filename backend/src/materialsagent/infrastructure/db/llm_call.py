@@ -91,14 +91,29 @@ class LLMCallRow(Base):
             name="ck_llm_call_safe_error_message_not_blank",
         ),
         CheckConstraint(
-            "purpose IN ('CHAT_ORCHESTRATION', 'TOOL_RESULT_EXPLANATION')",
+            "purpose IN ('CHAT_ORCHESTRATION', 'TOOL_RESULT_EXPLANATION', "
+            "'TOOL_INPUT_EXTRACTION')",
             name="ck_llm_call_purpose_allowed",
         ),
         CheckConstraint(
             "(purpose = 'CHAT_ORCHESTRATION' AND input_result_id IS NULL) "
             "OR (purpose = 'TOOL_RESULT_EXPLANATION' "
-            "AND input_result_id IS NOT NULL)",
+            "AND input_result_id IS NOT NULL) OR "
+            "(purpose = 'TOOL_INPUT_EXTRACTION' AND input_result_id IS NULL)",
             name="ck_llm_call_input_result_purpose",
+        ),
+        CheckConstraint(
+            "catalog_snapshot_refs IS NULL OR "
+            "jsonb_typeof(catalog_snapshot_refs) = 'array'",
+            name="ck_llm_call_catalog_snapshot_refs_array",
+        ),
+        CheckConstraint(
+            "catalog_hash IS NULL OR catalog_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_llm_call_catalog_hash_sha256",
+        ),
+        CheckConstraint(
+            "tool_context_ref IS NULL OR jsonb_typeof(tool_context_ref) = 'object'",
+            name="ck_llm_call_tool_context_ref_object",
         ),
         CheckConstraint(
             "status IN ('PENDING', 'RUNNING', 'SUCCEEDED', 'FAILED')",
@@ -195,6 +210,15 @@ class LLMCallRow(Base):
         String(64),
         nullable=True,
     )
+    catalog_snapshot_refs: Mapped[list[dict[str, str]] | None] = mapped_column(
+        JSONB(none_as_null=True),
+        nullable=True,
+    )
+    catalog_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    tool_context_ref: Mapped[dict[str, str] | None] = mapped_column(
+        JSONB(none_as_null=True),
+        nullable=True,
+    )
     generation_parameters: Mapped[dict[str, object]] = mapped_column(
         JSONB,
         nullable=False,
@@ -255,6 +279,17 @@ def _from_row(row: LLMCallRow) -> LLMCall:
         prompt_template_id=row.prompt_template_id,
         prompt_template_version=row.prompt_template_version,
         prompt_digest=row.prompt_digest,
+        catalog_snapshot_refs=(
+            list(row.catalog_snapshot_refs)
+            if row.catalog_snapshot_refs is not None
+            else None
+        ),
+        catalog_hash=row.catalog_hash,
+        tool_context_ref=(
+            dict(row.tool_context_ref)
+            if row.tool_context_ref is not None
+            else None
+        ),
         generation_parameters=dict(row.generation_parameters),
         structured_output_summary=(
             dict(row.structured_output_summary)
@@ -288,12 +323,15 @@ def _immutable_matches(row: LLMCallRow, call: LLMCall) -> bool:
             "prompt_template_id",
             "prompt_template_version",
             "prompt_digest",
+            "catalog_hash",
             "created_at",
         )
     )
     return scalar_fields_match and row.generation_parameters == _jsonb_container(
         call.generation_parameters
-    )
+    ) and row.catalog_snapshot_refs == _jsonb_container(
+        call.catalog_snapshot_refs
+    ) and row.tool_context_ref == _jsonb_container(call.tool_context_ref)
 
 
 ALLOWED_TRANSITIONS: Final = {
@@ -330,6 +368,11 @@ class SQLAlchemyLLMCallRepository:
                     prompt_template_id=call.prompt_template_id,
                     prompt_template_version=call.prompt_template_version,
                     prompt_digest=call.prompt_digest,
+                    catalog_snapshot_refs=_jsonb_container(
+                        call.catalog_snapshot_refs
+                    ),
+                    catalog_hash=call.catalog_hash,
+                    tool_context_ref=_jsonb_container(call.tool_context_ref),
                     generation_parameters=_jsonb_container(
                         call.generation_parameters
                     ),

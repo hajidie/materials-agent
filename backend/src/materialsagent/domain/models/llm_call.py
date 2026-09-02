@@ -9,6 +9,8 @@ import re
 from types import MappingProxyType
 from typing import Final
 
+from materialsagent.domain.ports.tool_registry import ToolRef
+
 
 PENDING: Final = "PENDING"
 RUNNING: Final = "RUNNING"
@@ -16,10 +18,11 @@ SUCCEEDED: Final = "SUCCEEDED"
 FAILED: Final = "FAILED"
 CHAT_ORCHESTRATION: Final = "CHAT_ORCHESTRATION"
 TOOL_RESULT_EXPLANATION: Final = "TOOL_RESULT_EXPLANATION"
+TOOL_INPUT_EXTRACTION: Final = "TOOL_INPUT_EXTRACTION"
 
 STATUSES: Final = frozenset({PENDING, RUNNING, SUCCEEDED, FAILED})
 PURPOSES: Final = frozenset(
-    {CHAT_ORCHESTRATION, TOOL_RESULT_EXPLANATION}
+    {CHAT_ORCHESTRATION, TOOL_RESULT_EXPLANATION, TOOL_INPUT_EXTRACTION}
 )
 SHA256_PATTERN: Final = re.compile(r"[0-9a-f]{64}\Z")
 PROVIDER_REQUEST_ID_PATTERN: Final = re.compile(
@@ -169,6 +172,7 @@ def _controlled_generation_parameters(
         expected_response_format, expected_max_tokens = {
             CHAT_ORCHESTRATION: ("json_object", 1024),
             TOOL_RESULT_EXPLANATION: ("text", 768),
+            TOOL_INPUT_EXTRACTION: ("json_object", 1024),
         }[purpose]
         if (
             temperature != 0
@@ -213,6 +217,59 @@ def _require_controlled_field_list(value: object, field_name: str) -> None:
         )
 
 
+def _controlled_tool_ref(
+    value: object,
+    field_name: str,
+) -> Mapping[str, str]:
+    if isinstance(value, ToolRef):
+        candidate: object = {
+            "tool_id": value.tool_id,
+            "version": value.version,
+            "schema_hash": value.schema_hash,
+        }
+    else:
+        candidate = value
+    if not isinstance(candidate, Mapping) or set(candidate) != {
+        "tool_id",
+        "version",
+        "schema_hash",
+    }:
+        raise ValueError(f"{field_name} must be a controlled Tool reference.")
+    if not all(type(candidate[key]) is str for key in candidate):
+        raise ValueError(f"{field_name} must be a controlled Tool reference.")
+    if not candidate["tool_id"].strip() or not candidate["version"].strip():
+        raise ValueError(f"{field_name} must contain non-blank values.")
+    if SHA256_PATTERN.fullmatch(candidate["schema_hash"]) is None:
+        raise ValueError(f"{field_name}.schema_hash must be lowercase SHA-256 hex.")
+    return _bounded_frozen_object(candidate, field_name)  # type: ignore[return-value]
+
+
+def _controlled_catalog_snapshot_refs(
+    value: object | None,
+) -> tuple[Mapping[str, str], ...] | None:
+    if value is None:
+        return None
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("catalog_snapshot_refs must be a Tool reference array.")
+    refs = tuple(
+        _controlled_tool_ref(item, "catalog_snapshot_refs") for item in value
+    )
+    if len(refs) > 32:
+        raise ValueError("catalog_snapshot_refs exceeds the safe size limit.")
+    if len({ref["tool_id"] for ref in refs}) != len(refs):
+        raise ValueError("catalog_snapshot_refs must not repeat a Tool.")
+    encoded = json.dumps(
+        [_plain_json(ref, "catalog_snapshot_refs") for ref in refs],
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    if len(encoded) > MAX_JSON_BYTES:
+        raise ValueError("catalog_snapshot_refs exceeds the safe size limit.")
+    return refs
+
+
 def _controlled_structured_output_summary(
     value: Mapping[str, object] | None,
     purpose: str,
@@ -221,6 +278,23 @@ def _controlled_structured_output_summary(
         return None
     if not isinstance(value, Mapping):
         raise ValueError("structured_output_summary must be a JSON object.")
+    if purpose == TOOL_INPUT_EXTRACTION:
+        _require_exact_keys(
+            value,
+            {"candidate_input_delta"},
+            "structured_output_summary",
+        )
+        if not isinstance(value["candidate_input_delta"], Mapping):
+            raise ValueError(
+                "structured_output_summary.candidate_input_delta must be a JSON object."
+            )
+        controlled_delta = _bounded_frozen_object(
+            value["candidate_input_delta"],
+            "structured_output_summary.candidate_input_delta",
+        )
+        return MappingProxyType(
+            {"candidate_input_delta": controlled_delta}
+        )
     if purpose != CHAT_ORCHESTRATION:
         raise ValueError(
             "structured_output_summary is only allowed for CHAT_ORCHESTRATION."
@@ -282,6 +356,42 @@ def _controlled_structured_output_summary(
             value["ambiguous_fields"],
             "ambiguous_fields",
         )
+    elif route == "TOOL_CANDIDATES":
+        _require_exact_keys(
+            value,
+            {"route", "candidates"},
+            "structured_output_summary",
+        )
+        candidates = value["candidates"]
+        if not isinstance(candidates, (list, tuple)) or not 1 <= len(candidates) <= 5:
+            raise ValueError(
+                "structured_output_summary.candidates must contain one to five candidates."
+            )
+        tool_ids: set[str] = set()
+        for candidate in candidates:
+            if not isinstance(candidate, Mapping):
+                raise ValueError(
+                    "structured_output_summary.candidates must contain JSON objects."
+                )
+            _require_exact_keys(
+                candidate,
+                {"tool_id", "candidate_input"},
+                "structured_output_summary.candidates item",
+            )
+            tool_id = candidate["tool_id"]
+            if type(tool_id) is not str or not tool_id.strip():
+                raise ValueError(
+                    "structured_output_summary.candidates must contain Tool IDs."
+                )
+            if tool_id in tool_ids:
+                raise ValueError(
+                    "structured_output_summary.candidates must not repeat a Tool."
+                )
+            if not isinstance(candidate["candidate_input"], Mapping):
+                raise ValueError(
+                    "structured_output_summary.candidate_input must be a JSON object."
+                )
+            tool_ids.add(tool_id)
     else:
         raise ValueError("structured_output_summary contains an unknown route.")
     return _bounded_frozen_object(value, "structured_output_summary")
@@ -311,6 +421,9 @@ class LLMCall:
     duration_ms: int | None
     error_code: str | None
     safe_error_message: str | None
+    catalog_snapshot_refs: object | None = None
+    catalog_hash: str | None = None
+    tool_context_ref: object | None = None
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -349,6 +462,10 @@ class LLMCall:
         if self.purpose == TOOL_RESULT_EXPLANATION and self.input_result_id is None:
             raise ValueError(
                 "input_result_id is required for TOOL_RESULT_EXPLANATION."
+            )
+        if self.purpose == TOOL_INPUT_EXTRACTION and self.input_result_id is not None:
+            raise ValueError(
+                "input_result_id must be null for TOOL_INPUT_EXTRACTION."
             )
         if self.prompt_digest is not None and not SHA256_PATTERN.fullmatch(
             self.prompt_digest
@@ -426,6 +543,39 @@ class LLMCall:
                 self.purpose,
             ),
         )
+        catalog_snapshot_refs = _controlled_catalog_snapshot_refs(
+            self.catalog_snapshot_refs
+        )
+        if self.catalog_hash is not None and SHA256_PATTERN.fullmatch(
+            self.catalog_hash
+        ) is None:
+            raise ValueError("catalog_hash must be lowercase SHA-256 hex.")
+        tool_context_ref = (
+            None
+            if self.tool_context_ref is None
+            else _controlled_tool_ref(self.tool_context_ref, "tool_context_ref")
+        )
+        if self.purpose == TOOL_INPUT_EXTRACTION:
+            if tool_context_ref is None:
+                raise ValueError(
+                    "tool_context_ref is required for TOOL_INPUT_EXTRACTION."
+                )
+            if catalog_snapshot_refs is not None or self.catalog_hash is not None:
+                raise ValueError(
+                    "TOOL_INPUT_EXTRACTION must not retain a routing catalog."
+                )
+        elif tool_context_ref is not None:
+            raise ValueError("tool_context_ref is only allowed for TOOL_INPUT_EXTRACTION.")
+        if (
+            self.structured_output_summary is not None
+            and self.structured_output_summary.get("route") == "TOOL_CANDIDATES"
+            and (catalog_snapshot_refs is None or self.catalog_hash is None)
+        ):
+            raise ValueError(
+                "catalog_hash and catalog_snapshot_refs are required for first-route calls."
+            )
+        object.__setattr__(self, "catalog_snapshot_refs", catalog_snapshot_refs)
+        object.__setattr__(self, "tool_context_ref", tool_context_ref)
         object.__setattr__(
             self,
             "usage",

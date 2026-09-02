@@ -91,8 +91,29 @@ class TaskRow(Base):
         CheckConstraint(
             "current_status IN "
             "('PENDING', 'RUNNING', 'NEEDS_INPUT', 'SUCCEEDED', "
-            "'PARTIALLY_SUCCEEDED', 'FAILED')",
+            "'PARTIALLY_SUCCEEDED', 'FAILED', 'READY')",
             name="ck_task_current_status_allowed",
+        ),
+        CheckConstraint(
+            "(tool_id IS NULL AND bound_tool_version IS NULL "
+            "AND bound_schema_hash IS NULL) OR "
+            "(tool_id IS NOT NULL AND bound_tool_version IS NOT NULL "
+            "AND bound_schema_hash IS NOT NULL)",
+            name="ck_task_tool_binding_all_or_none",
+        ),
+        CheckConstraint(
+            "tool_id IS NULL OR length(btrim(tool_id)) > 0",
+            name="ck_task_tool_id_not_blank",
+        ),
+        CheckConstraint(
+            "bound_tool_version IS NULL OR "
+            "length(btrim(bound_tool_version)) > 0",
+            name="ck_task_bound_tool_version_not_blank",
+        ),
+        CheckConstraint(
+            "bound_schema_hash IS NULL OR "
+            "bound_schema_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_task_bound_schema_hash_sha256",
         ),
         CheckConstraint(
             "selected_tool_run_id IS NULL OR "
@@ -153,6 +174,15 @@ class TaskRow(Base):
     )
     task_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
     current_status: Mapped[str] = mapped_column(String(64), nullable=False)
+    tool_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    bound_tool_version: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    bound_schema_hash: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
     selected_tool_run_id: Mapped[str | None] = mapped_column(
         ForeignKey(
             "tool_run.tool_run_id",
@@ -349,6 +379,10 @@ class TaskInputRevisionRow(Base):
             "jsonb_typeof(validation_errors) = 'array'",
             name="ck_task_input_revision_validation_errors_array",
         ),
+        CheckConstraint(
+            "jsonb_typeof(candidate_tool_refs) = 'array'",
+            name="ck_task_input_revision_candidate_tool_refs_array",
+        ),
         UniqueConstraint(
             "task_id",
             "revision",
@@ -396,6 +430,11 @@ class TaskInputRevisionRow(Base):
         JSONB,
         nullable=False,
     )
+    candidate_tool_refs: Mapped[list[dict[str, str]]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -435,6 +474,9 @@ def _task_from_row(row: TaskRow) -> Task:
         actor_id=row.actor_id,
         task_type=row.task_type,
         current_status=row.current_status,
+        tool_id=row.tool_id,
+        bound_tool_version=row.bound_tool_version,
+        bound_schema_hash=row.bound_schema_hash,
         selected_tool_run_id=row.selected_tool_run_id,
         selected_result_id=row.selected_result_id,
         created_at=row.created_at,
@@ -464,6 +506,7 @@ def _revision_from_row(row: TaskInputRevisionRow) -> TaskInputRevision:
         ambiguous_fields=list(row.ambiguous_fields),
         validation_errors=list(row.validation_errors),
         created_at=row.created_at,
+        candidate_tool_refs=tuple(row.candidate_tool_refs),
     )
 
 
@@ -628,7 +671,7 @@ class SQLAlchemyMessageRepository:
 
 
 TASK_ALLOWED_TRANSITIONS: Final = {
-    "PENDING": frozenset({"RUNNING", "FAILED"}),
+    "PENDING": frozenset({"RUNNING", "NEEDS_INPUT", "READY", "FAILED"}),
     "RUNNING": frozenset(
         {
             "RUNNING",
@@ -638,7 +681,8 @@ TASK_ALLOWED_TRANSITIONS: Final = {
             "FAILED",
         }
     ),
-    "NEEDS_INPUT": frozenset({"RUNNING"}),
+    "NEEDS_INPUT": frozenset({"RUNNING", "READY"}),
+    "READY": frozenset({"RUNNING"}),
     "SUCCEEDED": frozenset(),
     "PARTIALLY_SUCCEEDED": frozenset({"RUNNING"}),
     "FAILED": frozenset({"RUNNING"}),
@@ -689,6 +733,8 @@ class SQLAlchemyTaskRepository:
     def add(self, task: Task) -> None:
         try:
             self._session.flush()
+            if task.current_status in {"READY", "NEEDS_INPUT"}:
+                _mark_routing_state_for_validation(self._session, task.task_id)
             self._session.add(
                 TaskRow(
                     task_id=task.task_id,
@@ -696,6 +742,9 @@ class SQLAlchemyTaskRepository:
                     actor_id=task.actor_id,
                     task_type=task.task_type,
                     current_status=task.current_status,
+                    tool_id=task.tool_id,
+                    bound_tool_version=task.bound_tool_version,
+                    bound_schema_hash=task.bound_schema_hash,
                     selected_tool_run_id=task.selected_tool_run_id,
                     selected_result_id=task.selected_result_id,
                     created_at=task.created_at,
@@ -735,8 +784,28 @@ class SQLAlchemyTaskRepository:
                 )
             ):
                 return None
+            existing_binding = (
+                row.tool_id,
+                row.bound_tool_version,
+                row.bound_schema_hash,
+            )
+            proposed_binding = (
+                task.tool_id,
+                task.bound_tool_version,
+                task.bound_schema_hash,
+            )
+            if (
+                existing_binding != (None, None, None)
+                and existing_binding != proposed_binding
+            ):
+                return None
+            if task.current_status in {"READY", "NEEDS_INPUT"}:
+                _mark_routing_state_for_validation(self._session, task.task_id)
             row.task_type = task.task_type
             row.current_status = task.current_status
+            row.tool_id = task.tool_id
+            row.bound_tool_version = task.bound_tool_version
+            row.bound_schema_hash = task.bound_schema_hash
             row.selected_tool_run_id = task.selected_tool_run_id
             row.selected_result_id = task.selected_result_id
             row.started_at = task.started_at
@@ -747,6 +816,13 @@ class SQLAlchemyTaskRepository:
             return _task_from_row(row)
         except SQLAlchemyError as error:
             _raise_safe_persistence_error(error)
+
+
+def _mark_routing_state_for_validation(session: Session, task_id: str) -> None:
+    task_ids = session.info.setdefault("routing_state_task_ids", set())
+    if not isinstance(task_ids, set):
+        raise RuntimeError("Routing state validation session state is invalid.")
+    task_ids.add(task_id)
 
 
 class SQLAlchemyTaskInputRevisionRepository:
@@ -783,6 +859,9 @@ class SQLAlchemyTaskInputRevisionRepository:
                     ambiguous_fields=list(revision.ambiguous_fields),
                     validation_errors=list(revision.validation_errors),
                     created_at=revision.created_at,
+                    candidate_tool_refs=[
+                        dict(item) for item in revision.candidate_tool_refs
+                    ],
                 )
             )
         except SQLAlchemyError as error:

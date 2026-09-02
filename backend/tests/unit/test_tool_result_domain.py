@@ -9,6 +9,7 @@ import pytest
 
 
 BASE_TIME = datetime(2026, 7, 23, 12, 0, tzinfo=timezone.utc)
+SCHEMA_HASH = "f821240f782ce788bc723fd1acd02a2e58cedbf68b70b1414e2accd16d989d07"
 
 
 def _result_type() -> type[Any]:
@@ -79,7 +80,7 @@ def _result(
         ),
         "tool_id": "zta35g_sem_virtual_lab",
         "tool_version": "0.1.0",
-        "schema_version": "1.0",
+        "schema_hash": SCHEMA_HASH,
         "created_at": BASE_TIME,
     }
     values.update(overrides)
@@ -178,6 +179,14 @@ def test_result_provenance_uses_public_revision_number_and_normalized_parameters
 
     assert result.provenance == provenance
     assert "task_input_revision_id" not in result.provenance
+
+
+def test_result_requires_product_schema_hash_provenance() -> None:
+    result = _result()
+
+    assert result.schema_hash == SCHEMA_HASH
+    with pytest.raises(ValueError, match="schema_hash"):
+        _result(schema_hash="1.0")
 
 
 @pytest.mark.parametrize("input_revision", [True, 0, -1, "1"])

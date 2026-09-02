@@ -101,6 +101,7 @@ class MessageTaskView(StrictModel):
         "PENDING",
         "RUNNING",
         "NEEDS_INPUT",
+        "READY",
         "SUCCEEDED",
         "PARTIALLY_SUCCEEDED",
         "FAILED",
@@ -281,18 +282,19 @@ def submit_message(
     if (
         not submission.idempotency_replayed
         and projection.task.task_type == "TOOL_EXECUTION"
-        and projection.task.current_status == "RUNNING"
+        and projection.task.current_status == "READY"
     ):
-        if tool_workflow_service is None or projection.revision is None:
+        if projection.revision is None:
             raise ApplicationInternalError(task_id=projection.task.task_id)
-        workflow = tool_workflow_service.execute(
-            actor_context,
-            task_id=projection.task.task_id,
-            task_input_revision_id=(
-                projection.revision.task_input_revision_id
-            ),
-            request_id=projection.user_message.request_id,
-        )
+        if tool_workflow_service is not None:
+            workflow = tool_workflow_service.execute(
+                actor_context,
+                task_id=projection.task.task_id,
+                task_input_revision_id=(
+                    projection.revision.task_input_revision_id
+                ),
+                request_id=projection.user_message.request_id,
+            )
     elif (
         submission.idempotency_replayed
         and projection.task.task_type == "TOOL_EXECUTION"

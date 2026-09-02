@@ -37,6 +37,7 @@ from materialsagent.domain.ports.tool_execution import (
     ToolExecutionOutput,
     ToolImagePayload,
 )
+from materialsagent.domain.ports.tool_registry import ExecutionPolicy
 from materialsagent.domain.ports.unit_of_work import PersistenceError
 
 
@@ -129,7 +130,10 @@ def _tool_run(
         attempt_no=1,
         tool_id="zta35g_sem_virtual_lab",
         tool_version="1.0.0",
-        schema_version="1.0.0",
+        schema_hash="f821240f782ce788bc723fd1acd02a2e58cedbf68b70b1414e2accd16d989d07",
+        normalized_input_snapshot={},
+        execution_policy_snapshot=ExecutionPolicy.ANY_TASK,
+        input_revision_no=1,
         execution_input={"runtime_parameters": {"seed": 101}},
         requested_outputs=list(runtime_output.requested_outputs),
         created_at=BASE,

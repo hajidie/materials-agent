@@ -247,6 +247,48 @@ class _CommitAndFirstRollbackFailingSession:
         self.closed = True
 
 
+class _UntrackedRoutingSession:
+    def __init__(self) -> None:
+        self.info: dict[str, object] = {}
+        self.commit_calls = 0
+        self.closed = False
+
+    def flush(self) -> None:
+        raise AssertionError("untracked commits must not validate routing state")
+
+    def commit(self) -> None:
+        self.commit_calls += 1
+
+    def rollback(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_commit_skips_routing_validation_without_tracked_task_ids() -> None:
+    session = _UntrackedRoutingSession()
+    unit_of_work = SQLAlchemyUnitOfWork(lambda: session)
+
+    with unit_of_work:
+        unit_of_work.commit()
+
+    assert session.commit_calls == 1
+    assert session.closed is True
+
+
+def test_commit_skips_routing_validation_with_an_explicit_empty_task_set() -> None:
+    session = _UntrackedRoutingSession()
+    session.info["routing_state_task_ids"] = set()
+    unit_of_work = SQLAlchemyUnitOfWork(lambda: session)
+
+    with unit_of_work:
+        unit_of_work.commit()
+
+    assert session.commit_calls == 1
+    assert session.closed is True
+
+
 def test_commit_integrity_error_with_dbapi_rollback_failure_is_safe() -> None:
     fake_sql = "INSERT fake SQL with secret parameter"
     fake_password = "fake-password-must-not-leak"

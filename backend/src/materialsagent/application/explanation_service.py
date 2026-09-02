@@ -214,7 +214,7 @@ class ExplanationService:
             process_parameters=process_parameters,
             tool_id=result.tool_id,
             tool_version=result.tool_version,
-            schema_version=result.schema_version,
+            schema_hash=result.schema_hash,
         )
 
     @staticmethod

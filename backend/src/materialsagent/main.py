@@ -67,11 +67,14 @@ from materialsagent.application.tool_execution import (
     ToolRunQueryService,
 )
 from materialsagent.application.tools import (
-    StaticToolRegistry,
     ToolCatalogService,
     build_tool_registry,
 )
+from materialsagent.application.tool_registry import ToolRegistry
 from materialsagent.domain.ports.chat_orchestration import ChatOrchestrationPort
+from materialsagent.domain.ports.tool_input_extraction import (
+    ToolInputExtractionPort,
+)
 from materialsagent.domain.ports.storage import (
     StoredObjectMetadata,
     StorageService,
@@ -97,6 +100,10 @@ from materialsagent.infrastructure.logging import configure_logging
 from materialsagent.infrastructure.llm.mock import (
     MockChatOrchestrationAdapter,
     default_mock_responder,
+)
+from materialsagent.infrastructure.llm.mock_tool_input import (
+    MockToolInputExtractionAdapter,
+    default_mock_tool_input_responder,
 )
 from materialsagent.infrastructure.llm.mock_explanation import (
     MockExplanationAdapter,
@@ -297,10 +304,11 @@ def create_app(
     conversation_service: ConversationService | None = None,
     message_submission_service: MessageSubmissionService | None = None,
     chat_orchestration_port: ChatOrchestrationPort | None = None,
+    tool_input_extraction_port: ToolInputExtractionPort | None = None,
     chat_orchestration_service: ChatOrchestrationService | None = None,
     task_query_service: TaskQueryService | None = None,
     timeline_query_service: TimelineQueryService | None = None,
-    tool_registry: StaticToolRegistry | None = None,
+    tool_registry: ToolRegistry | None = None,
     tool_catalog_service: ToolCatalogService | None = None,
     tool_execution_service: ToolExecutionService | None = None,
     tool_run_query_service: ToolRunQueryService | None = None,
@@ -383,6 +391,7 @@ def create_app(
     resolved_tool_retry_service = tool_retry_service
     resolved_explanation_retry_service = explanation_retry_service
     resolved_chat_orchestration_port = chat_orchestration_port
+    resolved_tool_input_extraction_port = tool_input_extraction_port
     resolved_explanation_port = explanation_port
     needs_default_chat_port = (
         resolved_chat_orchestration_service is None
@@ -392,11 +401,25 @@ def create_app(
         resolved_explanation_service is None
         and resolved_explanation_port is None
     )
-    if needs_default_chat_port or needs_default_explanation_port:
+    needs_default_tool_input_extraction_port = (
+        resolved_chat_orchestration_service is None
+        and resolved_tool_input_extraction_port is None
+    )
+    if (
+        needs_default_chat_port
+        or needs_default_explanation_port
+        or needs_default_tool_input_extraction_port
+    ):
         if resolved_settings.llm_adapter == "mock":
             if needs_default_chat_port:
                 resolved_chat_orchestration_port = (
                     MockChatOrchestrationAdapter(default_mock_responder)
+                )
+            if needs_default_tool_input_extraction_port:
+                resolved_tool_input_extraction_port = (
+                    MockToolInputExtractionAdapter(
+                        default_mock_tool_input_responder
+                    )
                 )
             if needs_default_explanation_port:
                 resolved_explanation_port = MockExplanationAdapter()
@@ -411,6 +434,14 @@ def create_app(
 
                 resolved_chat_orchestration_port = DeepSeekChatAdapter(
                     deepseek_config
+                )
+            if needs_default_tool_input_extraction_port:
+                from materialsagent.infrastructure.llm.deepseek_tool_input import (
+                    DeepSeekToolInputExtractionAdapter,
+                )
+
+                resolved_tool_input_extraction_port = (
+                    DeepSeekToolInputExtractionAdapter(deepseek_config)
                 )
             if needs_default_explanation_port:
                 from materialsagent.infrastructure.llm.deepseek_explanation import (
@@ -535,6 +566,10 @@ def create_app(
                 clock=clock,
                 id_factory=id_factory,
                 tool_chain_enabled=tool_chain_activated,
+                tool_registry=resolved_tool_registry,
+                tool_input_extraction_port=(
+                    resolved_tool_input_extraction_port
+                ),
             )
         else:
             resolved_chat_orchestration_service = (

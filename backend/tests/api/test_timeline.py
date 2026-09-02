@@ -15,6 +15,7 @@ from materialsagent.domain.ports.unit_of_work import (
 from materialsagent.domain.models.message import Message
 from materialsagent.infrastructure.db.conversation_task import (
     MessageRow,
+    TaskInputRevisionRow,
     TaskRow,
 )
 
@@ -189,6 +190,60 @@ def test_timeline_returns_discriminated_mixed_items_without_tool_duplicate(
     assert "actor_id" not in response.text
     assert "object_key" not in response.text
     assert "model_bundle" not in response.text
+
+
+def test_timeline_projects_unbound_candidate_references_without_binding(
+    api_harness,
+) -> None:
+    conversation, _, _ = _seed_mixed(api_harness)
+    candidate_refs = [
+        {"tool_id": "zta35g_sem_virtual_lab", "version": "1", "schema_hash": "a" * 64},
+        {"tool_id": "training", "version": "1", "schema_hash": "b" * 64},
+    ]
+    with api_harness.engine.begin() as connection:
+        connection.execute(
+            TaskInputRevisionRow.__table__.insert().values(
+                task_input_revision_id="revision_timeline_candidates",
+                task_id="task_tool",
+                request_id="request_timeline_candidates",
+                source_llm_call_id=None,
+                source_message_ids=["message_tool_initial"],
+                revision=1,
+                raw_input={},
+                normalized_input=None,
+                missing_fields=[],
+                ambiguous_fields=[],
+                validation_errors=[],
+                candidate_tool_refs=candidate_refs,
+                created_at=BASE,
+            )
+        )
+        connection.execute(
+            update(TaskRow)
+            .where(TaskRow.task_id == "task_tool")
+            .values(
+                current_status="NEEDS_INPUT",
+                tool_id=None,
+                bound_tool_version=None,
+                bound_schema_hash=None,
+            )
+        )
+
+    with api_harness.create_client("actor_local") as client:
+        response = client.get(
+            f"/api/v1/conversations/{conversation.conversation_id}/timeline"
+        )
+
+    assert response.status_code == 200
+    card = next(
+        item
+        for item in response.json()["data"]["items"]
+        if item["item_id"] == "task_tool"
+    )
+    assert card["task"]["tool_id"] is None
+    assert card["task"]["bound_tool_version"] is None
+    assert card["task"]["bound_schema_hash"] is None
+    assert card["needs_input"]["candidate_tool_refs"] == candidate_refs
 
 
 def test_timeline_keyset_cursor_is_stable_replayable_and_tamper_safe(
@@ -462,8 +517,14 @@ def test_timeline_projects_full_selected_chain_without_external_calls(
     )
     assert card["tool_runs"]["attempt_count"] == 1
     assert card["tool_runs"]["selected_tool_run"]["is_selected"] is True
+    assert card["tool_runs"]["selected_tool_run"]["schema_hash"] == (
+        "f821240f782ce788bc723fd1acd02a2e58cedbf68b70b1414e2accd16d989d07"
+    )
     assert card["result"]["result_id"] == (
         submitted.json()["data"]["result_summary"]["result_id"]
+    )
+    assert card["result"]["schema_hash"] == (
+        "f821240f782ce788bc723fd1acd02a2e58cedbf68b70b1414e2accd16d989d07"
     )
     assert len(card["assets"]) == 1
     assert card["explanation"]["status"] == "SUCCEEDED"

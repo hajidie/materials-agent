@@ -156,6 +156,53 @@ def test_repository_round_trip_and_task_request_queries_preserve_jsonb(
     assert loaded.usage == {"input_tokens": 10, "output_tokens": 5}
 
 
+def test_repository_round_trip_preserves_bounded_routing_audit_references(
+    migrated_database_engine: Engine,
+) -> None:
+    conversation, task = _parents(migrated_database_engine)
+    call = _call(
+        conversation,
+        task,
+    )
+    call = replace(
+        call,
+        structured_output_summary={
+            "route": "TOOL_CANDIDATES",
+            "candidates": [
+                {
+                    "tool_id": "zta35g_sem_virtual_lab",
+                    "candidate_input": {"temperature": 900},
+                }
+            ],
+        },
+        catalog_hash="a" * 64,
+        catalog_snapshot_refs=[
+            {
+                "tool_id": "zta35g_sem_virtual_lab",
+                "version": "1",
+                "schema_hash": "b" * 64,
+            }
+        ],
+    )
+    factory = _factory(migrated_database_engine)
+
+    with factory() as unit_of_work:
+        unit_of_work.llm_calls.add(call)
+        unit_of_work.commit()
+    with factory() as unit_of_work:
+        loaded = unit_of_work.llm_calls.get(call.llm_call_id)
+
+    assert loaded is not None
+    assert loaded.catalog_hash == "a" * 64
+    assert loaded.catalog_snapshot_refs == (
+        {
+            "tool_id": "zta35g_sem_virtual_lab",
+            "version": "1",
+            "schema_hash": "b" * 64,
+        },
+    )
+
+
 def test_conditional_status_updates_do_not_reopen_terminal_calls(
     migrated_database_engine: Engine,
 ) -> None:

@@ -67,18 +67,19 @@ class ExplanationInput:
     process_parameters: Mapping[str, object]
     tool_id: str
     tool_version: str
-    schema_version: str
+    schema_hash: str
 
     def __post_init__(self) -> None:
         for field_name in (
             "result_id",
             "tool_id",
             "tool_version",
-            "schema_version",
         ):
             value = getattr(self, field_name)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{field_name} must be non-blank.")
+        if re.fullmatch(r"[0-9a-f]{64}", self.schema_hash) is None:
+            raise ValueError("schema_hash must be lowercase SHA-256 hex.")
         if self.status not in {
             "SUCCEEDED",
             "PARTIALLY_SUCCEEDED",

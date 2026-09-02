@@ -1,0 +1,285 @@
+# Materials Agent — Project Context
+
+本文档保存对长期维护有价值、但不适合放进 README 或 AGENTS 的现役项目上下文：系统架构、
+数据流、Tool 机制、状态模型和关键设计边界。它不是进度文件，也不声明某个分支、里程碑或
+测试批次“已经完成”。当前状态必须现场检查 Git、代码、迁移、测试和运行行为。
+
+## 文档职责与事实来源
+
+- `README.md` 回答“项目是什么、如何运行、当前能做什么”；
+- `AGENTS.md` 回答“Coding Agent 如何安全修改仓库”；
+- 本文回答“系统为什么以当前边界工作，以及修改架构时必须保持哪些关系”。
+
+发生冲突时，项目负责人当前指令优先，其次是当前代码、配置、迁移、测试和实际运行行为。
+README 与本文只记录经这些来源确认的稳定事实；Git 历史只用于追溯旧设计和原因。
+
+## 系统定位与边界
+
+Materials Agent 是单用户、本地运行的材料研究智能体 MVP。平台主体是 Python 3.11 的 FastAPI
+模块化单体；真实 ZTA35G 模型在独立 Python 3.8 Runtime 中运行，以隔离旧版 PyTorch、CUDA、
+Joblib 和 scikit-learn 等依赖。
+
+当前默认应用组合只注册 `zta35g_sem_virtual_lab`。Backend 已提供显式的进程内 Tool Registry
+和单 Tool Router 底座，但这不等于产品已经提供多个 Tool，也不等于存在动态插件系统。
+
+```text
+Frontend
+  -> Backend API / application services
+       -> PostgreSQL (structured facts)
+       -> MinIO (generated image objects)
+       -> LLM adapter (Mock or DeepSeek)
+       -> explicit in-process Tool Registry
+            -> local Runtime client
+                 -> Mock Runtime or real ZTA35G Runtime
+```
+
+Runtime 是模型兼容和执行隔离边界，不是把 Backend 拆成通用微服务的先例。PostgreSQL、MinIO、
+LLM 和 Runtime 仍由 Backend 的应用用例编排。
+
+## 组件职责
+
+### Frontend
+
+`frontend/` 提供 Vue 3 + Vite + TypeScript 的本地聊天界面。它通过 `/api/v1` 查询对话、时间线、
+任务、Tool catalog、结果和资产，并通过轮询呈现异步状态。前端类型不是独立合同来源；公共
+合同变化必须先核对 Backend schema 和合同测试，再同步 TypeScript 类型与组件测试。
+
+### Backend
+
+Backend 是模块化单体，主要分层如下：
+
+| 层 | 职责 |
+|---|---|
+| `api/` | HTTP 路由、公共请求/响应 schema、依赖和错误投影 |
+| `application/` | 对话与消息编排、Tool 路由/授权、执行、结果、资产和解释用例 |
+| `domain/` | Task、ToolRun、ToolResult、LLMCall 等领域状态与端口合同 |
+| `infrastructure/` | SQLAlchemy/PostgreSQL、MinIO、DeepSeek/Mock LLM、Runtime client |
+| `alembic/versions/` | 持久化 schema 的递增迁移 |
+
+跨层修改必须保持公共 API、领域不变量、迁移、Repository 映射和测试一致。数据库 schema 不是
+单独的产品合同；领域模型与迁移也不能各自演化。
+
+### Runtime
+
+`mock-runtime/` 在 Python 3.11 中实现与真实 Runtime 一致的 HTTP 合同，用于确定性开发与测试。
+`zta35g-runtime/` 在 Python 3.8 中加载只读 `SEM/ZTA35G_lab` 模型包并执行真实推理。两者都
+提供内部 health/ready（含受支持 Tool 元数据）和 execute 边界，Backend 通过本地 client
+adapter 调用；公共 Tool catalog 由 Backend Registry 提供。
+
+Backend 与真实 Runtime 不共享 Python 包或虚拟环境。`SEM/` 是外部研究模型包，不属于普通
+源码重构范围；其完整性由 `docs/acceptance/sem-package-manifest.json` 校验。
+
+## 主要数据流
+
+一次自然语言 Tool 请求的受控路径是：
+
+```text
+用户消息
+  -> 为本次路由创建 RoutingCatalogSnapshot
+  -> LLM Structured Output 提出 Tool candidates 与候选参数
+  -> Registry.resolve(candidate, same snapshot)
+  -> ToolDefinition.normalize(candidate, prior revision when applicable)
+  -> Task binding / NEEDS_INPUT / READY
+  -> Registry.authorize(action, current registration, bound ref)
+  -> 持久化 PENDING ToolRun 和执行快照
+  -> 持久化 RUNNING 与开始时间
+  -> 在数据库事务外调用独立 Runtime
+  -> 保存图片到 MinIO，提交结构化结果到 PostgreSQL
+  -> 更新 ToolRun/Task 终态并生成可追溯解释
+  -> timeline/API -> Frontend
+```
+
+LLM 只根据本次受控 Catalog Snapshot 提出候选和候选参数，不决定 Tool 版本、Task binding 或
+执行权限。应用只能使用同一 Snapshot 通过 `Registry.resolve()` 验证候选，再根据当前注册项
+通过 `Registry.authorize()` 决定动作。Catalog 查询结果、LLM 输出和历史策略快照都不授予执行
+权限。
+
+## Tool Registry 与扩展模型
+
+Registry 是显式、不可变、进程内的注册边界。一个 `ToolDefinition` 把以下事实绑定在一起：
+
+- `tool_id`、`version`、生命周期状态和执行策略；
+- 执行语义的 `input_schema` 与候选输入 schema；
+- normalizer、支持的输出和资产类型、限制说明；
+- Registry 持有的 Runtime metadata 与实际执行对象。
+
+Registry 启动时拒绝重复 ID、非法生命周期组合、Runtime metadata 不匹配、缺少 normalizer 的
+可执行 Tool，以及不安全或超限的 JSON schema。当前没有包扫描、运行时动态加载或上传插件
+机制。
+
+新增真实模型 Tool 的预期扩展路径是：
+
+1. 显式实现 ToolDefinition、输入规范化和领域执行端口；
+2. 提供自己的执行适配器和隔离 Runtime；
+3. 在应用组合根显式注册；
+4. 补齐 Registry、Router、合同、持久化和端到端测试；
+5. 若产品从单 Tool 变为多 Tool，先确认范围并同步 README 与公共交互。
+
+测试中的 `ml_training_test` 是异构合同夹具，只证明 Registry/Router 的扩展能力，不是产品 Tool。
+
+## 路由、规范化与 Task Binding
+
+首次路由结果遵循以下规则：
+
+| 受控路由与规范化结果 | Task Binding | Task 状态 |
+|---|---|---|
+| 唯一候选且参数完整 | 在 resolve 与 normalize 成功后绑定 | `READY` |
+| 唯一候选但缺参或存在参数歧义 | 绑定该唯一 Tool | `NEEDS_INPUT` |
+| 多个有效候选 | 不绑定；输入 Revision 保存受控候选引用 | `NEEDS_INPUT` |
+
+Binding 保存首次绑定的 `tool_id`、`version` 和 `schema_hash`。三者必须同时存在，并且一旦写入
+就不能在同一 Task 中切换或改写，即使只是版本变化也不能修改原 binding。
+
+已绑定的 `NEEDS_INPUT` Task 收到补充内容后，不重新调用首次路由 LLM，也不重新选择 Tool。
+固定 Tool 的参数提取器只产生参数增量，再由已绑定 Tool 的 normalizer 与上一输入 Revision
+合并。补参、执行和重试都必须再次由当前 Registry 授权。
+
+## `schema_hash` 与版本兼容门禁
+
+`schema_hash` 对影响执行语义的 Tool `input_schema` 计算 SHA-256。Canonical JSON 使用字段
+排序、UTF-8、紧凑编码并拒绝 NaN、Infinity、非文本键和其他非标准 JSON 值。展示名、描述、
+候选输入 schema、UI 字段、Runtime 地址和执行对象不参与该 Hash。
+
+Hash 只证明执行输入合同相等，不推断向前或向后兼容：
+
+- 当前注册项 Hash 与 Task binding 不同：拒绝补参、执行和重试；旧 Task 不自动迁移；
+- 版本变化但 Hash 相同：已绑定 Task 可以继续，由新的 ToolRun 记录执行时的当前版本；
+- 原 Task binding 保持不变，不能用兼容版本覆盖历史绑定事实。
+
+## Tool 生命周期与执行授权
+
+生命周期和执行策略是两个字段，但当前 Registry 只接受三种组合：
+
+| `status` | `execution_policy` | 新路由 | 已绑定 Task 的补参/执行/重试 |
+|---|---|---|---|
+| `ACTIVE` | `ANY_TASK` | 允许 | 允许 |
+| `DEPRECATED` | `EXISTING_TASK_ONLY` | 排除 | 合同未漂移时允许 |
+| `DISABLED` | `NONE` | 排除 | 拒绝 |
+
+Registry 启动时拒绝 `ACTIVE + NONE`、`DISABLED + ANY_TASK` 等非法组合。退役不会物理删除 Tool
+或历史数据；当前也没有运行时动态卸载开关。
+
+## Task 与 ToolRun 状态模型
+
+Task 表达整个科研任务的业务阶段：
+
+| Task 状态 | 含义 |
+|---|---|
+| `PENDING` | Task 已创建，尚未形成可执行的受控路由状态 |
+| `NEEDS_INPUT` | 唯一 Tool 已绑定但仍缺参/有歧义，或多个有效候选需要澄清 |
+| `READY` | 唯一 Tool 已绑定，最新输入 Revision 完整，可申请执行授权 |
+| `RUNNING` | 当前一次尝试已经进入执行流程 |
+| `SUCCEEDED` | 请求输出全部成功 |
+| `PARTIALLY_SUCCEEDED` | 至少一个请求输出成功、至少一个失败 |
+| `FAILED` | 任务以受控失败终结 |
+
+`READY` 必须有完整 binding 和完整最新输入 Revision。已绑定的 `NEEDS_INPUT` 必须真实存在缺失
+或歧义字段；未绑定的 `NEEDS_INPUT` 必须保存至少两个受控候选引用。
+
+ToolRun 只表达一次模型尝试：
+
+```text
+PENDING -> RUNNING -> SUCCEEDED
+                   -> PARTIALLY_SUCCEEDED
+                   -> FAILED
+```
+
+`PENDING` 已保存授权和执行快照但没有执行结果；`RUNNING` 已持久化开始时间；终态必须包含
+完整计时，并以 completed/failed output 集合恰好覆盖 requested outputs。ToolRun 不使用
+`NEEDS_INPUT` 或 `READY`。
+
+## 执行、事务与重试
+
+每次执行在 `authorize()` 通过后：
+
+1. 在短事务内创建并提交 `PENDING` ToolRun，同时把 Task 置为 `RUNNING`；
+2. 在另一短事务内把 ToolRun 置为 `RUNNING` 并保存开始时间；
+3. 在数据库事务外调用 Runtime；
+4. Runtime 返回后，在新事务中提交结果和终态；图片对象通过受控资产流程进入 MinIO；
+5. 结果提交失败时不能伪造内存成功，也不能覆盖数据库中的真实状态。
+
+外部 LLM、Runtime 和 MinIO 调用不得放进数据库长事务。Backend 不自动重试 Runtime execute。
+显式重试会重新读取当前 Registry、重新授权，并创建新的 ToolRun、递增 attempt 和新的 seed；
+旧 ToolRun、旧结果和旧资产保持不可变。
+
+每个 ToolRun 只消费并产出自己的执行快照、图片、性能结果和诊断。结果提交必须核对 Task、
+ToolRun、输入 Revision、资产所有者和来源一致性，不能跨 actor、跨 Task 或跨 ToolRun 拼接。
+
+## 执行快照与审计
+
+ToolRun 保存执行时的：
+
+- `tool_id`、当前 `version`、`schema_hash`；
+- `normalized_input_snapshot` 与实际 `execution_input`；
+- `execution_policy_snapshot`；
+- 输入 Revision、attempt、requested outputs 和 seed；
+- Runtime 返回的受控参数、输出摘要、诊断和模型 bundle 标识。
+
+LLMCall 审计保存 provider/model、安全 Catalog 引用与 Hash 或固定 Tool 上下文、受控 Structured
+Output 摘要和可选 Prompt digest。它不保存完整 Prompt 或 Provider 原始响应。
+
+审计数据用于复现“当时根据什么受控事实做出决定”，不授予后续执行权限。重试与补参始终以
+当前 Registry 再授权。
+
+## ZTA35G Runtime 合同
+
+当前 Tool 只接受 ZTA35G 材料与受控热处理参数，能够生成 SEM，并按 requested outputs 返回
+力学性能。即使只请求力学性能，Runtime 仍会生成中间 SEM。
+
+固定推理参数属于 Backend、Mock Runtime、真实 Runtime 和测试共同维护的合同：
+
+```text
+num_samples=1
+guide_scale=2.0
+timesteps=1000
+```
+
+`seed` 由每次 ToolRun 决定。以上固定参数不得改成普通环境变量；任何变化必须同步合同、实现、
+Mock、真实 Runtime 和测试。
+
+Runtime token 每次本地启动生成，只在内存中注入 Backend 与 Runtime 子进程。真实 Runtime 的
+模型根必须指向只读外部包；不得把权重路径、内部绝对路径、Tensor 或图片 bytes 写入日志或
+公共响应。
+
+## 数据与安全边界
+
+- PostgreSQL 是结构化业务事实的存储；MinIO 是生成图片对象的存储。
+- 日志和公共响应不保存图片 bytes、完整 Prompt、完整 Provider 响应、Tensor、Secret、权重
+  路径或内部绝对路径。
+- `.env`、数据库、对象存储数据、生成输出、模型权重、缓存、日志、`tmp/` 和机器状态不进入
+  Git。
+- 公共错误只暴露受控、有限的错误码和安全消息；内部异常细节不能穿透 API 或 Runtime 边界。
+- `SEM/` 只读且不进入普通 Git 跟踪；完整性检查只枚举文件、大小和 SHA-256，不导入模型。
+
+## 当前非目标与范围变化
+
+当前设计不包含 Redis、后台 Worker、SSE、WebSocket、登录、多用户隔离、真实 SEM 上传、
+EBSD 输入、ML Training、Planner、多 Agent、动态插件上传或生产部署。
+
+以下变化不是局部实现细节，必须先确认产品/架构范围：
+
+- 把默认应用组合扩为多 Tool，或引入动态发现、上传、卸载；
+- 引入 Worker、消息队列、Redis、流式推送或跨进程调度；
+- 引入登录、多用户权限或新的数据隔离模型；
+- 允许用户上传真实 SEM/EBSD 或其他文件；
+- 合并 Backend 与真实 Runtime 环境，或改变 `SEM/` 的只读外部包地位；
+- 改变固定推理参数、重试语义、Tool binding 不可变性或 `schema_hash` 门禁；
+- 生产部署、远程 Runtime 或任何超出本地回环网络的运行方式。
+
+实施已确认的范围变化时，必须同步代码、配置、迁移、合同测试、README 和本文，确保下一次
+会话不会从旧边界出发。
+
+## 维护时的验证地图
+
+| 变化主题 | 首要证据与测试位置 |
+|---|---|
+| Tool 定义、Hash、生命周期、授权 | `backend/src/materialsagent/application/tool_registry.py`、`backend/src/materialsagent/domain/ports/tool_registry.py`、`backend/tests/unit/test_tool_registry.py` |
+| 路由、补参和 binding | `backend/src/materialsagent/application/chat_orchestration.py`、Task/Input Revision 模型、相关 unit/contract/api 测试 |
+| Task/ToolRun 状态与重试 | `backend/src/materialsagent/domain/`、tool execution/workflow、unit 与 integration DB 测试 |
+| 持久化字段 | `backend/alembic/versions/`、SQLAlchemy 映射、migration/repository integration 测试 |
+| Runtime HTTP 合同 | Backend contract 测试、`mock-runtime/tests/`、真实 Runtime contract 测试 |
+| 真实模型兼容性 | `zta35g-runtime/tests/compatibility/`；只有明确需要时加载模型或 GPU |
+| 前端公共合同 | Backend schema/contract、`frontend/src/api/`、前端组件与流程测试 |
+| 本地启动与资源 ownership | `scripts/dev/local-dev.ps1` 与 `scripts/dev/test-local-dev.ps1` |
+
+具体命令和最小验证要求以 `README.md` 与 `AGENTS.md` 为准；本文不复制一套会漂移的操作手册。
