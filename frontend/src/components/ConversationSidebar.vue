@@ -21,6 +21,7 @@ defineEmits<{
   create: [];
   refresh: [];
   select: [conversationId: string];
+  delete: [conversationId: string];
   "load-more": [];
 }>();
 
@@ -65,28 +66,46 @@ function displayTitle(title: string | null): string {
       <p v-if="conversations.length === 0 && !loading" class="empty-state">
         还没有对话。新建一个对话开始材料研究。
       </p>
-      <button
+      <div
         v-for="conversation in conversations"
         :key="conversation.conversation_id"
-        type="button"
-        class="conversation-list__item"
+        class="conversation-list__row"
         :class="{
           'conversation-list__item--selected':
             selectedConversationId === conversation.conversation_id,
         }"
-        :data-conversation-id="conversation.conversation_id"
-        :aria-current="
-          selectedConversationId === conversation.conversation_id
-            ? 'true'
-            : undefined
-        "
-        @click="$emit('select', conversation.conversation_id)"
       >
-        <strong>{{ displayTitle(conversation.title) }}</strong>
-        <span>
-          {{ conversation.last_activity_preview || "暂无消息" }}
-        </span>
-      </button>
+        <button
+          type="button"
+          class="conversation-list__item"
+          :class="{
+            'conversation-list__item--selected':
+              selectedConversationId === conversation.conversation_id,
+          }"
+          :data-conversation-id="conversation.conversation_id"
+          :aria-current="
+            selectedConversationId === conversation.conversation_id
+              ? 'true'
+              : undefined
+          "
+          @click="$emit('select', conversation.conversation_id)"
+        >
+          <strong>{{ displayTitle(conversation.title) }}</strong>
+          <span>
+            {{ conversation.last_activity_preview || "暂无消息" }}
+          </span>
+        </button>
+        <button
+          type="button"
+          class="conversation-list__delete"
+          data-action="delete-conversation"
+          :aria-label="`永久删除对话：${displayTitle(conversation.title)}`"
+          :disabled="createDisabled"
+          @click="$emit('delete', conversation.conversation_id)"
+        >
+          删除
+        </button>
+      </div>
     </nav>
 
     <button

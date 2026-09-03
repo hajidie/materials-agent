@@ -117,6 +117,10 @@ class ToolRegistry:
             raise InvalidToolRegistrationError("Tool runtime metadata must be Registry-owned.")
         if definition.execution_policy is not ExecutionPolicy.NONE and not callable(definition.normalizer):
             raise InvalidToolRegistrationError("Executable Tool registration is incomplete.")
+        if definition.context_projector is not None and not callable(
+            definition.context_projector
+        ):
+            raise InvalidToolRegistrationError("Tool context projector is invalid.")
         try:
             input_schema_bytes = _canonical_schema_bytes(definition.input_schema)
             candidate_schema = definition.candidate_input_schema or {}

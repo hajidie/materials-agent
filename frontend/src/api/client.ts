@@ -11,6 +11,7 @@ import type {
   ApiResourceReference,
   ApiSuccessEnvelope,
   AssetMetadata,
+  ConversationDeleteData,
   Conversation,
   ConversationPage,
   ExplanationRetryRequest,
@@ -40,7 +41,11 @@ interface RequestOptions {
 export interface MaterialsAgentApi {
   createConversation(
     title?: string,
+    idempotencyKey?: string,
   ): Promise<ApiSuccessEnvelope<Conversation>>;
+  deleteConversation?(
+    conversationId: string,
+  ): Promise<ApiSuccessEnvelope<ConversationDeleteData>>;
   listConversations(
     limit?: number,
     cursor?: string,
@@ -303,7 +308,7 @@ export function createMaterialsAgentApi(
     options.fetchImpl ?? globalThis.fetch.bind(globalThis);
 
   async function request<T>(
-    method: "GET" | "POST",
+    method: "GET" | "POST" | "DELETE",
     path: string,
     requestOptions: RequestOptions,
   ): Promise<ApiSuccessEnvelope<T>> {
@@ -345,27 +350,44 @@ export function createMaterialsAgentApi(
     try {
       payload = await response.json();
     } catch {
-      if (
-        requestOptions.networkFailure === "CONVERSATION_CREATE"
-      ) {
+      if (requestOptions.networkFailure === "CONVERSATION_CREATE") {
         throw new ConversationCreationUncertaintyError();
       }
       throw new ProtocolResponseError();
     }
     if (!response.ok) {
+      if (
+        response.status >= 500 &&
+        requestOptions.networkFailure !== "READ"
+      ) {
+        if (requestOptions.networkFailure === "CONVERSATION_CREATE") {
+          throw new ConversationCreationUncertaintyError();
+        }
+        throw new NetworkUncertaintyError();
+      }
       throw parseApiError(response.status, payload);
     }
     return parseSuccess<T>(payload);
   }
 
   return {
-    createConversation(title) {
+    createConversation(title, idempotencyKey) {
       const body: Record<string, unknown> =
         title === undefined ? {} : { title };
       return request("POST", "/conversations", {
         body,
+        idempotencyKey:
+          idempotencyKey ??
+          `frontend-conversation-create-${globalThis.crypto.randomUUID()}`,
         networkFailure: "CONVERSATION_CREATE",
       });
+    },
+    deleteConversation(conversationId) {
+      return request(
+        "DELETE",
+        `/conversations/${encodeId(conversationId)}`,
+        { networkFailure: "IDEMPOTENT_WRITE" },
+      );
     },
     listConversations(limit = 20, cursor, signal) {
       return request(

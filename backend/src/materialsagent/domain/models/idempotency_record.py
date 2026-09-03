@@ -6,12 +6,14 @@ import re
 import unicodedata
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+CONVERSATION_CREATE = "CONVERSATION_CREATE"
 TASK_CREATE = "TASK_CREATE"
 TASK_INPUT_SUPPLEMENT = "TASK_INPUT_SUPPLEMENT"
 TOOL_RETRY = "TOOL_RETRY"
 EXPLANATION_RETRY = "EXPLANATION_RETRY"
 IDEMPOTENCY_OPERATIONS = frozenset(
     {
+        CONVERSATION_CREATE,
         TASK_CREATE,
         TASK_INPUT_SUPPLEMENT,
         TOOL_RETRY,
@@ -68,6 +70,7 @@ class IdempotencyRecord:
     explanation_id: str | None
     created_at: datetime
     expires_at: datetime | None
+    conversation_id: str | None = None
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -85,6 +88,7 @@ class IdempotencyRecord:
         ):
             raise ValueError("request_digest must be lowercase SHA-256 hex.")
         for field_name in (
+            "conversation_id",
             "task_id",
             "message_id",
             "task_input_revision_id",
@@ -96,6 +100,14 @@ class IdempotencyRecord:
         if self.expires_at is not None:
             _require_utc(self.expires_at, "expires_at")
         expected = {
+            CONVERSATION_CREATE: (
+                self.conversation_id is not None
+                and self.task_id is None
+                and self.message_id is None
+                and self.task_input_revision_id is None
+                and self.tool_run_id is None
+                and self.explanation_id is None
+            ),
             TASK_CREATE: (
                 self.task_id is not None
                 and self.message_id is not None
@@ -110,6 +122,8 @@ class IdempotencyRecord:
                 and self.explanation_id is None
             ),
             TOOL_RETRY: (
+                self.conversation_id is None
+                and
                 self.task_id is not None
                 and self.message_id is None
                 and self.task_input_revision_id is None
@@ -117,6 +131,8 @@ class IdempotencyRecord:
                 and self.explanation_id is None
             ),
             EXPLANATION_RETRY: (
+                self.conversation_id is None
+                and
                 self.task_id is not None
                 and self.message_id is None
                 and self.task_input_revision_id is None

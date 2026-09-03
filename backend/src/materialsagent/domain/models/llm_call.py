@@ -10,6 +10,7 @@ from types import MappingProxyType
 from typing import Final
 
 from materialsagent.domain.ports.tool_registry import ToolRef
+from materialsagent.domain.models.context_snapshot import validate_context_snapshot
 
 
 PENDING: Final = "PENDING"
@@ -477,11 +478,21 @@ def _controlled_structured_output_summary(
                 raise ValueError(
                     "structured_output_summary.candidates must contain JSON objects."
                 )
-            _require_exact_keys(
-                candidate,
-                {"tool_id", "candidate_input"},
-                "structured_output_summary.candidates item",
+            candidate_keys = set(candidate)
+            legacy_shape = {"tool_id", "candidate_input"}
+            current_shapes = (
+                {"tool_id", "candidate_input_delta"},
+                {
+                    "tool_id",
+                    "candidate_input_delta",
+                    "history_reference",
+                },
             )
+            if candidate_keys != legacy_shape and candidate_keys not in current_shapes:
+                raise ValueError(
+                    "structured_output_summary.candidates item does not match "
+                    "its controlled schema."
+                )
             tool_id = candidate["tool_id"]
             if type(tool_id) is not str or not tool_id.strip():
                 raise ValueError(
@@ -491,9 +502,30 @@ def _controlled_structured_output_summary(
                 raise ValueError(
                     "structured_output_summary.candidates must not repeat a Tool."
                 )
-            if not isinstance(candidate["candidate_input"], Mapping):
+            input_field = (
+                "candidate_input"
+                if candidate_keys == legacy_shape
+                else "candidate_input_delta"
+            )
+            if not isinstance(candidate[input_field], Mapping):
                 raise ValueError(
-                    "structured_output_summary.candidate_input must be a JSON object."
+                    "structured_output_summary candidate input must be a JSON object."
+                )
+            history_reference = candidate.get("history_reference")
+            if history_reference is not None and (
+                not isinstance(history_reference, Mapping)
+                or set(history_reference) != {"context_ref", "reference_text"}
+                or type(history_reference["context_ref"]) is not str
+                or re.fullmatch(
+                    r"ctx_ref_[0-9]{4,}",
+                    history_reference["context_ref"],
+                )
+                is None
+                or type(history_reference["reference_text"]) is not str
+                or not history_reference["reference_text"].strip()
+            ):
+                raise ValueError(
+                    "structured_output_summary.history_reference is invalid."
                 )
             tool_ids.add(tool_id)
     else:
@@ -528,6 +560,7 @@ class LLMCall:
     catalog_snapshot_refs: object | None = None
     catalog_hash: str | None = None
     tool_context_ref: object | None = None
+    context_snapshot: object | None = None
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -681,6 +714,26 @@ class LLMCall:
             )
         object.__setattr__(self, "catalog_snapshot_refs", catalog_snapshot_refs)
         object.__setattr__(self, "tool_context_ref", tool_context_ref)
+        context_snapshot = (
+            None
+            if self.context_snapshot is None
+            else validate_context_snapshot(self.context_snapshot)
+        )
+        if context_snapshot is not None and (
+            context_snapshot["purpose"] != self.purpose
+            or context_snapshot["model_name"] != self.model_name
+            or context_snapshot["prompt_digest"] != self.prompt_digest
+        ):
+            raise ValueError("context_snapshot does not match its LLMCall.")
+        object.__setattr__(
+            self,
+            "context_snapshot",
+            (
+                None
+                if context_snapshot is None
+                else _freeze_json(context_snapshot)
+            ),
+        )
         object.__setattr__(
             self,
             "usage",

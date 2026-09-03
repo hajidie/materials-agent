@@ -22,12 +22,17 @@ from materialsagent.domain.ports.tool_execution import (
     ToolImagePayload,
 )
 from materialsagent.infrastructure.db.asset import AssetRow
+from materialsagent.infrastructure.db.conversation_cleanup import (
+    ConversationObjectCleanupRow,
+)
 from materialsagent.infrastructure.db.conversation_task import (
+    ConversationRow,
     TaskInputRevisionRow,
     TaskRow,
 )
 from materialsagent.infrastructure.db.session import create_session_factory
 from materialsagent.infrastructure.db.tool_run import ToolRunRow
+from materialsagent.infrastructure.llm.mock import MockChatOrchestrationAdapter
 
 
 BASE = datetime(2026, 7, 22, 1, 0, tzinfo=timezone.utc)
@@ -161,7 +166,11 @@ def _settings(api_harness):
 
 
 def _create_valid_revision(client, api_harness) -> tuple[str, str]:
-    conversation = client.post("/api/v1/conversations", json={})
+    conversation = client.post(
+        "/api/v1/conversations",
+        headers={"Idempotency-Key": "asset-conversation-create"},
+        json={},
+    )
     assert conversation.status_code == 201
     message = client.post(
         f"/api/v1/conversations/{conversation.json()['data']['conversation_id']}/messages",
@@ -171,8 +180,8 @@ def _create_valid_revision(client, api_harness) -> tuple[str, str]:
             "content_text": "完整合法 Tool 请求",
         },
     )
-    assert message.status_code == 503
-    task_id = message.json()["resource"]["task_id"]
+    assert message.status_code == 200, message.text
+    task_id = message.json()["data"]["task"]["task_id"]
     with create_session_factory(api_harness.engine)() as session:
         revision = session.scalar(
             select(TaskInputRevisionRow).where(
@@ -249,6 +258,162 @@ def test_asset_owner_metadata_inline_attachment_and_other_actor_404(
         assert session.scalar(select(func.count()).select_from(ToolRunRow)) == 1
 
 
+def test_conversation_delete_snapshots_real_asset_and_cleans_storage_after_commit(
+    api_harness,
+) -> None:
+    from materialsagent.application.tools import build_tool_registry
+
+    actor_id = "actor_asset_delete"
+    api_harness.persist_actor(actor_id)
+    storage = _MemoryStorage()
+    registry = build_tool_registry(_ToolClient())
+    settings = _settings(api_harness)
+
+    def responder(_input):
+        return {
+            "route": "TOOL_CANDIDATES",
+            "candidates": [{
+                "tool_id": "zta35g_sem_virtual_lab",
+                "candidate_input_delta": {
+                    "material": "ZTA35G",
+                    "solution_temperature": {"value": 1000, "unit": "°C"},
+                    "solution_time": {"value": 3, "unit": "h"},
+                    "aging_temperature": {"value": 730, "unit": "°C"},
+                    "aging_time": {"value": 3, "unit": "h"},
+                    "requested_outputs": ["sem_image", "mechanical_properties"],
+                },
+            }],
+        }
+
+    with api_harness.create_client(
+        actor_id,
+        settings=settings,
+        tool_registry=registry,
+        storage_service=storage,
+        chat_orchestration_port=MockChatOrchestrationAdapter(responder),
+    ) as client:
+        task_id, asset_id, run_data = _execute_asset(client, api_harness)
+        object_key = next(iter(storage.objects))
+        with create_session_factory(api_harness.engine)() as session:
+            task_row = session.get(TaskRow, task_id)
+            run_row = session.get(ToolRunRow, run_data["tool_run_id"])
+            assert task_row is not None and run_row is not None
+            conversation_id = task_row.conversation_id
+            completed_at = BASE.replace(hour=2)
+            run_row.current_status = "FAILED"
+            run_row.completed_at = completed_at
+            run_row.duration_ms = int(
+                (completed_at - run_row.started_at).total_seconds() * 1000
+            )
+            run_row.completed_outputs = []
+            run_row.failed_outputs = list(run_row.requested_outputs)
+            run_row.error_code = "CONTROLLED_TEST_STOP"
+            run_row.safe_error_message = "Controlled test terminal state."
+            task_row.current_status = "FAILED"
+            task_row.updated_at = completed_at
+            task_row.completed_at = completed_at
+            task_row.error_code = "CONTROLLED_TEST_STOP"
+            task_row.safe_error_message = "Controlled test terminal state."
+            session.commit()
+
+        response = client.delete(
+            f"/api/v1/conversations/{conversation_id}"
+        )
+
+    assert response.status_code == 200, response.text
+    assert object_key not in storage.objects
+    with create_session_factory(api_harness.engine)() as session:
+        cleanup_row = session.scalar(
+            select(ConversationObjectCleanupRow).where(
+                ConversationObjectCleanupRow.asset_id == asset_id
+            )
+        )
+        assert cleanup_row is not None
+        assert cleanup_row.status == "COMPLETED"
+        assert cleanup_row.object_key == object_key
+        assert cleanup_row.bucket == settings.minio_bucket
+        assert cleanup_row.storage_namespace.endswith(
+            str(settings.minio_endpoint)
+        )
+        assert session.get(TaskRow, task_id) is None
+        assert session.get(AssetRow, asset_id) is None
+
+
+def test_cleanup_snapshot_failure_rolls_back_conversation_delete(
+    api_harness,
+) -> None:
+    from materialsagent.application.tools import build_tool_registry
+
+    actor_id = "actor_asset_delete_atomicity"
+    api_harness.persist_actor(actor_id)
+    storage = _MemoryStorage()
+    settings = _settings(api_harness)
+    registry = build_tool_registry(_ToolClient())
+
+    with api_harness.create_client(
+        actor_id,
+        settings=settings,
+        tool_registry=registry,
+        storage_service=storage,
+    ) as client:
+        task_id, asset_id, run_data = _execute_asset(client, api_harness)
+        object_key = next(iter(storage.objects))
+        with create_session_factory(api_harness.engine)() as session:
+            task_row = session.get(TaskRow, task_id)
+            run_row = session.get(ToolRunRow, run_data["tool_run_id"])
+            asset_row = session.get(AssetRow, asset_id)
+            assert task_row is not None and run_row is not None and asset_row is not None
+            conversation_id = task_row.conversation_id
+            completed_at = BASE.replace(hour=2)
+            run_row.current_status = "FAILED"
+            run_row.completed_at = completed_at
+            run_row.duration_ms = int(
+                (completed_at - run_row.started_at).total_seconds() * 1000
+            )
+            run_row.completed_outputs = []
+            run_row.failed_outputs = list(run_row.requested_outputs)
+            run_row.error_code = "CONTROLLED_TEST_STOP"
+            run_row.safe_error_message = "Controlled test terminal state."
+            task_row.current_status = "FAILED"
+            task_row.updated_at = completed_at
+            task_row.completed_at = completed_at
+            task_row.error_code = "CONTROLLED_TEST_STOP"
+            task_row.safe_error_message = "Controlled test terminal state."
+            session.add(
+                ConversationObjectCleanupRow(
+                    cleanup_id="cleanup_existing_asset_snapshot",
+                    actor_id=actor_id,
+                    conversation_id=conversation_id,
+                    asset_id=asset_id,
+                    operation_id=asset_row.operation_id,
+                    producer_tool_run_id=asset_row.producer_tool_run_id,
+                    object_key=asset_row.object_key,
+                    bucket=asset_row.storage_bucket,
+                    storage_namespace=asset_row.storage_namespace,
+                    identity_version=asset_row.storage_identity_version,
+                    status="PENDING",
+                    attempts=0,
+                    created_at=completed_at,
+                    last_attempt_at=None,
+                    completed_at=None,
+                    safety_error_code=None,
+                )
+            )
+            session.commit()
+
+        response = client.delete(
+            f"/api/v1/conversations/{conversation_id}"
+        )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "RESOURCE_CONFLICT"
+    assert object_key in storage.objects
+    with create_session_factory(api_harness.engine)() as session:
+        assert session.get(ConversationRow, conversation_id) is not None
+        assert session.get(TaskRow, task_id) is not None
+        assert session.get(AssetRow, asset_id) is not None
+
+
 def test_partial_success_persists_safe_summary_and_available_asset(
     api_harness,
 ) -> None:
@@ -288,8 +453,8 @@ def test_partial_success_persists_safe_summary_and_available_asset(
     assert content.headers["content-type"] == "image/png"
     assert task.status_code == 200
     task_data = task.json()["data"]
-    assert task_data["status"] == "FAILED"
-    assert task_data["error_code"] == "TOOL_UNAVAILABLE"
+    assert task_data["status"] == "RUNNING"
+    assert task_data["error_code"] is None
     assert task_data["selected_tool_run_id"] is None
     assert task_data["selected_result_id"] is None
 
@@ -309,8 +474,8 @@ def test_partial_success_persists_safe_summary_and_available_asset(
         assert "runtime_predictor" not in persisted_summary
         assert "runtime-controlled traceback" not in persisted_summary
         assert stored_task is not None
-        assert stored_task.current_status == "FAILED"
-        assert stored_task.error_code == "TOOL_UNAVAILABLE"
+        assert stored_task.current_status == "RUNNING"
+        assert stored_task.error_code is None
         assert stored_task.selected_tool_run_id is None
         assert stored_task.selected_result_id is None
         assert stored_asset is not None

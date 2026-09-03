@@ -195,6 +195,41 @@ def _terminal_run(
     )
 
 
+def _persist_terminal_run(unit_of_work, run: ToolRun) -> None:
+    pending = ToolRun.pending(
+        tool_run_id=run.tool_run_id,
+        task_id=run.task_id,
+        request_id=run.request_id,
+        task_input_revision_id=run.task_input_revision_id,
+        input_revision_no=run.input_revision_no,
+        attempt_no=run.attempt_no,
+        tool_id=run.tool_id,
+        tool_version=run.tool_version,
+        schema_hash=run.schema_hash,
+        normalized_input_snapshot=run.normalized_input_snapshot,
+        execution_policy_snapshot=run.execution_policy_snapshot,
+        execution_input=run.execution_input,
+        requested_outputs=run.requested_outputs,
+        created_at=run.created_at,
+    )
+    assert run.started_at is not None
+    running = pending.start(started_at=run.started_at).record_runtime_output(
+        actual_runtime_parameters=run.actual_runtime_parameters or {},
+        diagnostics=run.diagnostics,
+        output_summary=run.output_summary or {},
+        model_bundle_id=run.model_bundle_id,
+    )
+    unit_of_work.tool_runs.add(pending)
+    assert unit_of_work.tool_runs.update(
+        running,
+        expected_status="PENDING",
+    ) == running
+    assert unit_of_work.tool_runs.update(
+        run,
+        expected_status="RUNNING",
+    ) == run
+
+
 def _result_for_run(
     run: ToolRun,
     *,
@@ -409,7 +444,7 @@ def _seed_task_detail(
                 status=(selected_status if selected else "SUCCEEDED"),
                 created_at=created_at + timedelta(seconds=attempt_no),
             )
-            unit_of_work.tool_runs.add(run)
+            _persist_terminal_run(unit_of_work, run)
             if selected:
                 selected_run = run
         assert selected_run is not None
@@ -495,7 +530,7 @@ def _append_tool_retry(engine, seeded: dict[str, str]) -> dict[str, str]:
     with SQLAlchemyUnitOfWork(
         create_session_factory(engine)
     ) as unit_of_work:
-        unit_of_work.tool_runs.add(run)
+        _persist_terminal_run(unit_of_work, run)
         unit_of_work.tool_results.add(result)
         unit_of_work.assets.add(asset)
         unit_of_work.result_asset_links.add(

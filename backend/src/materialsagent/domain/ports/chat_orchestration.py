@@ -8,6 +8,10 @@ import re
 from types import MappingProxyType
 from typing import Final, Literal, Protocol
 
+from materialsagent.domain.ports.conversation_context import (
+    ContextBudget,
+    PromptContextWindow,
+)
 from materialsagent.domain.ports.tool_registry import RoutingCatalogSnapshot
 
 
@@ -93,6 +97,9 @@ class ChatOrchestrationInput:
     request_id: str
     content_text: str
     routing_catalog: RoutingCatalogSnapshot
+    context_window: PromptContextWindow = field(
+        default_factory=PromptContextWindow
+    )
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -107,6 +114,8 @@ class ChatOrchestrationInput:
             RoutingCatalogSnapshot,
         ):
             raise ValueError("routing_catalog must be a RoutingCatalogSnapshot.")
+        if not isinstance(self.context_window, PromptContextWindow):
+            raise ValueError("context_window must be a PromptContextWindow.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,15 +156,29 @@ def _freeze_candidate_json(value: object) -> object:
 
 
 @dataclass(frozen=True, slots=True)
+class HistoryReference:
+    context_ref: str
+    reference_text: str
+
+    def __post_init__(self) -> None:
+        if re.fullmatch(r"ctx_ref_[0-9]{4,}", self.context_ref) is None:
+            raise ValueError("context_ref must be a local Context Window reference.")
+        _require_non_blank(self.reference_text, "reference_text")
+        if len(self.reference_text.encode("utf-8")) > 1024:
+            raise ValueError("reference_text exceeds the safe size limit.")
+
+
+@dataclass(frozen=True, slots=True)
 class ToolCandidateProposal:
     tool_id: str
-    candidate_input: Mapping[str, object]
+    candidate_input_delta: Mapping[str, object]
+    history_reference: HistoryReference | None = None
 
     def __post_init__(self) -> None:
         _require_non_blank(self.tool_id, "tool_id")
-        if not isinstance(self.candidate_input, Mapping):
-            raise ValueError("candidate_input must be a JSON object.")
-        plain = _plain_candidate_json(self.candidate_input)
+        if not isinstance(self.candidate_input_delta, Mapping):
+            raise ValueError("candidate_input_delta must be a JSON object.")
+        plain = _plain_candidate_json(self.candidate_input_delta)
         encoded = json.dumps(
             plain,
             ensure_ascii=False,
@@ -164,8 +187,22 @@ class ToolCandidateProposal:
             sort_keys=True,
         ).encode("utf-8")
         if len(encoded) > 4096:
-            raise ValueError("candidate_input exceeds the safe size limit.")
-        object.__setattr__(self, "candidate_input", _freeze_candidate_json(plain))
+            raise ValueError("candidate_input_delta exceeds the safe size limit.")
+        if self.history_reference is not None and not isinstance(
+            self.history_reference,
+            HistoryReference,
+        ):
+            raise ValueError("history_reference must be a HistoryReference.")
+        object.__setattr__(
+            self,
+            "candidate_input_delta",
+            _freeze_candidate_json(plain),
+        )
+
+    @property
+    def candidate_input(self) -> Mapping[str, object]:
+        """Read-only compatibility alias for pre-v6 internal callers."""
+        return self.candidate_input_delta
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,7 +225,19 @@ class ToolCandidateSet:
             "candidates": [
                 {
                     "tool_id": item.tool_id,
-                    "candidate_input": _plain_candidate_json(item.candidate_input),
+                    "candidate_input_delta": _plain_candidate_json(
+                        item.candidate_input_delta
+                    ),
+                    **(
+                        {}
+                        if item.history_reference is None
+                        else {
+                            "history_reference": {
+                                "context_ref": item.history_reference.context_ref,
+                                "reference_text": item.history_reference.reference_text,
+                            }
+                        }
+                    ),
                 }
                 for item in self.candidates
             ],
@@ -278,6 +327,12 @@ class ChatOrchestrationOutcome:
 class ChatOrchestrationPort(Protocol):
     provider: str
     model_name: str
+    context_budget: ContextBudget
+
+    def count_prompt_tokens(
+        self,
+        orchestration_input: ChatOrchestrationInput,
+    ) -> int: ...
 
     def request_metadata(
         self,

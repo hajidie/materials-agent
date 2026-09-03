@@ -47,6 +47,7 @@ def test_chat_idempotency_replay_does_not_call_provider_twice(
     ) as client:
         conversation_id = client.post(
             "/api/v1/conversations",
+            headers={"Idempotency-Key": "provider-idempotency-conversation"},
             json={},
         ).json()["data"]["conversation_id"]
         request = {

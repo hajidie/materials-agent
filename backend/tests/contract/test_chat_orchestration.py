@@ -96,7 +96,7 @@ def test_candidate_input_rejects_non_json_or_unbounded_values(unsafe: object) ->
         ({"route": "KNOWLEDGE_ANSWER", "answer_text": "安全答案。"}, KnowledgeAnswer),
         ({
             "route": "TOOL_CANDIDATES",
-            "candidates": [{"tool_id": "zta35g_sem_virtual_lab", "candidate_input": {"material": "ZTA35G"}}],
+            "candidates": [{"tool_id": "zta35g_sem_virtual_lab", "candidate_input_delta": {"material": "ZTA35G"}}],
         }, ToolCandidateSet),
     ],
 )
@@ -112,7 +112,7 @@ def test_mock_decodes_only_generic_router_results(payload, expected_type) -> Non
         {"route": "NEEDS_INPUT", "tool_id": "zta35g_sem_virtual_lab"},
         {"route": "TOOL_CANDIDATES", "status": "READY", "candidates": []},
         {"route": "TOOL_CANDIDATES", "candidates": [{
-            "tool_id": "tool_one", "version": "1", "schema_hash": "a" * 64, "candidate_input": {},
+            "tool_id": "tool_one", "candidate_input": {},
         }]},
     ],
 )

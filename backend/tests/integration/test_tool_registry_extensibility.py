@@ -67,7 +67,7 @@ def test_two_definition_registry_keeps_unrelated_contracts_and_hashes() -> None:
 def test_generic_candidate_validation_accepts_ml_training_fields() -> None:
     candidate = ToolCandidateProposal(
         tool_id="ml_training_test",
-        candidate_input={
+        candidate_input_delta={
             "dataset": "dataset_fixture_1",
             "task_type": "regression",
             "split_ratio": 0.8,

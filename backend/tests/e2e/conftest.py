@@ -589,6 +589,7 @@ def e2e_app_factory() -> Iterator[E2EAppFactory]:
             "local_actor_id": actor_id,
             "postgres_db": database_name,
             "minio_bucket": bucket_name,
+            "llm_adapter": "mock",
             "zta35g_runtime_url": "http://127.0.0.1:8100",
             "timeline_cursor_signing_key": SecretStr(
                 "m11a-e2e-timeline-signing-key-at-least-32-bytes"

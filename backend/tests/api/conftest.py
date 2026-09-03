@@ -227,7 +227,10 @@ def api_harness(
         with admin_engine.connect() as connection:
             connection.exec_driver_sql(f'CREATE DATABASE "{database_name}"')
         database_settings = api_postgres_settings.model_copy(
-            update={"postgres_db": database_name}
+            update={
+                "postgres_db": database_name,
+                "llm_adapter": "mock",
+            }
         )
         command.upgrade(_alembic_config(database_settings), "head")
         database_engine = create_engine_from_settings(database_settings)

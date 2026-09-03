@@ -83,6 +83,7 @@ def _record(
         idempotency_key=key,
         request_digest="b" * 64,
         first_request_id=first_request_id or f"req_{suffix}",
+        conversation_id=f"conv_{task_id.removeprefix('task_')}",
         task_id=task_id,
         message_id=message_id,
         task_input_revision_id=None,

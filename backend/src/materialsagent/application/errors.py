@@ -47,6 +47,11 @@ class IdempotencyConflictError(ApplicationConflictError):
     default_code = "IDEMPOTENCY_CONFLICT"
 
 
+class ConversationBusyError(ApplicationConflictError):
+    default_message = "对话仍有正在执行的任务，请稍后重试。"
+    default_code = "CONVERSATION_BUSY"
+
+
 class TaskNotRetryableError(ApplicationConflictError):
     default_message = "当前任务不允许重试材料工具。"
     default_code = "TASK_NOT_RETRYABLE"

@@ -42,7 +42,7 @@ export class ConversationCreationUncertaintyError extends Error {
 
   constructor() {
     super(
-      "无法确认 Conversation 是否已创建，请先刷新 Conversation 列表，避免重复创建。",
+      "无法确认 Conversation 是否已创建；请使用原幂等键重试，避免重复创建。",
     );
     this.name = "ConversationCreationUncertaintyError";
   }
@@ -99,7 +99,7 @@ export function toUserVisibleError(error: unknown): UserVisibleError {
   if (error instanceof ConversationCreationUncertaintyError) {
     return {
       message:
-        "无法确认 Conversation 是否已创建，请先刷新 Conversation 列表，避免重复创建。",
+        "无法确认 Conversation 是否已创建；请使用原幂等键重试，避免重复创建。",
     };
   }
   if (error instanceof ProtocolResponseError) {

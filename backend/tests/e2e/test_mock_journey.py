@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select
@@ -113,7 +114,11 @@ def _assert_safe_png_response(
 
 
 def _create_conversation(e2e_harness) -> str:
-    response = e2e_harness.client.post("/api/v1/conversations", json={})
+    response = e2e_harness.client.post(
+        "/api/v1/conversations",
+        headers={"Idempotency-Key": f"e2e-journey-conversation-{uuid4().hex}"},
+        json={},
+    )
     assert response.status_code == 201, response.text
     _assert_safe_json(response, repo_root=e2e_harness.repo_root)
     return response.json()["data"]["conversation_id"]

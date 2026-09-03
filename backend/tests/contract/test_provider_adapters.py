@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import socket
 from types import SimpleNamespace
 
@@ -16,6 +17,10 @@ from materialsagent.domain.ports.chat_orchestration import (
     ToolCandidateSet,
 )
 from materialsagent.domain.ports.explanation import ExplanationInput
+from materialsagent.domain.ports.conversation_context import (
+    ContextTurn,
+    PromptContextWindow,
+)
 from materialsagent.domain.ports.tool_input_extraction import (
     ToolInputExtractionInput,
 )
@@ -52,6 +57,16 @@ def _config(
         thinking_budget=None,
         response_format="json_object" if structured else "text",
         streaming=False,
+        context_window_tokens=1_000_000,
+        prompt_limit_tokens=(16_384 if role == "chat_orchestration" else 8_192),
+        history_token_budget=(
+            8_192
+            if role == "chat_orchestration"
+            else 4_096
+            if role == "tool_input_extraction"
+            else 0
+        ),
+        safety_margin_tokens=1_024,
     )
 
 
@@ -182,7 +197,10 @@ class FakeRunnable:
             {
                 "route": "TOOL_CANDIDATES",
                 "candidates": [
-                    {"tool_id": "safe_tool", "candidate_input": {"value": 3}}
+                    {
+                        "tool_id": "safe_tool",
+                        "candidate_input_delta": {"value": 3},
+                    }
                 ],
             },
             ToolCandidateSet,
@@ -280,7 +298,7 @@ def test_chat_prompt_metadata_matches_the_single_render_sent(
 
     assert outcome.result.route == "KNOWLEDGE_ANSWER"
     assert render_calls == 1
-    assert metadata.prompt_template_version == "5"
+    assert metadata.prompt_template_version == "6"
     assert metadata.generation_parameters["schema_version"] == 1
     assert metadata.prompt_digest == canonical_prompt_digest(
         template_id=metadata.prompt_template_id,
@@ -290,6 +308,50 @@ def test_chat_prompt_metadata_matches_the_single_render_sent(
     rendered = str(model.messages)
     assert "safe_tool" in rendered
     assert "Runtime URL" not in rendered
+
+
+def test_chat_adapter_preserves_history_order_and_counts_structured_schema() -> None:
+    from materialsagent.infrastructure.llm.langchain_chat import (
+        LangChainChatOrchestrationAdapter,
+        ProviderChatResponse,
+    )
+    from materialsagent.infrastructure.llm.prompts import (
+        render_chat_orchestration_prompt,
+    )
+    from materialsagent.infrastructure.llm.token_counter import Cl100kTokenCounter
+
+    parsed = ProviderChatResponse.model_validate(
+        {"route": "KNOWLEDGE_ANSWER", "answer_text": "safe"}
+    )
+    model = FakeRunnable(_envelope(parsed))
+    adapter = LangChainChatOrchestrationAdapter(
+        _config("chat_orchestration"),
+        structured_runnable=model,
+    )
+    request = replace(
+        _chat_input("current user"),
+        context_window=PromptContextWindow(
+            recent_turns=(
+                ContextTurn(
+                    "historical user",
+                    '{"context_ref":"ctx_ref_0001","kind":"history"}',
+                ),
+            )
+        ),
+    )
+    rendered = render_chat_orchestration_prompt(request)
+
+    adapter.orchestrate(request)
+
+    assert [message["role"] for message in model.messages] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert model.messages == rendered
+    message_tokens = Cl100kTokenCounter().count_messages(rendered)
+    assert adapter.count_prompt_tokens(request) > message_tokens
 
 
 @pytest.mark.parametrize(

@@ -111,6 +111,10 @@ class ModelCapabilities(_StrictModel):
 class ModelDefinition(_StrictModel):
     provider: ProviderName
     name: str
+    context_window_tokens: Annotated[
+        int,
+        Field(gt=0, le=4_000_000, strict=True),
+    ]
     capabilities: ModelCapabilities
 
     @field_validator("name")
@@ -180,6 +184,18 @@ class RoleDefinition(_StrictModel):
     reasoning_mode: ReasoningMode | None = None
     reasoning_effort: ReasoningEffort | None = None
     thinking_budget: int | None = None
+    prompt_limit_tokens: Annotated[
+        int,
+        Field(gt=0, le=1_000_000, strict=True),
+    ]
+    history_token_budget: Annotated[
+        int,
+        Field(ge=0, le=1_000_000, strict=True),
+    ]
+    safety_margin_tokens: Annotated[
+        int,
+        Field(ge=0, le=131_072, strict=True),
+    ]
 
     @field_validator("model")
     @classmethod
@@ -224,6 +240,14 @@ class RoleDefinition(_StrictModel):
         ):
             raise ValueError(
                 "reasoning_effort and thinking_budget require enabled reasoning."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def require_bounded_context_budget(self) -> RoleDefinition:
+        if self.history_token_budget > self.prompt_limit_tokens:
+            raise ValueError(
+                "history_token_budget must not exceed prompt_limit_tokens."
             )
         return self
 
@@ -290,6 +314,10 @@ class ConfiguredRole:
     thinking_budget: int | None
     response_format: Literal["json_object", "text"]
     streaming: bool
+    context_window_tokens: int
+    prompt_limit_tokens: int
+    history_token_budget: int
+    safety_margin_tokens: int
 
     @property
     def generation_parameters(self) -> Mapping[str, object]:
@@ -470,5 +498,9 @@ def load_llm_configuration(
                 reasoning_enabled
                 and model.capabilities.requires_streaming_for_reasoning
             ),
+            context_window_tokens=model.context_window_tokens,
+            prompt_limit_tokens=role.prompt_limit_tokens,
+            history_token_budget=role.history_token_budget,
+            safety_margin_tokens=role.safety_margin_tokens,
         )
     return LLMConfiguration(roles=MappingProxyType(roles))

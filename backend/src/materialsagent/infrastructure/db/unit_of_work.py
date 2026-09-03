@@ -10,6 +10,8 @@ from materialsagent.domain.ports.unit_of_work import (
     ActorRepository,
     AssetRepository,
     ConversationRepository,
+    ConversationLifecycleRepository,
+    ConversationObjectCleanupRepository,
     DatabaseUnavailableError,
     ExplanationRepository,
     IdempotencyRecordRepository,
@@ -24,6 +26,10 @@ from materialsagent.domain.ports.unit_of_work import (
     ToolResultRepository,
 )
 from materialsagent.infrastructure.db.actor import SQLAlchemyActorRepository
+from materialsagent.infrastructure.db.conversation_cleanup import (
+    SQLAlchemyConversationLifecycleRepository,
+    SQLAlchemyConversationObjectCleanupRepository,
+)
 from materialsagent.infrastructure.db.asset import SQLAlchemyAssetRepository
 from materialsagent.infrastructure.db.llm_call import SQLAlchemyLLMCallRepository
 from materialsagent.infrastructure.db.explanation import (
@@ -65,6 +71,8 @@ class SQLAlchemyUnitOfWork:
         self._result_asset_links: ResultAssetLinkRepository | None = None
         self._explanations: ExplanationRepository | None = None
         self._idempotency_records: IdempotencyRecordRepository | None = None
+        self._conversation_object_cleanups: ConversationObjectCleanupRepository | None = None
+        self._conversation_lifecycle: ConversationLifecycleRepository | None = None
 
     @property
     def actors(self) -> ActorRepository:
@@ -138,6 +146,18 @@ class SQLAlchemyUnitOfWork:
             raise RuntimeError("UnitOfWork has not been entered.")
         return self._idempotency_records
 
+    @property
+    def conversation_object_cleanups(self) -> ConversationObjectCleanupRepository:
+        if self._conversation_object_cleanups is None:
+            raise RuntimeError("UnitOfWork has not been entered.")
+        return self._conversation_object_cleanups
+
+    @property
+    def conversation_lifecycle(self) -> ConversationLifecycleRepository:
+        if self._conversation_lifecycle is None:
+            raise RuntimeError("UnitOfWork has not been entered.")
+        return self._conversation_lifecycle
+
     def __enter__(self) -> SQLAlchemyUnitOfWork:
         if self.session is not None:
             raise RuntimeError("UnitOfWork is already active.")
@@ -158,6 +178,12 @@ class SQLAlchemyUnitOfWork:
         )
         self._explanations = SQLAlchemyExplanationRepository(self.session)
         self._idempotency_records = SQLAlchemyIdempotencyRecordRepository(
+            self.session
+        )
+        self._conversation_object_cleanups = SQLAlchemyConversationObjectCleanupRepository(
+            self.session
+        )
+        self._conversation_lifecycle = SQLAlchemyConversationLifecycleRepository(
             self.session
         )
         return self
@@ -189,6 +215,8 @@ class SQLAlchemyUnitOfWork:
                 self._result_asset_links = None
                 self._explanations = None
                 self._idempotency_records = None
+                self._conversation_object_cleanups = None
+                self._conversation_lifecycle = None
 
     def _active_session(self) -> Session:
         if self.session is None:

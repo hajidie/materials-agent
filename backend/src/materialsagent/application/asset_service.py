@@ -105,6 +105,8 @@ class AssetService:
         storage: StorageService,
         *,
         environment: str,
+        bucket: str,
+        storage_namespace: str,
         clock: Clock | None = None,
         asset_id_factory: IdFactory | None = None,
         operation_id_factory: IdFactory | None = None,
@@ -113,9 +115,15 @@ class AssetService:
     ) -> None:
         if _ENVIRONMENT_PATTERN.fullmatch(environment) is None:
             raise ValueError("environment is not safe for object keys.")
+        if not isinstance(bucket, str) or not bucket.strip():
+            raise ValueError("bucket is required.")
+        if not isinstance(storage_namespace, str) or not storage_namespace.strip():
+            raise ValueError("storage_namespace is required.")
         self._unit_of_work_factory = unit_of_work_factory
         self._storage = storage
         self._environment = environment
+        self._bucket = bucket
+        self._storage_namespace = storage_namespace
         self._clock = clock or _utc_now
         self._asset_id_factory = asset_id_factory or (
             lambda: _opaque_id("asset")
@@ -211,6 +219,8 @@ class AssetService:
                     ),
                     pending_since=now,
                     created_at=now,
+                    storage_bucket=self._bucket,
+                    storage_namespace=self._storage_namespace,
                 )
                 unit_of_work.assets.add(pending)
                 unit_of_work.commit()

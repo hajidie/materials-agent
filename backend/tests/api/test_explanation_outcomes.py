@@ -163,11 +163,18 @@ def _submit(client, conversation_id: str):
     )
 
 
-def _client_options(api_harness, runtime, storage, explanation_mode):
+def _client_options(
+    api_harness,
+    runtime,
+    storage,
+    explanation_mode,
+    *,
+    execution_hour: int = 1,
+):
     execution = ToolExecutionService(
         api_harness.unit_of_work_factory,
         build_tool_registry(runtime),
-        clock=lambda: BASE_TIME.replace(hour=1),
+        clock=lambda: BASE_TIME.replace(hour=execution_hour),
         seed_factory=lambda: 101,
     )
     return {
@@ -183,16 +190,20 @@ def _client_options(api_harness, runtime, storage, explanation_mode):
 def _chat_port_for_outputs(outputs: list[str]):
     def responder(_input):
         return {
-            "route": "TOOL_EXECUTION",
-            "tool_id": "zta35g_sem_virtual_lab",
-            "material": "ZTA35G",
-            "candidate_parameters": {
-                "solution_temperature": {"value": 1000, "unit": "°C"},
-                "solution_time": {"value": 3, "unit": "h"},
-                "aging_temperature": {"value": 730, "unit": "°C"},
-                "aging_time": {"value": 3, "unit": "h"},
-            },
-            "requested_outputs": outputs,
+            "route": "TOOL_CANDIDATES",
+            "candidates": [
+                {
+                    "tool_id": "zta35g_sem_virtual_lab",
+                    "candidate_input_delta": {
+                        "material": "ZTA35G",
+                        "solution_temperature": {"value": 1000, "unit": "°C"},
+                        "solution_time": {"value": 3, "unit": "h"},
+                        "aging_temperature": {"value": 730, "unit": "°C"},
+                        "aging_time": {"value": 3, "unit": "h"},
+                        "requested_outputs": outputs,
+                    },
+                }
+            ],
         }
 
     return MockChatOrchestrationAdapter(responder)
@@ -218,6 +229,7 @@ def test_public_message_executes_one_full_committed_tool_chain(
     ) as client:
         conversation = client.post(
             "/api/v1/conversations",
+            headers={"Idempotency-Key": f"explanation-conversation-{uuid4().hex}"},
             json={},
         ).json()["data"]["conversation_id"]
         response = _submit(client, conversation)
@@ -313,6 +325,7 @@ def test_partial_result_and_explanation_timeout_still_return_committed_200(
     ) as client:
         conversation = client.post(
             "/api/v1/conversations",
+            headers={"Idempotency-Key": f"explanation-conversation-{uuid4().hex}"},
             json={},
         ).json()["data"]["conversation_id"]
         response = _submit(client, conversation)
@@ -356,6 +369,7 @@ def test_unexpected_explanation_adapter_failure_returns_committed_result(
     ) as client:
         conversation = client.post(
             "/api/v1/conversations",
+            headers={"Idempotency-Key": f"explanation-conversation-{uuid4().hex}"},
             json={},
         ).json()["data"]["conversation_id"]
         response = _submit(client, conversation)
@@ -435,6 +449,9 @@ def test_sem_only_and_mechanical_only_failure_are_stable_business_results(
         ) as client:
             conversation = client.post(
                 "/api/v1/conversations",
+                headers={
+                    "Idempotency-Key": f"explanation-conversation-{uuid4().hex}"
+                },
                 json={},
             ).json()["data"]["conversation_id"]
             response = _submit(client, conversation)
@@ -470,11 +487,13 @@ def test_asset_failure_does_not_publish_memory_result_or_tool_unavailable(
             runtime,
             storage,
             "success",
+            execution_hour=2,
         ),
         clock=lambda: BASE_TIME.replace(hour=2),
     ) as client:
         conversation = client.post(
             "/api/v1/conversations",
+            headers={"Idempotency-Key": f"explanation-conversation-{uuid4().hex}"},
             json={},
         ).json()["data"]["conversation_id"]
         response = _submit(client, conversation)
@@ -496,7 +515,7 @@ def test_asset_failure_does_not_publish_memory_result_or_tool_unavailable(
         ) == 1
         assert connection.scalar(
             text("SELECT duration_ms FROM tool_run")
-        ) == 3_600_000
+        ) == 0
 
 
 def test_runtime_transport_failure_selects_persisted_failed_tool_run(
@@ -519,6 +538,7 @@ def test_runtime_transport_failure_selects_persisted_failed_tool_run(
     ) as client:
         conversation = client.post(
             "/api/v1/conversations",
+            headers={"Idempotency-Key": f"explanation-conversation-{uuid4().hex}"},
             json={},
         ).json()["data"]["conversation_id"]
         response = _submit(client, conversation)
@@ -577,6 +597,7 @@ def test_deepseek_auth_failure_is_detailed_only_in_llm_call(
     ) as client:
         conversation = client.post(
             "/api/v1/conversations",
+            headers={"Idempotency-Key": f"explanation-conversation-{uuid4().hex}"},
             json={},
         ).json()["data"]["conversation_id"]
         response = _submit(client, conversation)
@@ -644,6 +665,7 @@ def test_result_commit_failure_has_no_result_explanation_or_memory_success(
     with api_harness.create_client(actor_id, **options) as client:
         conversation = client.post(
             "/api/v1/conversations",
+            headers={"Idempotency-Key": f"explanation-conversation-{uuid4().hex}"},
             json={},
         ).json()["data"]["conversation_id"]
         response = _submit(client, conversation)
@@ -723,6 +745,7 @@ def test_explanation_finalize_commit_failure_never_returns_uncommitted_text(
     with api_harness.create_client(actor_id, **options) as client:
         conversation = client.post(
             "/api/v1/conversations",
+            headers={"Idempotency-Key": f"explanation-conversation-{uuid4().hex}"},
             json={},
         ).json()["data"]["conversation_id"]
         response = _submit(client, conversation)

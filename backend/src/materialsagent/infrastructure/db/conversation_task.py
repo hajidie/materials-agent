@@ -13,6 +13,8 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    and_,
+    or_,
     select,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -160,7 +162,7 @@ class TaskRow(Base):
         ForeignKey(
             "conversation.conversation_id",
             name="fk_task_conversation",
-            ondelete="RESTRICT",
+            ondelete="CASCADE",
         ),
         nullable=False,
     )
@@ -187,7 +189,7 @@ class TaskRow(Base):
         ForeignKey(
             "tool_run.tool_run_id",
             name="fk_task_selected_tool_run",
-            ondelete="RESTRICT",
+            ondelete="SET NULL",
             use_alter=True,
         ),
         nullable=True,
@@ -196,7 +198,7 @@ class TaskRow(Base):
         ForeignKey(
             "tool_result.result_id",
             name="fk_task_selected_result",
-            ondelete="RESTRICT",
+            ondelete="SET NULL",
             use_alter=True,
         ),
         nullable=True,
@@ -292,7 +294,7 @@ class MessageRow(Base):
         ForeignKey(
             "conversation.conversation_id",
             name="fk_message_conversation",
-            ondelete="RESTRICT",
+            ondelete="CASCADE",
         ),
         nullable=False,
     )
@@ -300,7 +302,7 @@ class MessageRow(Base):
         ForeignKey(
             "task.task_id",
             name="fk_message_task",
-            ondelete="RESTRICT",
+            ondelete="CASCADE",
         ),
         nullable=False,
     )
@@ -395,7 +397,7 @@ class TaskInputRevisionRow(Base):
         ForeignKey(
             "task.task_id",
             name="fk_task_input_revision_task",
-            ondelete="RESTRICT",
+            ondelete="CASCADE",
         ),
         nullable=False,
     )
@@ -404,7 +406,7 @@ class TaskInputRevisionRow(Base):
         ForeignKey(
             "llm_call.llm_call_id",
             name="fk_task_input_revision_llm_call",
-            ondelete="RESTRICT",
+            ondelete="SET NULL",
         ),
         nullable=True,
     )
@@ -536,6 +538,25 @@ class SQLAlchemyConversationRepository:
             _raise_safe_persistence_error(error)
         return None if row is None else _conversation_from_row(row)
 
+    def get_owned_for_update(
+        self,
+        conversation_id: str,
+        actor_id: str,
+    ) -> Conversation | None:
+        statement = (
+            select(ConversationRow)
+            .where(
+                ConversationRow.conversation_id == conversation_id,
+                ConversationRow.actor_id == actor_id,
+            )
+            .with_for_update()
+        )
+        try:
+            row = self._session.scalar(statement)
+        except SQLAlchemyError as error:
+            _raise_safe_persistence_error(error)
+        return None if row is None else _conversation_from_row(row)
+
     def list_owned(self, actor_id: str) -> list[Conversation]:
         statement = (
             select(ConversationRow)
@@ -585,6 +606,25 @@ class SQLAlchemyConversationRepository:
             if row.title is None and conversation.title is not None:
                 row.title = conversation.title
             return _conversation_from_row(row)
+        except SQLAlchemyError as error:
+            _raise_safe_persistence_error(error)
+
+    def delete(self, conversation_id: str, actor_id: str) -> bool:
+        statement = (
+            select(ConversationRow)
+            .where(
+                ConversationRow.conversation_id == conversation_id,
+                ConversationRow.actor_id == actor_id,
+            )
+            .with_for_update()
+        )
+        try:
+            row = self._session.scalar(statement)
+            if row is None:
+                return False
+            self._session.delete(row)
+            self._session.flush()
+            return True
         except SQLAlchemyError as error:
             _raise_safe_persistence_error(error)
 
@@ -648,6 +688,38 @@ class SQLAlchemyMessageRepository:
             _raise_safe_persistence_error(error)
         return [_message_from_row(row) for row in rows]
 
+    def list_for_conversation_before(
+        self,
+        conversation_id: str,
+        actor_id: str,
+        *,
+        before_created_at: datetime,
+        before_message_id: str,
+    ) -> list[Message]:
+        statement = (
+            select(MessageRow)
+            .where(
+                MessageRow.conversation_id == conversation_id,
+                MessageRow.actor_id == actor_id,
+                or_(
+                    MessageRow.created_at < before_created_at,
+                    and_(
+                        MessageRow.created_at == before_created_at,
+                        MessageRow.message_id < before_message_id,
+                    ),
+                ),
+            )
+            .order_by(
+                MessageRow.created_at.asc(),
+                MessageRow.message_id.asc(),
+            )
+        )
+        try:
+            rows = self._session.scalars(statement).all()
+        except SQLAlchemyError as error:
+            _raise_safe_persistence_error(error)
+        return [_message_from_row(row) for row in rows]
+
     def add(self, message: Message) -> None:
         try:
             self._session.flush()
@@ -676,12 +748,13 @@ TASK_ALLOWED_TRANSITIONS: Final = {
         {
             "RUNNING",
             "NEEDS_INPUT",
+            "READY",
             "SUCCEEDED",
             "PARTIALLY_SUCCEEDED",
             "FAILED",
         }
     ),
-    "NEEDS_INPUT": frozenset({"RUNNING", "READY"}),
+    "NEEDS_INPUT": frozenset({"RUNNING", "NEEDS_INPUT", "READY"}),
     "READY": frozenset({"RUNNING"}),
     "SUCCEEDED": frozenset(),
     "PARTIALLY_SUCCEEDED": frozenset({"RUNNING"}),

@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
+from sqlalchemy import update
+
 from materialsagent.api.routes.tasks import RetriedToolRunView
 from materialsagent.application.errors import (
     ApplicationInternalError,
@@ -15,6 +17,7 @@ from materialsagent.domain.ports.unit_of_work import (
     DatabaseUnavailableError,
     PersistenceError,
 )
+from materialsagent.infrastructure.db.conversation_task import TaskRow
 
 
 BASE_TIME = datetime(2026, 7, 19, 0, 0, tzinfo=timezone.utc)
@@ -185,7 +188,11 @@ def test_get_task_returns_persisted_tool_unavailable_terminal_fact(
     api_harness.persist_actor(actor_id)
 
     with api_harness.create_client(actor_id) as client:
-        conversation = client.post("/api/v1/conversations", json={})
+        conversation = client.post(
+            "/api/v1/conversations",
+            headers={"Idempotency-Key": "task-query-conversation"},
+            json={},
+        )
         conversation_id = conversation.json()["data"]["conversation_id"]
         submitted = client.post(
             f"/api/v1/conversations/{conversation_id}/messages",
@@ -195,8 +202,20 @@ def test_get_task_returns_persisted_tool_unavailable_terminal_fact(
                 "content_text": "完整合法 Tool 请求",
             },
         )
-        assert submitted.status_code == 503
-        task_id = submitted.json()["resource"]["task_id"]
+        assert submitted.status_code == 200
+        task_id = submitted.json()["data"]["task"]["task_id"]
+        with api_harness.engine.begin() as connection:
+            connection.execute(
+                update(TaskRow)
+                .where(TaskRow.task_id == task_id)
+                .values(
+                    current_status="FAILED",
+                    completed_at=BASE_TIME.replace(hour=2),
+                    updated_at=BASE_TIME.replace(hour=2),
+                    error_code="TOOL_UNAVAILABLE",
+                    safe_error_message="当前阶段尚未开放材料工具执行。",
+                )
+            )
         response = client.get(f"/api/v1/tasks/{task_id}")
 
     assert response.status_code == 200
@@ -242,6 +261,7 @@ def test_get_task_returns_safe_full_tool_history_without_external_calls(
     ) as client:
         conversation_id = client.post(
             "/api/v1/conversations",
+            headers={"Idempotency-Key": "task-history-conversation"},
             json={},
         ).json()["data"]["conversation_id"]
         submitted = _submit(client, conversation_id)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
@@ -21,6 +22,13 @@ BASE_TIME = datetime(2026, 7, 19, 0, 0, tzinfo=timezone.utc)
 def _message_headers(**values: str) -> dict[str, str]:
     return {
         "Idempotency-Key": f"message-{uuid4().hex}",
+        **values,
+    }
+
+
+def _conversation_headers(**values: str) -> dict[str, str]:
+    return {
+        "Idempotency-Key": f"conversation-{uuid4().hex}",
         **values,
     }
 
@@ -62,6 +70,7 @@ def test_create_conversation_accepts_null_and_trimmed_title_from_server_actor(
             f"/api/v1/conversations?actor_id={foreign_actor_id}",
             json={},
             headers={
+                **_conversation_headers(),
                 "X-Actor-Id": foreign_actor_id,
                 "X-User-Id": "user_client_selected",
             },
@@ -69,6 +78,7 @@ def test_create_conversation_accepts_null_and_trimmed_title_from_server_actor(
         with_title = client.post(
             "/api/v1/conversations",
             json={"title": "  显式标题  "},
+            headers=_conversation_headers(),
         )
 
     assert without_title.status_code == 201
@@ -85,9 +95,11 @@ def test_create_conversation_accepts_null_and_trimmed_title_from_server_actor(
             "title",
             "created_at",
             "updated_at",
+            "idempotency_replayed",
         }
         assert body["data"]["conversation_id"].startswith("conv_")
         assert body["data"]["title"] == expected_title
+        assert body["data"]["idempotency_replayed"] is False
         _assert_utc(body["data"]["created_at"])
         _assert_utc(body["data"]["updated_at"])
         assert "actor_id" not in response.text
@@ -132,11 +144,14 @@ def test_create_conversation_maps_primary_key_collision_to_safe_409(
     )
 
     def colliding_id(prefix: str) -> str:
-        assert prefix == "conv"
-        return "conv_collision"
+        return "conv_collision" if prefix == "conv" else f"{prefix}_unique"
 
     with api_harness.create_client(actor_id, id_factory=colliding_id) as client:
-        response = client.post("/api/v1/conversations", json={})
+        response = client.post(
+            "/api/v1/conversations",
+            json={},
+            headers=_conversation_headers(),
+        )
 
     assert response.status_code == 409
     assert response.json()["error"] == {
@@ -145,6 +160,121 @@ def test_create_conversation_maps_primary_key_collision_to_safe_409(
         "details": [],
     }
     assert api_harness.counts()["conversation"] == 1
+
+
+def test_create_conversation_requires_and_replays_idempotency_key(
+    api_harness,
+) -> None:
+    actor_id = "actor_local"
+    api_harness.persist_actor(actor_id)
+    headers = {"Idempotency-Key": "stable-conversation-create"}
+
+    with api_harness.create_client(actor_id) as client:
+        missing = client.post("/api/v1/conversations", json={})
+        first = client.post(
+            "/api/v1/conversations",
+            json={"title": "可靠创建"},
+            headers=headers,
+        )
+        replay = client.post(
+            "/api/v1/conversations",
+            json={"title": "可靠创建"},
+            headers=headers,
+        )
+        conflict = client.post(
+            "/api/v1/conversations",
+            json={"title": "不同请求"},
+            headers=headers,
+        )
+
+    assert missing.status_code == 422
+    assert first.status_code == 201
+    assert replay.status_code == 201
+    assert first.json()["data"]["conversation_id"] == replay.json()["data"]["conversation_id"]
+    assert first.json()["data"]["idempotency_replayed"] is False
+    assert replay.json()["data"]["idempotency_replayed"] is True
+    assert conflict.status_code == 409
+    assert conflict.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
+    assert api_harness.counts()["conversation"] == 1
+
+
+def test_concurrent_conversation_create_with_same_key_returns_one_resource(
+    api_harness,
+) -> None:
+    actor_id = "actor_conversation_create_race"
+    api_harness.persist_actor(actor_id)
+    headers = {"Idempotency-Key": "same-conversation-create-operation"}
+
+    def create_once():
+        with api_harness.create_client(actor_id) as client:
+            return client.post(
+                "/api/v1/conversations",
+                headers=headers,
+                json={"title": "并发可靠创建"},
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        responses = list(executor.map(lambda _index: create_once(), range(2)))
+
+    assert [response.status_code for response in responses] == [201, 201]
+    assert len({response.json()["data"]["conversation_id"] for response in responses}) == 1
+    assert sorted(
+        response.json()["data"]["idempotency_replayed"]
+        for response in responses
+    ) == [False, True]
+    assert api_harness.counts()["conversation"] == 1
+
+
+def test_delete_conversation_is_resource_idempotent_and_hides_ownership(
+    api_harness,
+) -> None:
+    actor_id = "actor_local"
+    foreign_actor_id = "actor_foreign"
+    api_harness.persist_actor(actor_id)
+    api_harness.persist_actor(foreign_actor_id)
+    owned = api_harness.persist_conversation(actor_id)
+    foreign = api_harness.persist_conversation(foreign_actor_id)
+    api_harness.persist_message_task(
+        owned,
+        content_text="historical message",
+        created_at=BASE_TIME,
+    )
+
+    with api_harness.create_client(actor_id) as client:
+        first = client.delete(f"/api/v1/conversations/{owned.conversation_id}")
+        replay = client.delete(f"/api/v1/conversations/{owned.conversation_id}")
+        hidden = client.delete(f"/api/v1/conversations/{foreign.conversation_id}")
+
+    assert first.status_code == replay.status_code == hidden.status_code == 200
+    assert first.json()["data"] == {"conversation_id": owned.conversation_id}
+    assert replay.json()["data"] == {"conversation_id": owned.conversation_id}
+    assert hidden.json()["data"] == {"conversation_id": foreign.conversation_id}
+    assert api_harness.conversation_row(owned.conversation_id) is None
+    assert api_harness.conversation_row(foreign.conversation_id) is not None
+    assert api_harness.counts()["message"] == 0
+    assert api_harness.counts()["task"] == 0
+
+
+def test_delete_conversation_rejects_current_process_activity(
+    api_harness,
+) -> None:
+    actor_id = "actor_local"
+    api_harness.persist_actor(actor_id)
+    conversation = api_harness.persist_conversation(actor_id)
+    api_harness.persist_message_task(
+        conversation,
+        content_text="still active",
+        created_at=BASE_TIME + timedelta(hours=1),
+    )
+
+    with api_harness.create_client(actor_id) as client:
+        response = client.delete(
+            f"/api/v1/conversations/{conversation.conversation_id}"
+        )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "CONVERSATION_BUSY"
+    assert api_harness.conversation_row(conversation.conversation_id) is not None
 
 
 def test_list_conversations_is_owned_stable_paginated_and_has_safe_preview(
@@ -497,6 +627,12 @@ class _InternalCommitFailureUnitOfWork(SQLAlchemyUnitOfWork):
         raise PersistenceError("Persistence operation failed.")
 
 
+class _UncertainCommitUnitOfWork(SQLAlchemyUnitOfWork):
+    def commit(self) -> None:
+        super().commit()
+        raise DatabaseUnavailableError("Commit result unavailable.")
+
+
 class _SelectiveFailureFactory:
     def __init__(
         self,
@@ -521,6 +657,43 @@ class _SelectiveFailureFactory:
         return unit_of_work
 
 
+class _NoopConversationCleanupService:
+    def recover_stale(self, *_args: object, **_kwargs: object) -> dict[str, int]:
+        return {}
+
+    def drain(self, *, limit: int = 100, **_kwargs: object) -> object:
+        assert limit == 100
+        return object()
+
+
+class _RecordingConversationCleanupService(_NoopConversationCleanupService):
+    def __init__(self) -> None:
+        self.events: list[str] = []
+
+    def recover_stale(self, *_args: object, **_kwargs: object) -> dict[str, int]:
+        self.events.append("recover")
+        return {}
+
+    def drain(self, *, limit: int = 100, **_kwargs: object) -> object:
+        self.events.append(f"drain:{limit}")
+        return object()
+
+
+def test_lifespan_recovers_process_state_and_drains_before_requests(
+    api_harness,
+) -> None:
+    actor_id = "actor_startup_recovery"
+    api_harness.persist_actor(actor_id)
+    cleanup_service = _RecordingConversationCleanupService()
+
+    with api_harness.create_client(
+        actor_id,
+        conversation_cleanup_service=cleanup_service,
+    ) as client:
+        assert cleanup_service.events == ["recover", "drain:100"]
+        assert client.get("/api/v1/health/live").status_code == 200
+
+
 def test_title_persistence_failure_does_not_rollback_message_or_task(
     api_harness,
 ) -> None:
@@ -532,6 +705,7 @@ def test_title_persistence_failure_does_not_rollback_message_or_task(
     with api_harness.create_client(
         actor_id,
         unit_of_work_factory=failure_factory,
+        conversation_cleanup_service=_NoopConversationCleanupService(),
     ) as client:
         response = client.post(
             f"/api/v1/conversations/{conversation.conversation_id}/messages",
@@ -543,8 +717,41 @@ def test_title_persistence_failure_does_not_rollback_message_or_task(
     assert api_harness.counts()["message"] == 2
     assert api_harness.counts()["task"] == 1
     assert api_harness.conversation_row(conversation.conversation_id).title is None
-    assert failure_factory.call_count == 6
+    assert failure_factory.call_count == 8
     assert all(unit_of_work.session is None for unit_of_work in failure_factory.instances)
+
+
+def test_conversation_create_recovers_its_committed_result_after_uncertain_commit(
+    api_harness,
+) -> None:
+    actor_id = "actor_conversation_uncertain_commit"
+    api_harness.persist_actor(actor_id)
+    factory = _SelectiveFailureFactory(
+        api_harness.engine,
+        {1},
+        _UncertainCommitUnitOfWork,
+    )
+
+    with api_harness.create_client(
+        actor_id,
+        unit_of_work_factory=factory,
+        conversation_cleanup_service=_NoopConversationCleanupService(),
+    ) as client:
+        recovered = client.post(
+            "/api/v1/conversations",
+            headers={"Idempotency-Key": "uncertain-conversation-create"},
+            json={"title": "结果不确定但已提交"},
+        )
+        replay = client.post(
+            "/api/v1/conversations",
+            headers={"Idempotency-Key": "uncertain-conversation-create"},
+            json={"title": "结果不确定但已提交"},
+        )
+
+    assert recovered.status_code == replay.status_code == 201
+    assert recovered.json()["data"]["conversation_id"] == replay.json()["data"]["conversation_id"]
+    assert replay.json()["data"]["idempotency_replayed"] is True
+    assert api_harness.counts()["conversation"] == 1
 
 
 def test_stale_title_update_does_not_overwrite_concurrent_winner(
@@ -628,6 +835,7 @@ def test_real_database_commit_failure_rolls_back_all_and_closes_session(
     with api_harness.create_client(
         actor_id,
         unit_of_work_factory=failure_factory,
+        conversation_cleanup_service=_NoopConversationCleanupService(),
     ) as client:
         failed = client.post(
             f"/api/v1/conversations/{conversation.conversation_id}/messages",
@@ -669,6 +877,7 @@ def test_generic_persistence_failure_returns_safe_internal_error(
     with api_harness.create_client(
         actor_id,
         unit_of_work_factory=failure_factory,
+        conversation_cleanup_service=_NoopConversationCleanupService(),
     ) as client:
         response = client.post(
             f"/api/v1/conversations/{conversation.conversation_id}/messages",
@@ -721,7 +930,11 @@ def test_missing_business_database_configuration_is_safe_while_live_works() -> N
     )
     with TestClient(app, raise_server_exceptions=False) as client:
         live = client.get("/api/v1/health/live")
-        business = client.post("/api/v1/conversations", json={})
+        business = client.post(
+            "/api/v1/conversations",
+            headers={"Idempotency-Key": "missing-database-conversation"},
+            json={},
+        )
 
     assert live.status_code == 200
     assert live.json()["status"] == "LIVE"
@@ -762,9 +975,7 @@ def test_imports_and_create_app_have_no_external_or_database_side_effects(
         scoped.setattr(minio_module, "create_minio_storage", forbidden)
         from materialsagent.main import create_app
 
-        app = create_app(settings=api_harness.settings)
-        with TestClient(app, raise_server_exceptions=False):
-            pass
+        create_app(settings=api_harness.settings)
 
     assert api_harness.counts() == before
 
@@ -800,6 +1011,7 @@ def test_create_app_disposes_only_its_owned_business_engine(
             postgresql_probe=lambda: True,
             object_storage_probe=lambda: True,
         ),
+        conversation_cleanup_service=_NoopConversationCleanupService(),
     )
     assert fake_engine.disposed is False
 

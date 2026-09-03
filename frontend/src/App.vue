@@ -4,10 +4,15 @@ import { computed, onMounted, ref } from "vue";
 import ConversationSidebar from "./components/ConversationSidebar.vue";
 import ConversationView from "./components/ConversationView.vue";
 import GlobalErrorNotice from "./components/GlobalErrorNotice.vue";
+import DeleteConversationDialog from "./components/DeleteConversationDialog.vue";
+import { toUserVisibleError } from "./api/errors";
 import { useMaterialsAgent } from "./composables/useMaterialsAgent";
 
 const agent = useMaterialsAgent();
 const creatingConversation = ref(false);
+const deleteCandidateId = ref<string | null>(null);
+const deletePending = ref(false);
+const deleteError = ref<string | null>(null);
 
 const selectedConversation = computed(
   () =>
@@ -25,6 +30,12 @@ const writeBusy = computed(
     agent.mutationStatus.value === "UNCERTAIN",
 );
 
+const deleteCandidate = computed(() =>
+  agent.conversations.value.find(
+    (conversation) => conversation.conversation_id === deleteCandidateId.value,
+  ) ?? null,
+);
+
 onMounted(() => {
   void (async () => {
     try {
@@ -37,19 +48,50 @@ onMounted(() => {
 });
 
 async function createConversation(): Promise<void> {
-  if (
-    writeBusy.value ||
-    agent.conversationCreationUncertain.value
-  ) {
+  if (writeBusy.value) {
+    return;
+  }
+  if (typeof agent.showBlankWorkspace === "function") {
+    agent.showBlankWorkspace();
     return;
   }
   creatingConversation.value = true;
   try {
     await agent.createConversation();
-  } catch {
-    // The composable owns safe error and uncertainty projection.
   } finally {
     creatingConversation.value = false;
+  }
+}
+
+function openDeleteDialog(conversationId: string): void {
+  if (writeBusy.value) {
+    return;
+  }
+  deleteCandidateId.value = conversationId;
+  deleteError.value = null;
+}
+
+function closeDeleteDialog(): void {
+  if (!deletePending.value) {
+    deleteCandidateId.value = null;
+    deleteError.value = null;
+  }
+}
+
+async function confirmDeleteConversation(): Promise<void> {
+  const conversationId = deleteCandidateId.value;
+  if (conversationId === null || deletePending.value) {
+    return;
+  }
+  deletePending.value = true;
+  deleteError.value = null;
+  try {
+    await agent.deleteConversation(conversationId);
+    deleteCandidateId.value = null;
+  } catch (error) {
+    deleteError.value = toUserVisibleError(error).message;
+  } finally {
+    deletePending.value = false;
   }
 }
 
@@ -59,19 +101,22 @@ function ignoreRejected(operation: Promise<unknown>): void {
 </script>
 
 <template>
-  <div class="app-shell" :data-mutation-status="agent.mutationStatus.value">
+  <div
+    class="app-shell"
+    :data-mutation-status="agent.mutationStatus.value"
+    :inert="deleteCandidate !== null"
+  >
     <ConversationSidebar
       :conversations="agent.conversations.value"
       :selected-conversation-id="agent.selectedConversationId.value"
       :loading="agent.conversationListLoading.value"
       :has-more="agent.conversationNextCursor.value !== null"
       :creating="creatingConversation"
-      :create-disabled="
-        writeBusy || agent.conversationCreationUncertain.value
-      "
+      :create-disabled="writeBusy"
       @create="createConversation"
       @refresh="ignoreRejected(agent.refreshConversations())"
       @select="ignoreRejected(agent.selectConversation($event))"
+      @delete="openDeleteDialog"
       @load-more="ignoreRejected(agent.loadMoreConversations())"
     />
 
@@ -92,6 +137,7 @@ function ignoreRejected(operation: Promise<unknown>): void {
         :supplement-target="agent.supplementTarget.value"
         :mutation-status="agent.mutationStatus.value"
         :write-busy="writeBusy"
+        :initial-draft="agent.firstTurnDraft?.value ?? ''"
         @submit-new-task="ignoreRejected(agent.submitNewTask($event))"
         @submit-supplement="ignoreRejected(agent.submitSupplement($event))"
         @set-supplement-target="agent.setSupplementTarget($event)"
@@ -104,4 +150,13 @@ function ignoreRejected(operation: Promise<unknown>): void {
       />
     </section>
   </div>
+
+  <DeleteConversationDialog
+    v-if="deleteCandidate"
+    :title="deleteCandidate.title?.trim() || '新对话'"
+    :pending="deletePending"
+    :error="deleteError"
+    @cancel="closeDeleteDialog"
+    @confirm="confirmDeleteConversation"
+  />
 </template>

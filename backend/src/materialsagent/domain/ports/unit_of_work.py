@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Protocol, Self
 
 from materialsagent.domain.models.actor import Actor
 from materialsagent.domain.models.asset import Asset
 from materialsagent.domain.models.conversation import Conversation
+from materialsagent.domain.models.conversation_object_cleanup import (
+    ConversationObjectCleanup,
+)
 from materialsagent.domain.models.explanation import NaturalLanguageExplanation
 from materialsagent.domain.models.idempotency_record import IdempotencyRecord
 from materialsagent.domain.models.message import Message
@@ -45,11 +49,19 @@ class ConversationRepository(Protocol):
         actor_id: str,
     ) -> Conversation | None: ...
 
+    def get_owned_for_update(
+        self,
+        conversation_id: str,
+        actor_id: str,
+    ) -> Conversation | None: ...
+
     def list_owned(self, actor_id: str) -> list[Conversation]: ...
 
     def add(self, conversation: Conversation) -> None: ...
 
     def update(self, conversation: Conversation) -> Conversation | None: ...
+
+    def delete(self, conversation_id: str, actor_id: str) -> bool: ...
 
 
 class MessageRepository(Protocol):
@@ -64,6 +76,15 @@ class MessageRepository(Protocol):
     ) -> Message | None: ...
 
     def list_for_task(self, task_id: str) -> list[Message]: ...
+
+    def list_for_conversation_before(
+        self,
+        conversation_id: str,
+        actor_id: str,
+        *,
+        before_created_at: datetime,
+        before_message_id: str,
+    ) -> list[Message]: ...
 
     def add(self, message: Message) -> None: ...
 
@@ -243,6 +264,52 @@ class IdempotencyRecordRepository(Protocol):
     ) -> IdempotencyRecord | None: ...
 
 
+class ConversationObjectCleanupRepository(Protocol):
+    def get(self, cleanup_id: str) -> ConversationObjectCleanup | None: ...
+
+    def list_pending(
+        self,
+        *,
+        limit: int,
+        preferred_ids: tuple[str, ...] = (),
+    ) -> list[ConversationObjectCleanup]: ...
+
+    def add(self, cleanup: ConversationObjectCleanup) -> None: ...
+
+    def update(
+        self,
+        cleanup: ConversationObjectCleanup,
+        *,
+        expected_status: str,
+    ) -> ConversationObjectCleanup | None: ...
+
+
+class ConversationLifecycleRepository(Protocol):
+    def recover_stale(
+        self,
+        *,
+        actor_id: str,
+        process_cutoff: datetime,
+        recovered_at: datetime,
+        conversation_id: str | None = None,
+    ) -> dict[str, int]: ...
+
+    def current_activity_exists(
+        self,
+        *,
+        actor_id: str,
+        conversation_id: str,
+        process_cutoff: datetime,
+    ) -> bool: ...
+
+    def list_assets_for_delete(
+        self,
+        *,
+        actor_id: str,
+        conversation_id: str,
+    ) -> list[Asset]: ...
+
+
 class UnitOfWork(Protocol):
     actors: ActorRepository
     conversations: ConversationRepository
@@ -256,6 +323,8 @@ class UnitOfWork(Protocol):
     result_asset_links: ResultAssetLinkRepository
     explanations: ExplanationRepository
     idempotency_records: IdempotencyRecordRepository
+    conversation_object_cleanups: ConversationObjectCleanupRepository
+    conversation_lifecycle: ConversationLifecycleRepository
 
     def __enter__(self) -> Self: ...
 

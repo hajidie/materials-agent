@@ -241,6 +241,7 @@ class MessageSubmissionService:
                     explanation_id=None,
                     created_at=timestamp,
                     expires_at=None,
+                    conversation_id=conversation_id,
                 )
                 conversation.updated_at = timestamp
                 if operation == TASK_CREATE:

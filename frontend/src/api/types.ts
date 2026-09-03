@@ -33,6 +33,14 @@ export interface Conversation {
   updated_at: string;
 }
 
+export interface ConversationCreationData extends Conversation {
+  idempotency_replayed: boolean;
+}
+
+export interface ConversationDeleteData {
+  conversation_id: string;
+}
+
 export interface ConversationListItem extends Conversation {
   last_activity_preview: string | null;
 }

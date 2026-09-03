@@ -38,6 +38,10 @@ import {
   type SupplementMutationBody,
 } from "./useIdempotentRequest";
 import { usePolling } from "./usePolling";
+import {
+  useFirstTurnOperation,
+  type FirstTurnDescriptorV1,
+} from "./useFirstTurnOperation";
 
 export interface SupplementTarget {
   conversationId: string;
@@ -73,9 +77,12 @@ export interface MaterialsAgentState {
     Ref<Record<string, boolean>>
   >;
   supplementTarget: DeepReadonly<Ref<SupplementTarget | null>>;
-  pendingMutation: DeepReadonly<Ref<PendingMutationV1 | null>>;
+  pendingMutation: DeepReadonly<
+    Ref<PendingMutationV1 | FirstTurnDescriptorV1 | null>
+  >;
   mutationStatus: Readonly<Ref<MutationStatus>>;
   conversationCreationUncertain: Readonly<Ref<boolean>>;
+  firstTurnDraft: Readonly<Ref<string>>;
   globalError: DeepReadonly<Ref<UserVisibleError | null>>;
   globalErrors: DeepReadonly<Ref<UserVisibleError[]>>;
   lastRequestId: Readonly<Ref<string | null>>;
@@ -84,6 +91,8 @@ export interface MaterialsAgentState {
   refreshConversations(): Promise<void>;
   loadMoreConversations(): Promise<void>;
   createConversation(title?: string): Promise<Conversation>;
+  showBlankWorkspace(): void;
+  deleteConversation(conversationId: string): Promise<void>;
   selectConversation(conversationId: string): Promise<void>;
   refreshTimeline(): Promise<void>;
   loadTaskHistory(taskId: string): Promise<TaskDetail>;
@@ -152,6 +161,18 @@ export function useMaterialsAgent(
   const actionError = ref<UserVisibleError | null>(null);
   const readError = ref<UserVisibleError | null>(null);
   const conversationCreationUncertain = ref(false);
+  const firstTurn = useFirstTurnOperation({
+    api,
+    ...(options.storage === undefined
+      ? {}
+      : { storage: options.storage }),
+    ...(options.keyFactory === undefined
+      ? {}
+      : { keyFactory: options.keyFactory }),
+  });
+  const firstTurnDraft = computed(
+    () => firstTurn.pending.value?.originalDraft ?? "",
+  );
   const conversationCreationUncertaintyError =
     computed<UserVisibleError | null>(() =>
       conversationCreationUncertain.value
@@ -160,9 +181,19 @@ export function useMaterialsAgent(
           )
         : null,
     );
+  const firstTurnRecoveryError = computed<UserVisibleError | null>(
+    () =>
+      firstTurn.pending.value === null
+        ? null
+        : {
+            message:
+              "首条消息尚未完整确认。请使用原请求继续重试；此操作不能放弃。",
+          },
+  );
   const globalErrors = computed<UserVisibleError[]>(() => {
     const candidates = [
       conversationCreationUncertaintyError.value,
+      firstTurnRecoveryError.value,
       actionError.value,
       readError.value,
     ];
@@ -188,6 +219,7 @@ export function useMaterialsAgent(
   const globalError = computed(
     () =>
       actionError.value ??
+      firstTurnRecoveryError.value ??
       conversationCreationUncertaintyError.value ??
       readError.value,
   );
@@ -243,6 +275,21 @@ export function useMaterialsAgent(
       : { keyFactory: options.keyFactory }),
   };
   const mutation = useIdempotentRequest(mutationOptions);
+  const pendingMutation = computed<
+    PendingMutationV1 | FirstTurnDescriptorV1 | null
+  >(() => firstTurn.pending.value ?? mutation.pending.value);
+  const mutationStatus = computed<MutationStatus>(() => {
+    if (
+      mutation.status.value === "SENDING" ||
+      mutation.status.value === "UNCERTAIN" ||
+      mutation.status.value === "BUSINESS_FAILED"
+    ) {
+      return mutation.status.value;
+    }
+    return firstTurn.status.value === "IDLE"
+      ? mutation.status.value
+      : firstTurn.status.value;
+  });
 
   function setActionVisibleError(
     error: UserVisibleError,
@@ -429,8 +476,8 @@ export function useMaterialsAgent(
             item.task.status === "RUNNING"),
       );
       const mutationActive =
-        mutation.status.value === "SENDING" ||
-        mutation.status.value === "UNCERTAIN";
+        mutationStatus.value === "SENDING" ||
+        mutationStatus.value === "UNCERTAIN";
       return hasActiveTask || mutationActive ? 2_000 : 15_000;
     },
   });
@@ -524,6 +571,53 @@ export function useMaterialsAgent(
       );
     }
     return response.data;
+  }
+
+  function showBlankWorkspace(): void {
+    if (firstTurn.pending.value !== null) {
+      return;
+    }
+    timelineController?.abort();
+    timelineController = null;
+    timelineGeneration += 1;
+    selectedConversationId.value = null;
+    timeline.value = [];
+    supplementTarget.value = null;
+  }
+
+  async function deleteConversation(conversationId: string): Promise<void> {
+    if (firstTurn.pending.value !== null || mutationStatus.value === "SENDING") {
+      throw new Error("当前写操作尚未完成，请稍后再删除对话。");
+    }
+    if (api.deleteConversation === undefined) {
+      throw new Error("当前客户端不支持删除对话。");
+    }
+    clearActionError();
+    try {
+      const response = await api.deleteConversation(conversationId);
+      if (disposed) {
+        return;
+      }
+      lastRequestId.value = response.request_id;
+      conversations.value = conversations.value.filter(
+        (item) => item.conversation_id !== conversationId,
+      );
+      if (selectedConversationId.value === conversationId) {
+        timelineController?.abort();
+        timelineController = null;
+        timelineGeneration += 1;
+        selectedConversationId.value = null;
+        timeline.value = [];
+        taskDetailsById.value = {};
+        taskDetailsLoadingById.value = {};
+        supplementTarget.value = null;
+      }
+    } catch (error) {
+      if (!disposed) {
+        setActionError(error, "MUTATION");
+      }
+      throw error;
+    }
   }
 
   async function selectConversation(
@@ -746,6 +840,9 @@ export function useMaterialsAgent(
     resourceId: string,
     body: MutationRequestBody,
   ): Promise<void> {
+    if (firstTurn.pending.value !== null) {
+      throw new Error("首条消息尚未完整确认，请继续重试原请求。");
+    }
     clearActionError();
     let response: ApiSuccessEnvelope<unknown>;
     try {
@@ -776,6 +873,27 @@ export function useMaterialsAgent(
   }
 
   async function submitNewTask(contentText: string): Promise<void> {
+    if (selectedConversationId.value === null) {
+      clearActionError();
+      try {
+        const response = await firstTurn.start(validateContent(contentText));
+        if (disposed) {
+          return;
+        }
+        lastRequestId.value = response.request_id;
+        await loadConversations(true);
+        if (!disposed) {
+          await selectConversation(response.data.conversation_id);
+          lastRequestId.value = response.request_id;
+        }
+      } catch (error) {
+        if (!disposed) {
+          setActionError(error, "MUTATION");
+        }
+        throw error;
+      }
+      return;
+    }
     const conversationId = requireSelectedConversation();
     const body: NewTaskMutationBody = {
       submission_mode: "NEW_TASK",
@@ -831,6 +949,27 @@ export function useMaterialsAgent(
   }
 
   async function retryPendingMutation(): Promise<void> {
+    if (firstTurn.pending.value !== null) {
+      clearActionError();
+      try {
+        const response = await firstTurn.retry();
+        if (disposed) {
+          return;
+        }
+        lastRequestId.value = response.request_id;
+        await loadConversations(true);
+        if (!disposed) {
+          await selectConversation(response.data.conversation_id);
+          lastRequestId.value = response.request_id;
+        }
+      } catch (error) {
+        if (!disposed) {
+          setActionError(error, "MUTATION");
+        }
+        throw error;
+      }
+      return;
+    }
     const descriptor = mutation.pending.value;
     if (descriptor === null) {
       throw new Error("没有可重试的待确认写操作。");
@@ -859,6 +998,9 @@ export function useMaterialsAgent(
   }
 
   function discardPendingMutation(): { discarded: boolean } {
+    if (firstTurn.pending.value !== null) {
+      return { discarded: false };
+    }
     const result = mutation.discardPending();
     if (result.discarded) {
       clearActionError();
@@ -882,11 +1024,12 @@ export function useMaterialsAgent(
     taskDetailsById: readonly(taskDetailsById),
     taskDetailsLoadingById: readonly(taskDetailsLoadingById),
     supplementTarget: readonly(supplementTarget),
-    pendingMutation: mutation.pending,
-    mutationStatus: mutation.status,
+    pendingMutation,
+    mutationStatus,
     conversationCreationUncertain: readonly(
       conversationCreationUncertain,
     ),
+    firstTurnDraft,
     globalError,
     globalErrors,
     lastRequestId: readonly(lastRequestId),
@@ -895,6 +1038,8 @@ export function useMaterialsAgent(
     refreshConversations,
     loadMoreConversations,
     createConversation,
+    showBlankWorkspace,
+    deleteConversation,
     selectConversation,
     refreshTimeline,
     loadTaskHistory,

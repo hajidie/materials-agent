@@ -149,20 +149,24 @@ def _persist_submission(
 
 
 def _tool_payload(**overrides: object) -> dict[str, object]:
-    payload: dict[str, object] = {
-        "route": "TOOL_EXECUTION",
-        "tool_id": "zta35g_sem_virtual_lab",
+    candidate_input_delta: dict[str, object] = {
         "material": "ZTA35G",
-        "candidate_parameters": {
-            "solution_temperature": {"value": 1000, "unit": "°C"},
-            "solution_time": {"value": 180, "unit": "min"},
-            "aging_temperature": {"value": 730, "unit": "°C"},
-            "aging_time": {"value": 3, "unit": "h"},
-        },
+        "solution_temperature": {"value": 1000, "unit": "°C"},
+        "solution_time": {"value": 180, "unit": "min"},
+        "aging_temperature": {"value": 730, "unit": "°C"},
+        "aging_time": {"value": 3, "unit": "h"},
         "requested_outputs": ["sem_image"],
     }
-    payload.update(overrides)
-    return payload
+    candidate_input_delta.update(overrides)
+    return {
+        "route": "TOOL_CANDIDATES",
+        "candidates": [
+            {
+                "tool_id": "zta35g_sem_virtual_lab",
+                "candidate_input_delta": candidate_input_delta,
+            }
+        ],
+    }
 
 
 def _service(
@@ -297,19 +301,20 @@ def test_needs_input_and_tool_outcomes_persist_formal_revision_and_no_tool_table
 ) -> None:
     actor, submission = _persist_submission(migrated_database_engine)
     factory = _Factory(migrated_database_engine)
-    parameters = dict(_tool_payload()["candidate_parameters"])
+    parameters = dict(
+        _tool_payload()["candidates"][0]["candidate_input_delta"]
+    )
     parameters["aging_temperature"] = None
     projection = _service(
         factory,
         lambda _: {
-            "route": "NEEDS_INPUT",
-            "tool_id": "zta35g_sem_virtual_lab",
-            "material": "ZTA35G",
-            "candidate_parameters": parameters,
-            "missing_fields": ["solution_time"],
-            "ambiguous_fields": [],
-            "follow_up_suggestion": "不可信提示",
-            "requested_outputs": ["sem_image"],
+            "route": "TOOL_CANDIDATES",
+            "candidates": [
+                {
+                    "tool_id": "zta35g_sem_virtual_lab",
+                    "candidate_input_delta": parameters,
+                }
+            ],
         },
     ).orchestrate_submission(actor, submission)
 
@@ -330,34 +335,45 @@ def test_needs_input_and_tool_outcomes_persist_formal_revision_and_no_tool_table
 
 
 @pytest.mark.parametrize(
-    ("payload", "expected_http", "expected_task_error"),
+    ("payload", "expected_http", "expected_status", "expected_task_error"),
     [
-        (_tool_payload(material="OTHER"), 422, "VALIDATION_FAILED"),
-        (_tool_payload(), 503, "TOOL_UNAVAILABLE"),
+        (
+            _tool_payload(material="OTHER"),
+            422,
+            "FAILED",
+            "VALIDATION_FAILED",
+        ),
+        (_tool_payload(), None, "READY", None),
     ],
 )
-def test_hard_invalid_and_complete_valid_tool_candidates_are_committed_before_error(
+def test_hard_invalid_and_complete_valid_tool_candidates_are_committed(
     migrated_database_engine: Engine,
     payload: dict[str, object],
-    expected_http: int,
-    expected_task_error: str,
+    expected_http: int | None,
+    expected_status: str,
+    expected_task_error: str | None,
 ) -> None:
     actor, submission = _persist_submission(migrated_database_engine)
     factory = _Factory(migrated_database_engine)
 
-    with pytest.raises(Exception) as captured:
+    if expected_http is None:
         _service(factory, lambda _: payload).orchestrate_submission(
             actor,
             submission,
         )
-
-    assert captured.value.status_code == expected_http
+    else:
+        with pytest.raises(Exception) as captured:
+            _service(factory, lambda _: payload).orchestrate_submission(
+                actor,
+                submission,
+            )
+        assert captured.value.status_code == expected_http
     with migrated_database_engine.connect() as connection:
         call = connection.execute(select(LLMCallRow)).one()
         task = connection.execute(select(TaskRow)).one()
         revision = connection.execute(select(TaskInputRevisionRow)).one()
         assert call.status == "SUCCEEDED"
-        assert task.current_status == "FAILED"
+        assert task.current_status == expected_status
         assert task.error_code == expected_task_error
         assert revision.revision == 1
         assert revision.normalized_input["solution_time"] == {
@@ -509,7 +525,7 @@ def test_finalize_commit_failure_rolls_back_terminal_entities(
     migrated_database_engine: Engine,
 ) -> None:
     actor, submission = _persist_submission(migrated_database_engine)
-    factory = _Factory(migrated_database_engine, fail_calls={3})
+    factory = _Factory(migrated_database_engine, fail_calls={4})
 
     with pytest.raises(Exception) as captured:
         _service(
@@ -565,8 +581,7 @@ def test_postgresql_repeat_rejects_two_revisions_for_same_call(
     actor, submission = _persist_submission(migrated_database_engine)
     factory = _Factory(migrated_database_engine)
     service = _service(factory, lambda _: _tool_payload())
-    with pytest.raises(Exception):
-        service.orchestrate_submission(actor, submission)
+    service.orchestrate_submission(actor, submission)
     with migrated_database_engine.begin() as connection:
         connection.execute(
             text(
@@ -619,7 +634,8 @@ def test_postgresql_repeat_rejects_two_revisions_for_same_call(
         ) == 2
         task = connection.execute(select(TaskRow)).one()
         call = connection.execute(select(LLMCallRow)).one()
-        assert task.error_code == "TOOL_UNAVAILABLE"
+        assert task.current_status == "READY"
+        assert task.error_code is None
         assert call.status == "SUCCEEDED"
 
 
@@ -629,8 +645,7 @@ def test_postgresql_repeat_rejects_cross_task_revision_for_same_call(
     actor, submission = _persist_submission(migrated_database_engine)
     factory = _Factory(migrated_database_engine)
     service = _service(factory, lambda _: _tool_payload())
-    with pytest.raises(Exception):
-        service.orchestrate_submission(actor, submission)
+    service.orchestrate_submission(actor, submission)
     with factory() as unit_of_work:
         unit_of_work.tasks.add(
             Task.pending(
@@ -674,4 +689,5 @@ def test_postgresql_repeat_rejects_cross_task_revision_for_same_call(
         current_task = connection.execute(
             select(TaskRow).where(TaskRow.task_id == submission.task.task_id)
         ).one()
-        assert current_task.error_code == "TOOL_UNAVAILABLE"
+        assert current_task.current_status == "READY"
+        assert current_task.error_code is None

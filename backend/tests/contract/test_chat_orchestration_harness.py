@@ -43,6 +43,10 @@ def _config() -> ConfiguredRole:
         thinking_budget=None,
         response_format="json_object",
         streaming=False,
+        context_window_tokens=1_000_000,
+        prompt_limit_tokens=16_384,
+        history_token_budget=8_192,
+        safety_margin_tokens=1_024,
     )
 
 
@@ -103,7 +107,8 @@ def test_provider_visible_messages_define_output_and_missing_material_semantics(
         "KNOWLEDGE_ANSWER",
         "TOOL_CANDIDATES",
         "one to five unique candidates",
-        "Preserve missing values as null",
+        "Root fields may be omitted",
+        "complete value and unit pair",
         "Never return task status",
         "zta35g_sem_virtual_lab",
         "solution_temperature",
@@ -212,7 +217,7 @@ def test_offline_adapter_contract_maps_fixture_payload_once(
         "candidates": [
             {
                 "tool_id": "zta35g_sem_virtual_lab",
-                "candidate_input": {
+                "candidate_input_delta": {
                     "material": material,
                     **parameters,
                     "requested_outputs": list(requested_outputs),
@@ -258,7 +263,7 @@ def test_legacy_nested_candidate_parameters_cannot_pass_real_tool_normalizer() -
         "candidates": [
             {
                 "tool_id": "zta35g_sem_virtual_lab",
-                "candidate_input": {
+                "candidate_input_delta": {
                     "material": "ZTA35G",
                     "candidate_parameters": _COMPLETE_PARAMETERS,
                     "requested_outputs": ["sem_image"],

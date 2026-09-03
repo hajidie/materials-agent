@@ -161,6 +161,44 @@ Invoke-Test 'ephemeral Runtime tokens are strong nonblank per-run values' {
     Assert-True ($first -cne $second) 'Two Runtime starts reused one token.'
 }
 
+Invoke-Test 'null process environment overrides are absent from child processes' {
+    $name = 'MATERIALSAGENT_LOCAL_DEV_ENV_CANARY'
+    $originalExists = Test-Path -LiteralPath "Env:$name"
+    $originalValue = if ($originalExists) {
+        (Get-Item -LiteralPath "Env:$name").Value
+    }
+    else {
+        $null
+    }
+    try {
+        Set-Item -LiteralPath "Env:$name" -Value 'caller-canary'
+        $shell = (Get-Process -Id $PID).Path
+        $exitCode = Invoke-WithProcessEnvironment `
+            -Values @{$name = $null} `
+            -Operation {
+                & $shell `
+                    -NoLogo `
+                    -NoProfile `
+                    -NonInteractive `
+                    -Command "if (Test-Path -LiteralPath 'Env:$name') { exit 9 }"
+                return [int]$LASTEXITCODE
+            }
+        Assert-Equal $exitCode 0 'Child process inherited a null environment override'
+        Assert-Equal `
+            (Get-Item -LiteralPath "Env:$name").Value `
+            'caller-canary' `
+            'Caller environment was not restored'
+    }
+    finally {
+        if ($originalExists) {
+            Set-Item -LiteralPath "Env:$name" -Value ([string]$originalValue)
+        }
+        else {
+            Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 Invoke-Test 'Provider root dotenv preflight accepts a valid silent probe' {
     Assert-ProviderRootConfiguration `
         -BackendPython 'C:\tools\backend-python.exe' `

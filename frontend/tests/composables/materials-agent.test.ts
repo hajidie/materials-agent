@@ -358,6 +358,54 @@ describe("useMaterialsAgent", () => {
     expect(api.createConversation).not.toHaveBeenCalled();
   });
 
+  it("creates and confirms the first Conversation from the blank composer", async () => {
+    const { agent, api } = createSubject();
+
+    await agent.submitNewTask("  first material question  ");
+
+    expect(api.createConversation).toHaveBeenCalledWith(
+      undefined,
+      "frontend-conversation-create-fixed-uuid",
+    );
+    expect(api.submitMessage).toHaveBeenCalledWith(
+      "conversation-created",
+      {
+        submission_mode: "NEW_TASK",
+        content_text: "first material question",
+        target_task_id: null,
+      },
+      "frontend-task-create-fixed-uuid",
+    );
+    expect(agent.pendingMutation.value).toBeNull();
+    expect(agent.selectedConversationId.value).toBe("conversation-created");
+  });
+
+  it("removes a deleted selected Conversation and clears its cached state", async () => {
+    const { agent, api } = createSubject();
+    api.deleteConversation = vi.fn(() =>
+      Promise.resolve(
+        envelope({ conversation_id: "conversation-1" }),
+      ),
+    );
+    vi.mocked(api.listConversations).mockResolvedValueOnce(
+      envelope(conversationPage([conversation("conversation-1")])),
+    );
+    await agent.loadConversations(true);
+    await agent.selectConversation("conversation-1");
+    agent.setSupplementTarget({
+      conversationId: "conversation-1",
+      taskId: "task-1",
+      summary: "missing",
+    });
+
+    await agent.deleteConversation("conversation-1");
+
+    expect(agent.conversations.value).toEqual([]);
+    expect(agent.selectedConversationId.value).toBeNull();
+    expect(agent.timeline.value).toEqual([]);
+    expect(agent.supplementTarget.value).toBeNull();
+  });
+
   it("keeps the server conversation order", async () => {
     const { agent, api } = createSubject();
     vi.mocked(api.listConversations).mockResolvedValueOnce(
@@ -657,7 +705,7 @@ describe("useMaterialsAgent", () => {
       expect.arrayContaining([
         {
           message:
-            "无法确认 Conversation 是否已创建，请先刷新 Conversation 列表，避免重复创建。",
+            "无法确认 Conversation 是否已创建；请使用原幂等键重试，避免重复创建。",
         },
         expect.objectContaining({
           message: "Tool 当前不可重试",
@@ -686,7 +734,7 @@ describe("useMaterialsAgent", () => {
     expect(agent.globalErrors.value).toEqual([
       {
         message:
-          "无法确认 Conversation 是否已创建，请先刷新 Conversation 列表，避免重复创建。",
+          "无法确认 Conversation 是否已创建；请使用原幂等键重试，避免重复创建。",
       },
       { message: "读取失败，请检查网络后重试。" },
     ]);
@@ -1108,7 +1156,12 @@ describe("useMaterialsAgent", () => {
     ).rejects.toBeInstanceOf(NetworkUncertaintyError);
 
     expect(agent.mutationStatus.value).toBe("UNCERTAIN");
-    expect(agent.pendingMutation.value?.idempotencyKey).toBe(
+    const pending = agent.pendingMutation.value;
+    expect(pending?.operation).toBe("TASK_CREATE");
+    if (pending?.operation !== "TASK_CREATE") {
+      throw new Error("Expected a pending TASK_CREATE mutation.");
+    }
+    expect(pending.idempotencyKey).toBe(
       "frontend-task-create-fixed-uuid",
     );
     expect(storage.getItem(PENDING_MUTATION_STORAGE_KEY)).not.toBeNull();

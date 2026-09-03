@@ -332,6 +332,8 @@ def _service(
         lambda: _Uow(store),
         storage,
         environment="test",
+        bucket="test-bucket",
+        storage_namespace="minio+http://storage:9000",
         clock=lambda: BASE + timedelta(seconds=1 + next(ticks)),
         asset_id_factory=lambda: "asset_1",
         operation_id_factory=lambda: "operation_1",
@@ -358,6 +360,9 @@ def test_tx1_precedes_external_work_and_success_becomes_available() -> None:
     assert len(assets) == 1
     asset = assets[0]
     assert asset.current_status == "AVAILABLE"
+    assert asset.storage_identity_version == "METADATA_V1"
+    assert asset.storage_bucket == "test-bucket"
+    assert asset.storage_namespace == "minio+http://storage:9000"
     assert asset.object_key == "assets/test/asset_1.png"
     assert (asset.media_type, asset.width, asset.height, asset.bit_depth) == (
         "image/png",

@@ -16,6 +16,9 @@ PENDING: Final = "PENDING"
 AVAILABLE: Final = "AVAILABLE"
 FAILED: Final = "FAILED"
 ORPHANED: Final = "ORPHANED"
+LEGACY_DB_KEY: Final = "LEGACY_DB_KEY"
+METADATA_V1: Final = "METADATA_V1"
+STORAGE_IDENTITY_VERSIONS: Final = frozenset({LEGACY_DB_KEY, METADATA_V1})
 ASSET_STATUSES: Final = frozenset({PENDING, AVAILABLE, FAILED, ORPHANED})
 ASSET_ROLES: Final = frozenset(
     {"requested_output", "intermediate", "supporting"}
@@ -85,6 +88,9 @@ class Asset:
     safe_error_message: str | None
     orphan_reason: str | None
     orphan_details: dict[str, object] | None
+    storage_identity_version: str = LEGACY_DB_KEY
+    storage_bucket: str | None = None
+    storage_namespace: str | None = None
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -100,6 +106,16 @@ class Asset:
             _require_text(getattr(self, field_name), field_name)
         if self.current_status not in ASSET_STATUSES:
             raise ValueError("current_status is not an allowed Asset status.")
+        if self.storage_identity_version not in STORAGE_IDENTITY_VERSIONS:
+            raise ValueError("storage_identity_version is not supported.")
+        for field_name in ("storage_bucket", "storage_namespace"):
+            value = getattr(self, field_name)
+            if value is not None:
+                _require_text(value, field_name)
+        if self.storage_identity_version == METADATA_V1 and (
+            self.storage_bucket is None or self.storage_namespace is None
+        ):
+            raise ValueError("METADATA_V1 requires persisted storage identity.")
         if self.asset_type != "sem_image" or self.source_type != "GENERATED":
             raise ValueError("Only generated SEM image assets are supported.")
         _require_text(self.producer_tool_run_id, "producer_tool_run_id")
@@ -249,7 +265,14 @@ class Asset:
         object_key: str,
         pending_since: datetime,
         created_at: datetime,
+        storage_bucket: str | None = None,
+        storage_namespace: str | None = None,
     ) -> "Asset":
+        identity_version = (
+            METADATA_V1
+            if storage_bucket is not None and storage_namespace is not None
+            else LEGACY_DB_KEY
+        )
         return cls(
             asset_id=asset_id,
             task_id=task_id,
@@ -277,6 +300,9 @@ class Asset:
             safe_error_message=None,
             orphan_reason=None,
             orphan_details=None,
+            storage_identity_version=identity_version,
+            storage_bucket=storage_bucket,
+            storage_namespace=storage_namespace,
         )
 
     def mark_available(

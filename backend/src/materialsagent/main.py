@@ -1,6 +1,6 @@
 from collections.abc import Callable, Mapping
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from time import perf_counter
 from threading import Lock
 from uuid import uuid4
@@ -22,6 +22,7 @@ from materialsagent.api.routes.tool_results import (
     router as tool_results_router,
 )
 from materialsagent.application.context import ActorContext
+from materialsagent.application.conversation_cleanup import ConversationCleanupService
 from materialsagent.application.asset_service import AssetService
 from materialsagent.application.bootstrap import ensure_object_storage_bucket
 from materialsagent.application.chat_orchestration import (
@@ -320,6 +321,7 @@ def create_app(
     tool_workflow_service: ToolWorkflowService | None = None,
     tool_retry_service: ToolRetryService | None = None,
     explanation_retry_service: ExplanationRetryService | None = None,
+    conversation_cleanup_service: ConversationCleanupService | None = None,
     m7_tool_chain_enabled: bool | None = None,
 ) -> FastAPI:
     resolved_settings = settings or load_settings()
@@ -362,6 +364,7 @@ def create_app(
             resolved_actor_context = None
 
     resolved_conversation_service = conversation_service
+    resolved_conversation_cleanup_service = conversation_cleanup_service
     resolved_message_submission_service = message_submission_service
     resolved_chat_orchestration_service = chat_orchestration_service
     resolved_task_query_service = task_query_service
@@ -389,6 +392,7 @@ def create_app(
     resolved_tool_workflow_service = tool_workflow_service
     resolved_tool_retry_service = tool_retry_service
     resolved_explanation_retry_service = explanation_retry_service
+    process_cutoff = clock() if clock is not None else datetime.now(timezone.utc)
     resolved_chat_orchestration_port = chat_orchestration_port
     resolved_tool_input_extraction_port = tool_input_extraction_port
     resolved_explanation_port = explanation_port
@@ -476,6 +480,28 @@ def create_app(
                 clock=clock,
                 id_factory=id_factory,
             )
+        if (
+            resolved_conversation_cleanup_service is None
+            and resolved_storage_service is not None
+        ):
+            try:
+                cleanup_storage_config = parse_minio_config(resolved_settings)
+            except ConfigurationError:
+                cleanup_storage_config = None
+            if cleanup_storage_config is not None:
+                resolved_conversation_cleanup_service = ConversationCleanupService(
+                    resolved_unit_of_work_factory,
+                    resolved_storage_service,
+                    environment=resolved_settings.app_env,
+                    bucket=cleanup_storage_config.bucket,
+                    storage_namespace=(
+                        f"minio+{'https' if cleanup_storage_config.secure else 'http'}://"
+                        f"{cleanup_storage_config.endpoint}"
+                    ),
+                    process_cutoff=process_cutoff,
+                    clock=clock,
+                    id_factory=id_factory,
+                )
         if resolved_message_submission_service is None:
             resolved_message_submission_service = MessageSubmissionService(
                 resolved_unit_of_work_factory,
@@ -514,10 +540,16 @@ def create_app(
             resolved_asset_service is None
             and resolved_storage_service is not None
         ):
+            asset_storage_config = parse_minio_config(resolved_settings)
             resolved_asset_service = AssetService(
                 resolved_unit_of_work_factory,
                 resolved_storage_service,
                 environment=resolved_settings.app_env,
+                bucket=asset_storage_config.bucket,
+                storage_namespace=(
+                    f"minio+{'https' if asset_storage_config.secure else 'http'}://"
+                    f"{asset_storage_config.endpoint}"
+                ),
                 clock=clock,
             )
         if (
@@ -604,6 +636,19 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         try:
+            if (
+                resolved_conversation_cleanup_service is not None
+                and resolved_actor_context is not None
+            ):
+                try:
+                    resolved_conversation_cleanup_service.recover_stale(
+                        resolved_actor_context
+                    )
+                except ApplicationError:
+                    request_logger.warning(
+                        "process_recovery status=database_unavailable"
+                    )
+                resolved_conversation_cleanup_service.drain(limit=100)
             yield
         finally:
             if owned_engine is not None:
@@ -619,6 +664,7 @@ def create_app(
     app.state.readiness_service = resolved_readiness_service
     app.state.actor_context = resolved_actor_context
     app.state.conversation_service = resolved_conversation_service
+    app.state.conversation_cleanup_service = resolved_conversation_cleanup_service
     app.state.message_submission_service = resolved_message_submission_service
     app.state.chat_orchestration_service = resolved_chat_orchestration_service
     app.state.task_query_service = resolved_task_query_service

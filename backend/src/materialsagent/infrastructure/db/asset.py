@@ -36,6 +36,10 @@ class AssetRow(Base):
         CheckConstraint("asset_type = 'sem_image'", name="ck_asset_type_sem_image"),
         CheckConstraint("source_type = 'GENERATED' AND producer_tool_run_id IS NOT NULL", name="ck_asset_generated_source"),
         CheckConstraint("role IN ('requested_output', 'intermediate', 'supporting')", name="ck_asset_role_allowed"),
+        CheckConstraint("storage_identity_version IN ('LEGACY_DB_KEY', 'METADATA_V1')", name="ck_asset_storage_identity_version_allowed"),
+        CheckConstraint("storage_bucket IS NULL OR length(btrim(storage_bucket)) > 0", name="ck_asset_storage_bucket_not_blank"),
+        CheckConstraint("storage_namespace IS NULL OR length(btrim(storage_namespace)) > 0", name="ck_asset_storage_namespace_not_blank"),
+        CheckConstraint("storage_identity_version = 'LEGACY_DB_KEY' OR (storage_bucket IS NOT NULL AND storage_namespace IS NOT NULL)", name="ck_asset_metadata_v1_storage_identity"),
         CheckConstraint("length(btrim(object_key)) > 0", name="ck_asset_object_key_not_blank"),
         CheckConstraint("media_type IS NULL OR length(btrim(media_type)) > 0", name="ck_asset_media_type_not_blank"),
         CheckConstraint("width IS NULL OR width > 0", name="ck_asset_width_positive"),
@@ -66,14 +70,17 @@ class AssetRow(Base):
     )
 
     asset_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    task_id: Mapped[str] = mapped_column(ForeignKey("task.task_id", name="fk_asset_task", ondelete="RESTRICT"), nullable=False)
-    producer_tool_run_id: Mapped[str] = mapped_column(ForeignKey("tool_run.tool_run_id", name="fk_asset_tool_run", ondelete="RESTRICT"), nullable=False)
+    task_id: Mapped[str] = mapped_column(ForeignKey("task.task_id", name="fk_asset_task", ondelete="CASCADE"), nullable=False)
+    producer_tool_run_id: Mapped[str] = mapped_column(ForeignKey("tool_run.tool_run_id", name="fk_asset_tool_run", ondelete="CASCADE"), nullable=False)
     actor_id: Mapped[str] = mapped_column(ForeignKey("actor.actor_id", name="fk_asset_actor", ondelete="RESTRICT"), nullable=False)
     operation_id: Mapped[str] = mapped_column(Text, nullable=False)
     current_status: Mapped[str] = mapped_column(String(32), nullable=False)
     asset_type: Mapped[str] = mapped_column(String(64), nullable=False)
     source_type: Mapped[str] = mapped_column(String(32), nullable=False)
     role: Mapped[str] = mapped_column(String(64), nullable=False)
+    storage_identity_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    storage_bucket: Mapped[str | None] = mapped_column(Text, nullable=True)
+    storage_namespace: Mapped[str | None] = mapped_column(Text, nullable=True)
     object_key: Mapped[str] = mapped_column(Text, nullable=False)
     media_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
     width: Mapped[int | None] = mapped_column(Integer, nullable=True)

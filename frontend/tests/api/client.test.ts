@@ -86,6 +86,40 @@ describe("createMaterialsAgentApi", () => {
     );
   });
 
+  it("reuses the caller-supplied Conversation idempotency key", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      success("request-create", {
+        conversation_id: "conversation-1",
+        title: null,
+        created_at: "2026-07-24T10:00:00Z",
+        updated_at: "2026-07-24T10:00:00Z",
+      }),
+    );
+    const api = createMaterialsAgentApi({ fetchImpl });
+
+    await api.createConversation(undefined, "stable-conversation-key");
+
+    const init = fetchImpl.mock.calls[0]?.[1];
+    expect(new Headers(init?.headers).get("Idempotency-Key")).toBe(
+      "stable-conversation-key",
+    );
+  });
+
+  it("deletes the exact encoded Conversation resource without a request body", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      success("request-delete", { conversation_id: "conversation/one" }),
+    );
+    const api = createMaterialsAgentApi({ fetchImpl });
+
+    await api.deleteConversation?.("conversation/one");
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "/api/v1/conversations/conversation%2Fone",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+    expect(fetchImpl.mock.calls[0]?.[1]?.body).toBeUndefined();
+  });
+
   it("preserves the Conversation list cursor and server item order", async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
       success("request-list", {
@@ -233,7 +267,7 @@ describe("createMaterialsAgentApi", () => {
     await expect(api.createConversation()).rejects.toMatchObject({
       kind: "CONVERSATION_CREATION_UNCERTAINTY",
       message:
-        "无法确认 Conversation 是否已创建，请先刷新 Conversation 列表，避免重复创建。",
+        "无法确认 Conversation 是否已创建；请使用原幂等键重试，避免重复创建。",
     });
   });
 
@@ -329,7 +363,7 @@ describe("createMaterialsAgentApi", () => {
       await expect(promise).rejects.toMatchObject({
         kind: "CONVERSATION_CREATION_UNCERTAINTY",
         message:
-          "无法确认 Conversation 是否已创建，请先刷新 Conversation 列表，避免重复创建。",
+          "无法确认 Conversation 是否已创建；请使用原幂等键重试，避免重复创建。",
       });
       await expect(promise).rejects.not.toMatchObject({
         message: expect.stringContaining("private create response"),

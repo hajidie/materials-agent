@@ -111,7 +111,7 @@ class NaturalLanguageExplanationRow(Base):
         ForeignKey(
             "task.task_id",
             name="fk_explanation_task",
-            ondelete="RESTRICT",
+            ondelete="CASCADE",
         ),
         nullable=False,
     )
@@ -119,7 +119,7 @@ class NaturalLanguageExplanationRow(Base):
         ForeignKey(
             "tool_result.result_id",
             name="fk_explanation_result",
-            ondelete="RESTRICT",
+            ondelete="CASCADE",
         ),
         nullable=False,
     )
@@ -127,7 +127,7 @@ class NaturalLanguageExplanationRow(Base):
         ForeignKey(
             "llm_call.llm_call_id",
             name="fk_explanation_llm_call",
-            ondelete="RESTRICT",
+            ondelete="CASCADE",
         ),
         nullable=False,
     )

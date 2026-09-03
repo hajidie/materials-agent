@@ -5,7 +5,7 @@ from dataclasses import replace
 from threading import Lock
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from backend.tests.api.conftest import BASE_TIME
 from backend.tests.api.test_assets import _MemoryStorage
@@ -270,6 +270,7 @@ def _lifecycle_registry(runtime, *, version: str, policy: ExecutionPolicy):
 def _create_failed_task(client) -> dict[str, object]:
     conversation = client.post(
         "/api/v1/conversations",
+        headers={"Idempotency-Key": "tool-retry-conversation"},
         json={},
     ).json()["data"]["conversation_id"]
     response = client.post(
@@ -1014,6 +1015,7 @@ def test_tool_retry_rejects_knowledge_needs_input_and_hard_validation_failure(
         for content_text, suffix in cases:
             conversation_id = client.post(
                 "/api/v1/conversations",
+                headers={"Idempotency-Key": f"tool-retry-case-{suffix}"},
                 json={},
             ).json()["data"]["conversation_id"]
             submitted = client.post(
@@ -1252,6 +1254,7 @@ def test_valid_tool_unavailable_task_without_prior_run_can_retry(
     with api_harness.create_client(actor_id) as initial_client:
         conversation_id = initial_client.post(
             "/api/v1/conversations",
+            headers={"Idempotency-Key": "tool-retry-persisted-conversation"},
             json={},
         ).json()["data"]["conversation_id"]
         initial = initial_client.post(
@@ -1262,9 +1265,20 @@ def test_valid_tool_unavailable_task_without_prior_run_can_retry(
                 "content_text": "完整合法 Tool 请求",
             },
         )
-    assert initial.status_code == 503
-    assert initial.json()["error"]["code"] == "TOOL_UNAVAILABLE"
-    task_id = initial.json()["resource"]["task_id"]
+    assert initial.status_code == 200
+    task_id = initial.json()["data"]["task"]["task_id"]
+    with api_harness.engine.begin() as connection:
+        connection.execute(
+            update(TaskRow)
+            .where(TaskRow.task_id == task_id)
+            .values(
+                current_status="FAILED",
+                completed_at=BASE_TIME.replace(hour=2),
+                updated_at=BASE_TIME.replace(hour=2),
+                error_code="TOOL_UNAVAILABLE",
+                safe_error_message="当前阶段尚未开放材料工具执行。",
+            )
+        )
 
     runtime = _Runtime()
     with api_harness.create_client(

@@ -16,6 +16,12 @@ from materialsagent.domain.models.llm_call import LLMCall
 from materialsagent.domain.models.message import Message
 from materialsagent.domain.models.task import Task
 from materialsagent.domain.models.task_input_revision import TaskInputRevision
+from materialsagent.domain.models.context_snapshot import build_context_snapshot
+from materialsagent.domain.ports.conversation_context import (
+    ContextBudget,
+    ContextBuildResult,
+    PromptContextWindow,
+)
 from materialsagent.domain.ports.unit_of_work import PersistenceConflictError
 from materialsagent.infrastructure.db.session import create_session_factory
 
@@ -110,6 +116,36 @@ def _call(
     )
 
 
+def _context_snapshot() -> dict[str, object]:
+    budget = ContextBudget(
+        prompt_limit_tokens=16_384,
+        history_token_budget=8_192,
+        safety_margin_tokens=1_024,
+        context_window_tokens=1_000_000,
+        max_output_tokens=256,
+    )
+    result = ContextBuildResult(
+        window=PromptContextWindow(),
+        reference_resolutions={},
+        selected_sources=(),
+        candidate_turn_count=0,
+        selected_turn_count=0,
+        omitted_turn_count=0,
+        base_prompt_tokens=20,
+        history_tokens=0,
+        final_prompt_tokens=20,
+        budget=budget,
+        context_digest="b" * 64,
+        budget_exceeded=False,
+    )
+    return build_context_snapshot(
+        result,
+        purpose="CHAT_ORCHESTRATION",
+        model_name="mock-chat-orchestration-v1",
+        prompt_digest="a" * 64,
+    )
+
+
 def test_repository_round_trip_and_task_request_queries_preserve_jsonb(
     migrated_database_engine: Engine,
 ) -> None:
@@ -124,6 +160,7 @@ def test_repository_round_trip_and_task_request_queries_preserve_jsonb(
     second = replace(
         second,
         created_at=BASE_TIME + timedelta(milliseconds=500),
+        context_snapshot=_context_snapshot(),
     )
     factory = _factory(migrated_database_engine)
 
@@ -154,6 +191,11 @@ def test_repository_round_trip_and_task_request_queries_preserve_jsonb(
         "tool_id": "zta35g_sem_virtual_lab",
     }
     assert loaded.usage == {"input_tokens": 10, "output_tokens": 5}
+    assert loaded.context_snapshot is None
+    with factory() as unit_of_work:
+        loaded_second = unit_of_work.llm_calls.get(second.llm_call_id)
+    assert loaded_second is not None
+    assert loaded_second.context_snapshot == second.context_snapshot
 
 
 def test_repository_round_trip_preserves_bounded_routing_audit_references(

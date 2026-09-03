@@ -3,13 +3,14 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Header, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, Query, Request, status
 from pydantic import BaseModel, ConfigDict
 
 from materialsagent.api.dependencies import (
     get_actor_context,
     get_chat_orchestration_service,
     get_conversation_service,
+    get_conversation_cleanup_service,
     get_message_submission_service,
     get_optional_tool_workflow_service,
 )
@@ -18,7 +19,9 @@ from materialsagent.application.chat_orchestration import (
 )
 from materialsagent.application.context import ActorContext
 from materialsagent.application.conversations import ConversationService
+from materialsagent.application.conversation_cleanup import ConversationCleanupService
 from materialsagent.application.errors import (
+    ApplicationConflictError,
     ApplicationInternalError,
     ApplicationValidationError,
 )
@@ -62,9 +65,13 @@ class ConversationView(StrictModel):
     updated_at: str
 
 
+class ConversationCreateData(ConversationView):
+    idempotency_replayed: bool = False
+
+
 class ConversationCreateResponse(StrictModel):
     request_id: str
-    data: ConversationView
+    data: ConversationCreateData
 
 
 class ConversationListItemView(ConversationView):
@@ -79,6 +86,15 @@ class ConversationListData(StrictModel):
 class ConversationListResponse(StrictModel):
     request_id: str
     data: ConversationListData
+
+
+class ConversationDeleteData(StrictModel):
+    conversation_id: str
+
+
+class ConversationDeleteResponse(StrictModel):
+    request_id: str
+    data: ConversationDeleteData
 
 
 class MessageSubmissionRequest(StrictModel):
@@ -181,15 +197,30 @@ def create_conversation(
         ConversationService,
         Depends(get_conversation_service),
     ],
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key"),
+    ] = None,
 ) -> ConversationCreateResponse:
-    conversation = service.create(actor_context, body.title)
+    try:
+        validated_idempotency_key = validate_idempotency_key(idempotency_key)
+    except (TypeError, ValueError):
+        raise ApplicationValidationError() from None
+    creation = service.create_idempotent(
+        actor_context,
+        body.title,
+        request_id=request.state.request_id,
+        idempotency_key=validated_idempotency_key,
+    )
+    conversation = creation.conversation
     return ConversationCreateResponse(
         request_id=request.state.request_id,
-        data=ConversationView(
+        data=ConversationCreateData(
             conversation_id=conversation.conversation_id,
             title=conversation.title,
             created_at=_utc_text(conversation.created_at),
             updated_at=_utc_text(conversation.updated_at),
+            idempotency_replayed=creation.idempotency_replayed,
         ),
     )
 
@@ -225,6 +256,32 @@ def list_conversations(
             ],
             next_cursor=page.next_cursor,
         ),
+    )
+
+
+@router.delete(
+    "/{conversation_id}",
+    response_model=ConversationDeleteResponse,
+)
+def delete_conversation(
+    conversation_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    actor_context: Annotated[ActorContext, Depends(get_actor_context)],
+    service: Annotated[
+        ConversationCleanupService,
+        Depends(get_conversation_cleanup_service),
+    ],
+) -> ConversationDeleteResponse:
+    deletion = service.delete(actor_context, conversation_id)
+    background_tasks.add_task(
+        service.drain,
+        limit=100,
+        preferred_ids=deletion.cleanup_ids,
+    )
+    return ConversationDeleteResponse(
+        request_id=request.state.request_id,
+        data=ConversationDeleteData(conversation_id=conversation_id),
     )
 
 
@@ -267,37 +324,50 @@ def submit_message(
         target_task_id=body.target_task_id,
         idempotency_key=validated_idempotency_key,
     )
-    projection = (
-        orchestration_service.load_current_submission(
+    try:
+        projection = orchestration_service.resume_or_load_submission(
             actor_context,
             submission,
         )
-        if submission.idempotency_replayed
-        else orchestration_service.orchestrate_submission(
+    except ApplicationConflictError:
+        # A same-key replay can lose a compare-and-set race after another
+        # request has already advanced the shared Message/Task.  The
+        # idempotency record above has already proved that this is the same
+        # operation, so return its committed projection instead of exposing
+        # an internal scheduling race as a client conflict.
+        projection = orchestration_service.load_current_submission(
             actor_context,
             submission,
         )
-    )
     workflow: ToolWorkflowProjection | None = None
     if (
-        not submission.idempotency_replayed
-        and projection.task.task_type == "TOOL_EXECUTION"
+        projection.task.task_type == "TOOL_EXECUTION"
         and projection.task.current_status == "READY"
     ):
         if projection.revision is None:
             raise ApplicationInternalError(task_id=projection.task.task_id)
         if tool_workflow_service is not None:
-            workflow = tool_workflow_service.execute(
-                actor_context,
-                task_id=projection.task.task_id,
-                task_input_revision_id=(
-                    projection.revision.task_input_revision_id
-                ),
-                request_id=projection.user_message.request_id,
-            )
+            try:
+                workflow = tool_workflow_service.execute(
+                    actor_context,
+                    task_id=projection.task.task_id,
+                    task_input_revision_id=(
+                        projection.revision.task_input_revision_id
+                    ),
+                    request_id=projection.user_message.request_id,
+                )
+            except ApplicationConflictError:
+                projection = orchestration_service.load_current_submission(
+                    actor_context,
+                    submission,
+                )
+                if projection.task.selected_result_id is not None:
+                    workflow = tool_workflow_service.load_current_for_task(
+                        actor_context,
+                        task_id=projection.task.task_id,
+                    )
     elif (
-        submission.idempotency_replayed
-        and projection.task.task_type == "TOOL_EXECUTION"
+        projection.task.task_type == "TOOL_EXECUTION"
         and projection.task.selected_result_id is not None
     ):
         if tool_workflow_service is None:

@@ -118,14 +118,14 @@ class ToolResultRow(Base):
 
     result_id: Mapped[str] = mapped_column(Text, primary_key=True)
     task_id: Mapped[str] = mapped_column(
-        ForeignKey("task.task_id", name="fk_tool_result_task", ondelete="RESTRICT"),
+        ForeignKey("task.task_id", name="fk_tool_result_task", ondelete="CASCADE"),
         nullable=False,
     )
     tool_run_id: Mapped[str] = mapped_column(
         ForeignKey(
             "tool_run.tool_run_id",
             name="fk_tool_result_tool_run",
-            ondelete="RESTRICT",
+            ondelete="CASCADE",
         ),
         nullable=False,
     )
@@ -183,7 +183,7 @@ class ResultAssetLinkRow(Base):
         ForeignKey(
             "tool_result.result_id",
             name="fk_result_asset_link_result",
-            ondelete="RESTRICT",
+            ondelete="CASCADE",
         ),
         primary_key=True,
     )
@@ -191,7 +191,7 @@ class ResultAssetLinkRow(Base):
         ForeignKey(
             "asset.asset_id",
             name="fk_result_asset_link_asset",
-            ondelete="RESTRICT",
+            ondelete="CASCADE",
         ),
         primary_key=True,
     )

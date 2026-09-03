@@ -104,7 +104,7 @@ def _seed_running_tool_run(engine: Engine) -> ToolRun:
                 created_at=BASE,
             )
         )
-        run = ToolRun.pending(
+        pending_run = ToolRun.pending(
             tool_run_id="tool_run_1",
             task_id="task_1",
             request_id="execute_request_1",
@@ -123,7 +123,10 @@ def _seed_running_tool_run(engine: Engine) -> ToolRun:
                 "runtime_parameters": {"seed": 101},
             },
             created_at=BASE + timedelta(seconds=2),
-        ).start(started_at=BASE + timedelta(seconds=3)).record_runtime_output(
+        )
+        run = pending_run.start(
+            started_at=BASE + timedelta(seconds=3)
+        ).record_runtime_output(
             actual_runtime_parameters={
                 "seed": 101,
                 "num_samples": 1,
@@ -138,7 +141,11 @@ def _seed_running_tool_run(engine: Engine) -> ToolRun:
             },
             model_bundle_id="mock-bundle",
         )
-        unit_of_work.tool_runs.add(run)
+        unit_of_work.tool_runs.add(pending_run)
+        assert unit_of_work.tool_runs.update(
+            run,
+            expected_status="PENDING",
+        ) == run
         unit_of_work.commit()
     return run
 

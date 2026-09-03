@@ -199,8 +199,8 @@ def test_repository_preserves_binding_and_latest_candidate_references(
         normalized_input={"material": "ZTA35G"},
         missing_fields=[],
     )
+    needs_input.bind_tool(candidate_refs[0])
     ready = replace(needs_input, current_status=READY)
-    ready.bind_tool(candidate_refs[0])
     with factory() as unit_of_work:
         unit_of_work.task_input_revisions.add(complete_revision)
         assert unit_of_work.tasks.update(

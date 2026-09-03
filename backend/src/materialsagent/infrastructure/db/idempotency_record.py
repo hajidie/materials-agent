@@ -19,6 +19,7 @@ from sqlalchemy.orm import Mapped, Session, mapped_column
 from materialsagent.domain.models.idempotency_record import IdempotencyRecord
 from materialsagent.infrastructure.db.actor import _raise_safe_persistence_error
 from materialsagent.infrastructure.db.base import Base
+from materialsagent.infrastructure.db.conversation_task import TaskRow
 
 
 class IdempotencyRecordRow(Base):
@@ -33,7 +34,7 @@ class IdempotencyRecordRow(Base):
             name="ck_idempotency_actor_id_not_blank",
         ),
         CheckConstraint(
-            "operation IN ('TASK_CREATE', 'TASK_INPUT_SUPPLEMENT', "
+            "operation IN ('CONVERSATION_CREATE', 'TASK_CREATE', 'TASK_INPUT_SUPPLEMENT', "
             "'TOOL_RETRY', 'EXPLANATION_RETRY')",
             name="ck_idempotency_operation_allowed",
         ),
@@ -52,16 +53,24 @@ class IdempotencyRecordRow(Base):
             name="ck_idempotency_first_request_not_blank",
         ),
         CheckConstraint(
-            "(operation = 'TASK_CREATE' AND task_id IS NOT NULL "
+            "(operation = 'CONVERSATION_CREATE' AND conversation_id IS NOT NULL "
+            "AND task_id IS NULL AND message_id IS NULL "
+            "AND task_input_revision_id IS NULL AND tool_run_id IS NULL "
+            "AND explanation_id IS NULL) OR "
+            "(operation = 'TASK_CREATE' AND conversation_id IS NOT NULL "
+            "AND task_id IS NOT NULL "
             "AND message_id IS NOT NULL AND task_input_revision_id IS NULL "
             "AND tool_run_id IS NULL AND explanation_id IS NULL) OR "
-            "(operation = 'TASK_INPUT_SUPPLEMENT' AND task_id IS NOT NULL "
+            "(operation = 'TASK_INPUT_SUPPLEMENT' AND conversation_id IS NOT NULL "
+            "AND task_id IS NOT NULL "
             "AND message_id IS NOT NULL AND tool_run_id IS NULL "
             "AND explanation_id IS NULL) OR "
-            "(operation = 'TOOL_RETRY' AND task_id IS NOT NULL "
+            "(operation = 'TOOL_RETRY' AND conversation_id IS NULL "
+            "AND task_id IS NOT NULL "
             "AND message_id IS NULL AND task_input_revision_id IS NULL "
             "AND tool_run_id IS NOT NULL AND explanation_id IS NULL) OR "
-            "(operation = 'EXPLANATION_RETRY' AND task_id IS NOT NULL "
+            "(operation = 'EXPLANATION_RETRY' AND conversation_id IS NULL "
+            "AND task_id IS NOT NULL "
             "AND message_id IS NULL AND task_input_revision_id IS NULL "
             "AND tool_run_id IS NULL AND explanation_id IS NOT NULL)",
             name="ck_idempotency_operation_binding",
@@ -104,11 +113,19 @@ class IdempotencyRecordRow(Base):
     idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
     request_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     first_request_id: Mapped[str] = mapped_column(Text, nullable=False)
+    conversation_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "conversation.conversation_id",
+            name="fk_idempotency_conversation",
+            ondelete="CASCADE",
+        ),
+        nullable=True,
+    )
     task_id: Mapped[str | None] = mapped_column(
         ForeignKey(
             "task.task_id",
             name="fk_idempotency_task",
-            ondelete="RESTRICT",
+            ondelete="CASCADE",
         ),
         nullable=True,
     )
@@ -116,7 +133,7 @@ class IdempotencyRecordRow(Base):
         ForeignKey(
             "message.message_id",
             name="fk_idempotency_message",
-            ondelete="RESTRICT",
+            ondelete="CASCADE",
         ),
         nullable=True,
     )
@@ -124,7 +141,7 @@ class IdempotencyRecordRow(Base):
         ForeignKey(
             "task_input_revision.task_input_revision_id",
             name="fk_idempotency_revision",
-            ondelete="RESTRICT",
+            ondelete="CASCADE",
         ),
         nullable=True,
     )
@@ -132,7 +149,7 @@ class IdempotencyRecordRow(Base):
         ForeignKey(
             "tool_run.tool_run_id",
             name="fk_idempotency_tool_run",
-            ondelete="RESTRICT",
+            ondelete="CASCADE",
         ),
         nullable=True,
     )
@@ -140,7 +157,7 @@ class IdempotencyRecordRow(Base):
         ForeignKey(
             "natural_language_explanation.explanation_id",
             name="fk_idempotency_explanation",
-            ondelete="RESTRICT",
+            ondelete="CASCADE",
         ),
         nullable=True,
     )
@@ -222,13 +239,20 @@ class SQLAlchemyIdempotencyRecordRepository:
 
     def add(self, record: IdempotencyRecord) -> None:
         try:
+            values = {
+                field_name: getattr(record, field_name)
+                for field_name in IdempotencyRecord.__dataclass_fields__
+            }
+            if (
+                values["conversation_id"] is None
+                and record.operation in {"TASK_CREATE", "TASK_INPUT_SUPPLEMENT"}
+                and record.task_id is not None
+            ):
+                task = self._session.get(TaskRow, record.task_id)
+                if task is not None:
+                    values["conversation_id"] = task.conversation_id
             self._session.add(
-                IdempotencyRecordRow(
-                    **{
-                        field_name: getattr(record, field_name)
-                        for field_name in IdempotencyRecord.__dataclass_fields__
-                    }
-                )
+                IdempotencyRecordRow(**values)
             )
             self._session.flush()
         except SQLAlchemyError as error:

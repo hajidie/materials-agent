@@ -15,6 +15,9 @@ from materialsagent.infrastructure.db.conversation_task import (
     TaskInputRevisionRow,
     TaskRow,
 )
+from materialsagent.infrastructure.db.conversation_cleanup import (
+    ConversationObjectCleanupRow,
+)
 from materialsagent.infrastructure.db.llm_call import LLMCallRow
 from materialsagent.infrastructure.db.idempotency_record import (
     IdempotencyRecordRow,
@@ -41,6 +44,7 @@ _ = (
     ActorRow,
     AssetRow,
     ConversationRow,
+    ConversationObjectCleanupRow,
     LLMCallRow,
     IdempotencyRecordRow,
     NaturalLanguageExplanationRow,

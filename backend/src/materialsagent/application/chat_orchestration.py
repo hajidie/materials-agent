@@ -7,8 +7,11 @@ from hashlib import sha256
 import json
 import logging
 import math
+import re
+import unicodedata
 from typing import Final
 
+from materialsagent.application.conversation_context import ConversationContextBuilder
 from materialsagent.application.context import ActorContext
 from materialsagent.application.conversations import (
     Clock,
@@ -45,6 +48,7 @@ from materialsagent.domain.models.llm_call import (
     TOOL_INPUT_EXTRACTION,
     LLMCall,
 )
+from materialsagent.domain.models.context_snapshot import build_context_snapshot
 from materialsagent.domain.models.message import (
     ASSISTANT,
     LLM,
@@ -70,11 +74,19 @@ from materialsagent.domain.ports.chat_orchestration import (
     ChatOrchestrationPort,
     ChatOrchestrationRequestMetadata,
     ChatOrchestrationTimeoutError,
+    HistoryReference,
     KnowledgeAnswer,
     ToolCandidateProposal,
     ToolCandidateSet,
 )
+from materialsagent.domain.ports.conversation_context import (
+    ContextBudget,
+    ContextBuildResult,
+    PromptContextWindow,
+    TokenCounter,
+)
 from materialsagent.domain.ports.tool_registry import (
+    InvalidNormalization,
     NeedsInputNormalization,
     ReadyNormalization,
     RoutingCatalogSnapshot,
@@ -88,6 +100,7 @@ from materialsagent.domain.ports.tool_input_extraction import (
     ToolInputExtractionPort,
     ToolInputExtractionProtocolError,
     ToolInputExtractionProviderError,
+    ToolInputExtractionRequestMetadata,
     ToolInputExtractionTimeoutError,
 )
 from materialsagent.domain.ports.unit_of_work import (
@@ -101,6 +114,7 @@ TIMEOUT_MESSAGE: Final = "聊天编排服务响应超时。"
 ORCHESTRATION_FAILURE_MESSAGE: Final = "聊天编排服务暂不可用。"
 PROTOCOL_FAILURE_MESSAGE: Final = "聊天编排服务返回了无效响应。"
 AGENT_INTERNAL_ERROR_MESSAGE: Final = "智能体内部处理失败。"
+CONTEXT_BUDGET_MESSAGE: Final = "当前消息超过模型上下文预算。"
 
 
 logger = logging.getLogger("materialsagent.chat_orchestration")
@@ -150,6 +164,8 @@ class ChatOrchestrationService:
         tool_chain_enabled: bool = False,
         tool_registry: object | None = None,
         tool_input_extraction_port: ToolInputExtractionPort | None = None,
+        context_builder: ConversationContextBuilder | None = None,
+        token_counter: TokenCounter | None = None,
     ) -> None:
         self._unit_of_work_factory = unit_of_work_factory
         self._orchestration_port = orchestration_port
@@ -167,6 +183,17 @@ class ChatOrchestrationService:
             tool_registry = ToolRegistry((build_zta35g_tool_definition(),))
         self._tool_registry = tool_registry
         self._tool_input_extraction_port = tool_input_extraction_port
+        self._context_builder = context_builder or ConversationContextBuilder(
+            unit_of_work_factory,
+            tool_registry,
+        )
+        if token_counter is None:
+            from materialsagent.infrastructure.llm.token_counter import (
+                Cl100kTokenCounter,
+            )
+
+            token_counter = Cl100kTokenCounter()
+        self._token_counter = token_counter
 
     def configured_for_tool_chain(
         self,
@@ -183,12 +210,16 @@ class ChatOrchestrationService:
             tool_chain_enabled=enabled,
             tool_registry=self._tool_registry,
             tool_input_extraction_port=self._tool_input_extraction_port,
+            context_builder=self._context_builder,
+            token_counter=self._token_counter,
         )
 
     def orchestrate_submission(
         self,
         actor_context: ActorContext,
         submission: PreparedSubmission,
+        *,
+        resume_call: LLMCall | None = None,
     ) -> ChatOrchestrationProjection:
         if submission.submission_mode == SUPPLEMENT_TASK:
             return self._orchestrate_bound_supplement(
@@ -200,13 +231,32 @@ class ChatOrchestrationService:
             raise ChatOrchestrationProtocolError(
                 "Tool Registry returned an invalid routing snapshot."
             )
-        orchestration_input = ChatOrchestrationInput(
-            task_id=submission.task.task_id,
+        def input_for(window: PromptContextWindow) -> ChatOrchestrationInput:
+            return ChatOrchestrationInput(
+                task_id=submission.task.task_id,
+                conversation_id=submission.conversation_id,
+                request_id=submission.user_message.request_id,
+                content_text=submission.user_message.content_text,
+                routing_catalog=catalog,
+                context_window=window,
+            )
+
+        context_result = self._context_builder.build(
+            purpose=CHAT_ORCHESTRATION,
+            actor_id=actor_context.actor_id,
             conversation_id=submission.conversation_id,
-            request_id=submission.user_message.request_id,
-            content_text=submission.user_message.content_text,
-            routing_catalog=catalog,
+            current_message=submission.user_message,
+            task_id=None,
+            agent_state={},
+            budget=self._context_budget(
+                self._orchestration_port,
+                purpose=CHAT_ORCHESTRATION,
+            ),
+            prompt_token_counter=lambda window: self._chat_prompt_tokens(
+                input_for(window)
+            ),
         )
+        orchestration_input = input_for(context_result.window)
         metadata = self._orchestration_port.request_metadata(
             orchestration_input
         )
@@ -218,16 +268,48 @@ class ChatOrchestrationService:
             raise ChatOrchestrationProtocolError(
                 "Chat orchestration metadata violated the protocol."
             )
-        call = self._prepare_call(
+        context_snapshot = build_context_snapshot(
+            context_result,
+            purpose=CHAT_ORCHESTRATION,
+            model_name=metadata.model_name,
+            prompt_digest=metadata.prompt_digest,
+        )
+        call = resume_call or self._prepare_call(
             actor_context,
             submission,
             metadata,
             orchestration_input,
+            context_snapshot=context_snapshot,
         )
+        if resume_call is not None and not self._call_matches_request(
+            resume_call,
+            submission=submission,
+            metadata=metadata,
+            orchestration_input=orchestration_input,
+            context_snapshot=context_snapshot,
+        ):
+            raise self._conflict(submission)
         started = self._start_call(actor_context, submission, call)
         if not started.invoke_adapter:
             return self.load_current_submission(actor_context, submission)
         call = started.call
+        if context_result.budget_exceeded:
+            self._finalize_failure(
+                actor_context,
+                submission,
+                call.llm_call_id,
+                llm_error_code="CONTEXT_BUDGET_EXCEEDED",
+                llm_safe_error_message=CONTEXT_BUDGET_MESSAGE,
+                task_error_code="CONTEXT_BUDGET_EXCEEDED",
+                task_safe_error_message=CONTEXT_BUDGET_MESSAGE,
+                provider_request_id=None,
+            )
+            raise self._outcome_error(
+                submission,
+                status_code=422,
+                code="CONTEXT_BUDGET_EXCEEDED",
+                message=CONTEXT_BUDGET_MESSAGE,
+            )
         self._log_event("chat_orchestration_started", submission, call.llm_call_id)
         try:
             outcome = self._orchestration_port.orchestrate(
@@ -248,7 +330,14 @@ class ChatOrchestrationService:
             resolved_result: KnowledgeAnswer | _ResolvedToolRoute = (
                 result
                 if isinstance(result, KnowledgeAnswer)
-                else self._resolve_tool_candidates(result, catalog)
+                else self._resolve_tool_candidates(
+                    result,
+                    catalog,
+                    context_result=context_result,
+                    actor_context=actor_context,
+                    current_text=submission.user_message.content_text,
+                    conversation_id=submission.conversation_id,
+                )
             )
         except ChatOrchestrationTimeoutError as error:
             self._finalize_failure(
@@ -384,6 +473,137 @@ class ChatOrchestrationService:
             )
         return projection
 
+    def resume_or_load_submission(
+        self,
+        actor_context: ActorContext,
+        submission: PreparedSubmission,
+    ) -> ChatOrchestrationProjection:
+        if submission.submission_mode == SUPPLEMENT_TASK:
+            try:
+                with self._unit_of_work_factory() as unit_of_work:
+                    task = unit_of_work.tasks.get_owned_for_update(
+                        submission.task.task_id,
+                        actor_context.actor_id,
+                    )
+                    message = unit_of_work.messages.get(
+                        submission.user_message.message_id
+                    )
+                    if task is None or message is None:
+                        raise ResourceNotFoundError()
+                    self._require_source_identity(
+                        actor_context,
+                        submission,
+                        message,
+                        task,
+                    )
+                    runs = unit_of_work.tool_runs.list_for_task(task.task_id)
+                    calls = [
+                        call
+                        for call in unit_of_work.llm_calls.list_for_task(
+                            task.task_id,
+                            request_id=message.request_id,
+                        )
+                        if call.purpose == TOOL_INPUT_EXTRACTION
+                    ]
+            except PersistenceError as error:
+                raise from_persistence_error(
+                    error,
+                    conversation_id=submission.conversation_id,
+                    task_id=submission.task.task_id,
+                ) from None
+            if task.current_status in {
+                TASK_READY,
+                TASK_SUCCEEDED,
+                TASK_FAILED,
+            } or runs:
+                return self.load_current_submission(actor_context, submission)
+            active = [
+                call
+                for call in calls
+                if call.status in {LLM_PENDING, LLM_RUNNING}
+            ]
+            if len(active) > 1:
+                raise self._conflict(submission)
+            if active:
+                if active[0].status == LLM_RUNNING:
+                    return self.load_current_submission(actor_context, submission)
+                return self.orchestrate_submission(actor_context, submission)
+            ordinary_terminal = [
+                call
+                for call in calls
+                if not (
+                    call.status == LLM_FAILED
+                    and call.error_code == "PROCESS_INTERRUPTED_BEFORE_START"
+                )
+            ]
+            if ordinary_terminal:
+                return self.load_current_submission(actor_context, submission)
+            if task.current_status == TASK_NEEDS_INPUT:
+                return self.orchestrate_submission(actor_context, submission)
+            return self.load_current_submission(actor_context, submission)
+        try:
+            with self._unit_of_work_factory() as unit_of_work:
+                task = unit_of_work.tasks.get_owned_for_update(
+                    submission.task.task_id,
+                    actor_context.actor_id,
+                )
+                message = unit_of_work.messages.get(submission.user_message.message_id)
+                if task is None or message is None:
+                    raise ResourceNotFoundError()
+                self._require_source_identity(
+                    actor_context,
+                    submission,
+                    message,
+                    task,
+                )
+                runs = unit_of_work.tool_runs.list_for_task(task.task_id)
+                calls = [
+                    call
+                    for call in unit_of_work.llm_calls.list_for_task(
+                        task.task_id,
+                        request_id=message.request_id,
+                    )
+                    if call.purpose == CHAT_ORCHESTRATION
+                ]
+        except PersistenceError as error:
+            raise from_persistence_error(
+                error,
+                conversation_id=submission.conversation_id,
+                task_id=submission.task.task_id,
+            ) from None
+        if task.current_status in {
+            TASK_NEEDS_INPUT,
+            TASK_READY,
+            TASK_SUCCEEDED,
+            TASK_FAILED,
+        } or runs:
+            return self.load_current_submission(actor_context, submission)
+        active = [call for call in calls if call.status in {LLM_PENDING, LLM_RUNNING}]
+        if len(active) > 1:
+            raise self._conflict(submission)
+        if active:
+            call = active[0]
+            if call.status == LLM_RUNNING:
+                return self.load_current_submission(actor_context, submission)
+            return self.orchestrate_submission(
+                actor_context,
+                submission,
+                resume_call=call,
+            )
+        ordinary_terminal = [
+            call
+            for call in calls
+            if not (
+                call.status == LLM_FAILED
+                and call.error_code == "PROCESS_INTERRUPTED_BEFORE_START"
+            )
+        ]
+        if ordinary_terminal:
+            return self.load_current_submission(actor_context, submission)
+        if task.current_status == TASK_PENDING:
+            return self.orchestrate_submission(actor_context, submission)
+        return self.load_current_submission(actor_context, submission)
+
     def _orchestrate_bound_supplement(
         self,
         actor_context: ActorContext,
@@ -425,30 +645,128 @@ class ChatOrchestrationService:
                 conversation_id=submission.conversation_id,
                 task_id=submission.task.task_id,
             )
-        command = ToolInputExtractionInput(
-            content_text=submission.user_message.content_text,
-            tool_context_ref=current_ref,
-            candidate_input_schema=definition.candidate_input_schema,
-            missing_fields=tuple(snapshot.latest_revision.missing_fields),
-            ambiguous_fields=tuple(
-                item["field"]
-                for item in snapshot.latest_revision.ambiguous_fields
-                if isinstance(item, Mapping)
-                and type(item.get("field")) is str
+        missing_fields = tuple(snapshot.latest_revision.missing_fields)
+        ambiguous_fields = tuple(
+            item["field"]
+            for item in snapshot.latest_revision.ambiguous_fields
+            if isinstance(item, Mapping)
+            and type(item.get("field")) is str
+        )
+
+        def command_for(window: PromptContextWindow) -> ToolInputExtractionInput:
+            return ToolInputExtractionInput(
+                content_text=submission.user_message.content_text,
+                tool_context_ref=current_ref,
+                candidate_input_schema=definition.candidate_input_schema,
+                missing_fields=missing_fields,
+                ambiguous_fields=ambiguous_fields,
+                context_window=window,
+            )
+
+        context_result = self._context_builder.build(
+            purpose=TOOL_INPUT_EXTRACTION,
+            actor_id=actor_context.actor_id,
+            conversation_id=submission.conversation_id,
+            current_message=submission.user_message,
+            task_id=submission.task.task_id,
+            agent_state={
+                "tool_id": current_ref.tool_id,
+                "prior_normalized_input": self._plain_json(
+                    snapshot.prior_normalized_input
+                ),
+                "missing_fields": list(missing_fields),
+                "ambiguous_fields": list(ambiguous_fields),
+            },
+            budget=self._context_budget(
+                extractor,
+                purpose=TOOL_INPUT_EXTRACTION,
+            ),
+            prompt_token_counter=lambda window: self._tool_prompt_tokens(
+                extractor,
+                command_for(window),
             ),
         )
-        started_at = _validated_utc_now(self._clock)
+        command = command_for(context_result.window)
+        request_metadata = getattr(extractor, "request_metadata", None)
+        metadata = request_metadata(command) if callable(request_metadata) else None
+        if metadata is not None and (
+            not hasattr(metadata, "prompt_digest")
+            or metadata.provider != getattr(extractor, "provider", None)
+            or metadata.model_name != getattr(extractor, "model_name", None)
+        ):
+            raise ToolInputExtractionProtocolError()
+        context_snapshot = (
+            None
+            if metadata is None
+            else build_context_snapshot(
+                context_result,
+                purpose=TOOL_INPUT_EXTRACTION,
+                model_name=metadata.model_name,
+                prompt_digest=metadata.prompt_digest,
+            )
+        )
+        if context_result.budget_exceeded:
+            if metadata is None or context_snapshot is None:
+                raise AgentInternalError(
+                    conversation_id=submission.conversation_id,
+                    task_id=submission.task.task_id,
+                )
+            self._persist_bound_supplement_budget_failure(
+                actor_context,
+                submission,
+                snapshot=snapshot,
+                current_ref=current_ref,
+                metadata=metadata,
+                context_snapshot=context_snapshot,
+            )
+            raise self._outcome_error(
+                submission,
+                status_code=422,
+                code="CONTEXT_BUDGET_EXCEEDED",
+                message=CONTEXT_BUDGET_MESSAGE,
+            )
+        if metadata is None or context_snapshot is None:
+            raise AgentInternalError(
+                conversation_id=submission.conversation_id,
+                task_id=submission.task.task_id,
+            )
+        pending_call = self._prepare_bound_supplement_call(
+            actor_context,
+            submission,
+            snapshot=snapshot,
+            current_ref=current_ref,
+            metadata=metadata,
+            context_snapshot=context_snapshot,
+        )
+        started = self._start_bound_supplement_call(
+            actor_context,
+            submission,
+            pending_call,
+        )
+        if not started.invoke_adapter:
+            return self.load_current_submission(actor_context, submission)
+        running_call = started.call
+        assert running_call.started_at is not None
         outcome: ToolInputExtractionOutcome | None = None
         try:
             outcome = extractor.extract(command)
             if not isinstance(outcome, ToolInputExtractionOutcome):
                 raise ToolInputExtractionProtocolError()
-            metadata = outcome.request_metadata
+            outcome_metadata = outcome.request_metadata
             if (
-                metadata.provider != getattr(extractor, "provider", None)
-                or metadata.model_name != getattr(extractor, "model_name", None)
+                outcome_metadata.provider != getattr(extractor, "provider", None)
+                or outcome_metadata.model_name != getattr(extractor, "model_name", None)
+                or (metadata is not None and outcome_metadata != metadata)
             ):
                 raise ToolInputExtractionProtocolError()
+            metadata = outcome_metadata
+            if context_snapshot is None:
+                context_snapshot = build_context_snapshot(
+                    context_result,
+                    purpose=TOOL_INPUT_EXTRACTION,
+                    model_name=metadata.model_name,
+                    prompt_digest=metadata.prompt_digest,
+                )
             normalization = self._controlled_normalization(
                 definition,
                 definition.normalize(
@@ -467,8 +785,10 @@ class ChatOrchestrationService:
                 submission,
                 snapshot=snapshot,
                 current_ref=current_ref,
-                started_at=started_at,
+                running_call=running_call,
                 outcome=outcome,
+                metadata=metadata,
+                context_snapshot=context_snapshot,
                 llm_error_code=error.error_code,
                 llm_safe_error_message=error.safe_error_message,
                 task_error_code="UPSTREAM_TIMEOUT",
@@ -487,8 +807,10 @@ class ChatOrchestrationService:
                 submission,
                 snapshot=snapshot,
                 current_ref=current_ref,
-                started_at=started_at,
+                running_call=running_call,
                 outcome=outcome,
+                metadata=metadata,
+                context_snapshot=context_snapshot,
                 llm_error_code=error.error_code,
                 llm_safe_error_message=error.safe_error_message,
                 task_error_code="CHAT_ORCHESTRATION_FAILED",
@@ -524,8 +846,10 @@ class ChatOrchestrationService:
                 submission,
                 snapshot=snapshot,
                 current_ref=current_ref,
-                started_at=started_at,
+                running_call=running_call,
                 outcome=outcome,
+                metadata=metadata,
+                context_snapshot=context_snapshot,
                 llm_error_code=llm_error_code,
                 llm_safe_error_message=llm_safe_error_message,
                 task_error_code="AGENT_INTERNAL_ERROR",
@@ -541,15 +865,220 @@ class ChatOrchestrationService:
                 task_id=submission.task.task_id,
             ) from None
         completed_at = _validated_utc_now(self._clock)
-        return self._persist_bound_supplement(
+        projection = self._persist_bound_supplement(
             actor_context,
             submission,
             snapshot=snapshot,
             current_ref=current_ref,
             outcome=outcome,
             normalization=normalization,
-            started_at=started_at,
+            running_call=running_call,
             completed_at=completed_at,
+            context_snapshot=context_snapshot,
+        )
+        if isinstance(normalization, InvalidNormalization):
+            raise self._outcome_error(
+                submission,
+                status_code=422,
+                code="VALIDATION_FAILED",
+                message=VALIDATION_ERROR_MESSAGE,
+                details=[
+                    self._plain_json(error)
+                    for error in normalization.validation_errors
+                ],
+            )
+        return projection
+
+    def _prepare_bound_supplement_call(
+        self,
+        actor_context: ActorContext,
+        submission: PreparedSubmission,
+        *,
+        snapshot: _BoundSupplementSnapshot,
+        current_ref: ToolRef,
+        metadata: ToolInputExtractionRequestMetadata,
+        context_snapshot: Mapping[str, object],
+    ) -> LLMCall:
+        timestamp = _validated_utc_now(self._clock)
+        call = LLMCall(
+            llm_call_id=self._id_factory("llm"),
+            task_id=submission.task.task_id,
+            conversation_id=submission.conversation_id,
+            request_id=submission.user_message.request_id,
+            purpose=TOOL_INPUT_EXTRACTION,
+            input_result_id=None,
+            provider=metadata.provider,
+            model_name=metadata.model_name,
+            prompt_template_id=metadata.prompt_template_id,
+            prompt_template_version=metadata.prompt_template_version,
+            prompt_digest=metadata.prompt_digest,
+            generation_parameters=metadata.generation_parameters,
+            structured_output_summary=None,
+            usage=None,
+            provider_request_id=None,
+            status=LLM_PENDING,
+            created_at=timestamp,
+            started_at=None,
+            completed_at=None,
+            duration_ms=None,
+            error_code=None,
+            safe_error_message=None,
+            catalog_snapshot_refs=None,
+            catalog_hash=None,
+            tool_context_ref=current_ref,
+            context_snapshot=context_snapshot,
+        )
+        try:
+            with self._unit_of_work_factory() as unit_of_work:
+                task = self._require_submission_sources(
+                    unit_of_work,
+                    actor_context,
+                    submission,
+                    expected_task_status=TASK_NEEDS_INPUT,
+                )
+                revisions = unit_of_work.task_input_revisions.list_for_task(
+                    task.task_id
+                )
+                latest = max(
+                    revisions,
+                    key=lambda item: (item.revision, item.task_input_revision_id),
+                )
+                if (
+                    task.bound_tool_ref != snapshot.bound_tool_ref
+                    or latest.task_input_revision_id
+                    != snapshot.latest_revision.task_input_revision_id
+                ):
+                    raise self._conflict(submission)
+                existing_calls = [
+                    existing
+                    for existing in unit_of_work.llm_calls.list_for_task(
+                        task.task_id,
+                        request_id=submission.user_message.request_id,
+                    )
+                    if existing.purpose == TOOL_INPUT_EXTRACTION
+                    and not (
+                        existing.status == LLM_FAILED
+                        and existing.error_code
+                        == "PROCESS_INTERRUPTED_BEFORE_START"
+                    )
+                ]
+                if len(existing_calls) > 1:
+                    raise self._conflict(submission)
+                if existing_calls:
+                    existing = existing_calls[0]
+                    if not self._supplement_call_matches_request(
+                        existing,
+                        submission=submission,
+                        current_ref=current_ref,
+                        metadata=metadata,
+                        context_snapshot=context_snapshot,
+                    ):
+                        raise self._conflict(submission)
+                    return existing
+                unit_of_work.llm_calls.add(call)
+                unit_of_work.commit()
+        except PersistenceError as error:
+            recovered = self._recover_call_after_uncertain_commit(
+                actor_context,
+                submission,
+                expected=call,
+            )
+            if recovered is not None:
+                return recovered
+            raise from_persistence_error(
+                error,
+                conversation_id=submission.conversation_id,
+                task_id=submission.task.task_id,
+            ) from None
+        return call
+
+    def _start_bound_supplement_call(
+        self,
+        actor_context: ActorContext,
+        submission: PreparedSubmission,
+        call: LLMCall,
+    ) -> _StartedChatCall:
+        if call.status in {LLM_RUNNING, LLM_SUCCEEDED, LLM_FAILED}:
+            return _StartedChatCall(call=call, invoke_adapter=False)
+        running_call = replace(
+            call,
+            status=LLM_RUNNING,
+            started_at=_validated_utc_now(self._clock),
+        )
+        try:
+            with self._unit_of_work_factory() as unit_of_work:
+                self._require_submission_sources(
+                    unit_of_work,
+                    actor_context,
+                    submission,
+                    expected_task_status=TASK_NEEDS_INPUT,
+                )
+                persisted = unit_of_work.llm_calls.get(call.llm_call_id)
+                if persisted != call:
+                    if (
+                        persisted is not None
+                        and self._same_call_identity(persisted, call)
+                        and persisted.status
+                        in {LLM_RUNNING, LLM_SUCCEEDED, LLM_FAILED}
+                    ):
+                        return _StartedChatCall(
+                            call=persisted,
+                            invoke_adapter=False,
+                        )
+                    raise self._conflict(submission)
+                if unit_of_work.llm_calls.update(
+                    running_call,
+                    expected_status=LLM_PENDING,
+                ) is None:
+                    raise self._conflict(submission)
+                unit_of_work.commit()
+        except PersistenceError as error:
+            recovered = self._recover_call_after_uncertain_commit(
+                actor_context,
+                submission,
+                expected=running_call,
+            )
+            if recovered == running_call:
+                return _StartedChatCall(call=recovered, invoke_adapter=True)
+            if recovered is not None and recovered.status in {
+                LLM_RUNNING,
+                LLM_SUCCEEDED,
+                LLM_FAILED,
+            }:
+                return _StartedChatCall(call=recovered, invoke_adapter=False)
+            raise from_persistence_error(
+                error,
+                conversation_id=submission.conversation_id,
+                task_id=submission.task.task_id,
+            ) from None
+        return _StartedChatCall(call=running_call, invoke_adapter=True)
+
+    def _supplement_call_matches_request(
+        self,
+        call: LLMCall,
+        *,
+        submission: PreparedSubmission,
+        current_ref: ToolRef,
+        metadata: ToolInputExtractionRequestMetadata,
+        context_snapshot: Mapping[str, object],
+    ) -> bool:
+        return (
+            call.task_id == submission.task.task_id
+            and call.conversation_id == submission.conversation_id
+            and call.request_id == submission.user_message.request_id
+            and call.purpose == TOOL_INPUT_EXTRACTION
+            and call.provider == metadata.provider
+            and call.model_name == metadata.model_name
+            and call.prompt_template_id == metadata.prompt_template_id
+            and call.prompt_template_version == metadata.prompt_template_version
+            and dict(call.generation_parameters)
+            == dict(metadata.generation_parameters)
+            and dict(call.tool_context_ref or {})
+            == {
+                "tool_id": current_ref.tool_id,
+                "version": current_ref.version,
+                "schema_hash": current_ref.schema_hash,
+            }
         )
 
     def _persist_bound_supplement_failure(
@@ -559,8 +1088,10 @@ class ChatOrchestrationService:
         *,
         snapshot: _BoundSupplementSnapshot,
         current_ref: ToolRef,
-        started_at: datetime,
+        running_call: LLMCall,
         outcome: ToolInputExtractionOutcome | None,
+        metadata: ToolInputExtractionRequestMetadata | None,
+        context_snapshot: Mapping[str, object] | None,
         llm_error_code: str,
         llm_safe_error_message: str,
         task_error_code: str,
@@ -568,59 +1099,17 @@ class ChatOrchestrationService:
         provider_request_id: str | None,
     ) -> None:
         completed_at = _validated_utc_now(self._clock)
-        metadata = None if outcome is None else outcome.request_metadata
-        provider = (
-            metadata.provider
-            if metadata is not None
-            else getattr(self._tool_input_extraction_port, "provider", "unknown")
-        )
-        model_name = (
-            metadata.model_name
-            if metadata is not None
-            else getattr(
-                self._tool_input_extraction_port,
-                "model_name",
-                "unknown",
-            )
-        )
-        if not isinstance(provider, str) or not provider.strip():
-            provider = "unknown"
-        if not isinstance(model_name, str) or not model_name.strip():
-            model_name = "unknown"
-        call = LLMCall(
-            llm_call_id=self._id_factory("llm"),
-            task_id=submission.task.task_id,
-            conversation_id=submission.conversation_id,
-            request_id=submission.user_message.request_id,
-            purpose=TOOL_INPUT_EXTRACTION,
-            input_result_id=None,
-            provider=provider,
-            model_name=model_name,
-            prompt_template_id=(
-                None if metadata is None else metadata.prompt_template_id
-            ),
-            prompt_template_version=(
-                None if metadata is None else metadata.prompt_template_version
-            ),
-            prompt_digest=None if metadata is None else metadata.prompt_digest,
-            generation_parameters=(
-                {"temperature": 0, "max_tokens": 256}
-                if metadata is None
-                else metadata.generation_parameters
-            ),
+        assert running_call.started_at is not None
+        call = replace(
+            running_call,
             structured_output_summary=None,
             usage=None if outcome is None else outcome.usage,
             provider_request_id=provider_request_id,
             status=LLM_FAILED,
-            created_at=started_at,
-            started_at=started_at,
             completed_at=completed_at,
-            duration_ms=_duration_ms(started_at, completed_at),
+            duration_ms=_duration_ms(running_call.started_at, completed_at),
             error_code=llm_error_code,
             safe_error_message=llm_safe_error_message,
-            catalog_snapshot_refs=None,
-            catalog_hash=None,
-            tool_context_ref=current_ref,
         )
         original_task: Task | None = None
         failed_task: Task | None = None
@@ -670,8 +1159,10 @@ class ChatOrchestrationService:
                     error_code=task_error_code,
                     safe_error_message=task_safe_error_message,
                 )
-                unit_of_work.llm_calls.add(call)
-                if unit_of_work.tasks.update(
+                if unit_of_work.llm_calls.update(
+                    call,
+                    expected_status=LLM_RUNNING,
+                ) is None or unit_of_work.tasks.update(
                     failed_task,
                     expected_status=TASK_NEEDS_INPUT,
                 ) is None:
@@ -696,6 +1187,82 @@ class ChatOrchestrationService:
                 )
                 if recovered is not None:
                     return
+            raise from_persistence_error(
+                error,
+                conversation_id=submission.conversation_id,
+                task_id=submission.task.task_id,
+            ) from None
+
+    def _persist_bound_supplement_budget_failure(
+        self,
+        actor_context: ActorContext,
+        submission: PreparedSubmission,
+        *,
+        snapshot: _BoundSupplementSnapshot,
+        current_ref: ToolRef,
+        metadata: ToolInputExtractionRequestMetadata,
+        context_snapshot: Mapping[str, object],
+    ) -> None:
+        timestamp = _validated_utc_now(self._clock)
+        call = LLMCall(
+            llm_call_id=self._id_factory("llm"),
+            task_id=submission.task.task_id,
+            conversation_id=submission.conversation_id,
+            request_id=submission.user_message.request_id,
+            purpose=TOOL_INPUT_EXTRACTION,
+            input_result_id=None,
+            provider=metadata.provider,
+            model_name=metadata.model_name,
+            prompt_template_id=metadata.prompt_template_id,
+            prompt_template_version=metadata.prompt_template_version,
+            prompt_digest=metadata.prompt_digest,
+            generation_parameters=metadata.generation_parameters,
+            structured_output_summary=None,
+            usage=None,
+            provider_request_id=None,
+            status=LLM_FAILED,
+            created_at=timestamp,
+            started_at=timestamp,
+            completed_at=timestamp,
+            duration_ms=0,
+            error_code="CONTEXT_BUDGET_EXCEEDED",
+            safe_error_message=CONTEXT_BUDGET_MESSAGE,
+            catalog_snapshot_refs=None,
+            catalog_hash=None,
+            tool_context_ref=current_ref,
+            context_snapshot=context_snapshot,
+        )
+        try:
+            with self._unit_of_work_factory() as unit_of_work:
+                task = self._require_submission_sources(
+                    unit_of_work,
+                    actor_context,
+                    submission,
+                    expected_task_status=TASK_NEEDS_INPUT,
+                )
+                revisions = unit_of_work.task_input_revisions.list_for_task(
+                    task.task_id
+                )
+                latest = max(
+                    revisions,
+                    key=lambda item: (item.revision, item.task_input_revision_id),
+                )
+                if (
+                    task.bound_tool_ref != snapshot.bound_tool_ref
+                    or latest.task_input_revision_id
+                    != snapshot.latest_revision.task_input_revision_id
+                ):
+                    raise self._conflict(submission)
+                unit_of_work.llm_calls.add(call)
+                unit_of_work.commit()
+        except PersistenceError as error:
+            try:
+                with self._unit_of_work_factory() as unit_of_work:
+                    recovered = unit_of_work.llm_calls.get(call.llm_call_id)
+            except PersistenceError:
+                recovered = None
+            if recovered == call:
+                return
             raise from_persistence_error(
                 error,
                 conversation_id=submission.conversation_id,
@@ -869,17 +1436,14 @@ class ChatOrchestrationService:
         current_ref: ToolRef,
         outcome: ToolInputExtractionOutcome,
         normalization: ToolNormalization,
-        started_at: datetime,
+        running_call: LLMCall,
         completed_at: datetime,
+        context_snapshot: Mapping[str, object] | None,
     ) -> ChatOrchestrationProjection:
         metadata = outcome.request_metadata
-        call = LLMCall(
-            llm_call_id=self._id_factory("llm"),
-            task_id=submission.task.task_id,
-            conversation_id=submission.conversation_id,
-            request_id=submission.user_message.request_id,
-            purpose=TOOL_INPUT_EXTRACTION,
-            input_result_id=None,
+        assert running_call.started_at is not None
+        call = replace(
+            running_call,
             provider=metadata.provider,
             model_name=metadata.model_name,
             prompt_template_id=metadata.prompt_template_id,
@@ -894,21 +1458,29 @@ class ChatOrchestrationService:
             usage=outcome.usage,
             provider_request_id=outcome.provider_request_id,
             status=LLM_SUCCEEDED,
-            created_at=started_at,
-            started_at=started_at,
             completed_at=completed_at,
-            duration_ms=_duration_ms(started_at, completed_at),
+            duration_ms=_duration_ms(running_call.started_at, completed_at),
             error_code=None,
             safe_error_message=None,
-            catalog_snapshot_refs=None,
-            catalog_hash=None,
-            tool_context_ref=current_ref,
+            context_snapshot=context_snapshot,
         )
         normalized_input = self._plain_json(normalization.normalized_input)
         delta = self._plain_json(outcome.candidate_input_delta)
         assert isinstance(normalized_input, dict)
         assert isinstance(delta, dict)
-        if isinstance(normalization, NeedsInputNormalization):
+        validation_errors: list[dict[str, object]] = []
+        if isinstance(normalization, InvalidNormalization):
+            status = TASK_NEEDS_INPUT
+            missing_fields = list(snapshot.latest_revision.missing_fields)
+            ambiguous_fields = [
+                self._plain_json(item)
+                for item in snapshot.latest_revision.ambiguous_fields
+            ]
+            validation_errors = [
+                self._plain_json(error)
+                for error in normalization.validation_errors
+            ]
+        elif isinstance(normalization, NeedsInputNormalization):
             status = TASK_NEEDS_INPUT
             missing_fields = list(normalization.missing_fields)
             prior_ambiguities = {
@@ -998,7 +1570,7 @@ class ChatOrchestrationService:
                     normalized_input=normalized_input,
                     missing_fields=missing_fields,
                     ambiguous_fields=ambiguous_fields,
-                    validation_errors=[],
+                    validation_errors=validation_errors,
                     created_at=completed_at,
                     candidate_tool_refs=(),
                 )
@@ -1010,7 +1582,11 @@ class ChatOrchestrationService:
                     error_code=None,
                     safe_error_message=None,
                 )
-                unit_of_work.llm_calls.add(call)
+                if unit_of_work.llm_calls.update(
+                    call,
+                    expected_status=LLM_RUNNING,
+                ) is None:
+                    raise self._conflict(submission)
                 unit_of_work.task_input_revisions.add(revision)
                 if assistant is not None:
                     unit_of_work.messages.add(assistant)
@@ -1109,10 +1685,18 @@ class ChatOrchestrationService:
                     user_message,
                     task,
                 )
-                calls = unit_of_work.llm_calls.list_for_task(
-                    task.task_id,
-                    request_id=user_message.request_id,
-                )
+                calls = [
+                    call
+                    for call in unit_of_work.llm_calls.list_for_task(
+                        task.task_id,
+                        request_id=user_message.request_id,
+                    )
+                    if not (
+                        call.status == LLM_FAILED
+                        and call.error_code
+                        == "PROCESS_INTERRUPTED_BEFORE_START"
+                    )
+                ]
                 revisions = [
                     item
                     for item in unit_of_work.task_input_revisions.list_for_task(
@@ -1202,9 +1786,18 @@ class ChatOrchestrationService:
                     )
                     if call.purpose == expected_purpose
                 ]
-                if len(calls) > 1:
+                current_calls = [
+                    call
+                    for call in calls
+                    if not (
+                        call.status == LLM_FAILED
+                        and call.error_code
+                        == "PROCESS_INTERRUPTED_BEFORE_START"
+                    )
+                ]
+                if len(current_calls) > 1:
                     raise self._conflict(submission)
-                call = calls[0] if calls else None
+                call = current_calls[0] if current_calls else None
                 assistant = (
                     None
                     if call is None
@@ -1456,10 +2049,7 @@ class ChatOrchestrationService:
             return False
         expected_summary = self._candidate_summary(result.proposal_set)
         revision = projection.revision
-        if (
-            self._plain_json(call.structured_output_summary) != expected_summary
-            or revision.validation_errors != []
-        ):
+        if self._plain_json(call.structured_output_summary) != expected_summary:
             return False
         candidate_refs = tuple(
             {
@@ -1500,6 +2090,18 @@ class ChatOrchestrationService:
             or self._plain_json(revision.normalized_input)
             != self._plain_json(result.normalization.normalized_input)
         ):
+            return False
+        if isinstance(result.normalization, InvalidNormalization):
+            return (
+                projection.task.current_status == TASK_FAILED
+                and projection.task.error_code == "VALIDATION_FAILED"
+                and self._plain_json(revision.validation_errors)
+                == self._plain_json(result.normalization.validation_errors)
+                and revision.missing_fields == []
+                and revision.ambiguous_fields == []
+                and projection.assistant_message is None
+            )
+        if revision.validation_errors != []:
             return False
         if isinstance(result.normalization, ReadyNormalization):
             try:
@@ -1569,12 +2171,19 @@ class ChatOrchestrationService:
         self,
         result: object,
         catalog: RoutingCatalogSnapshot,
+        *,
+        context_result: ContextBuildResult,
+        actor_context: ActorContext,
+        current_text: str,
+        conversation_id: str,
     ) -> _ResolvedToolRoute:
         if not isinstance(result, ToolCandidateSet):
             raise ChatOrchestrationProtocolError(
                 "Router returned a non-generic Tool result."
             )
-        valid: list[tuple[object, ToolCandidateProposal]] = []
+        valid: list[
+            tuple[object, ToolCandidateProposal, Mapping[str, object]]
+        ] = []
         for proposal in result.candidates:
             try:
                 definition = self._tool_registry.resolve(
@@ -1586,19 +2195,26 @@ class ChatOrchestrationService:
                     "Router returned a Tool candidate outside its routing snapshot.",
                     error_code="LLM_SCHEMA_MISMATCH",
                 ) from None
-            valid.append((definition, proposal))
+            candidate_input = self._candidate_input_with_history(
+                proposal,
+                context_result=context_result,
+                actor_context=actor_context,
+                current_text=current_text,
+                conversation_id=conversation_id,
+            )
+            valid.append((definition, proposal, candidate_input))
         if not valid:
             raise ChatOrchestrationProtocolError(
                 "Router returned no resolvable Tool candidate.",
                 error_code="LLM_SCHEMA_MISMATCH",
             )
-        refs = tuple(definition.ref for definition, _ in valid)
+        refs = tuple(definition.ref for definition, _, _ in valid)
         if len(valid) > 1:
             return _ResolvedToolRoute(result, refs, None, None, None)
-        definition, proposal = valid[0]
+        definition, proposal, candidate_input = valid[0]
         try:
             normalization = definition.normalize(
-                proposal.candidate_input,
+                candidate_input,
                 prior_normalized_input=None,
             )
         except Exception:
@@ -1606,7 +2222,10 @@ class ChatOrchestrationService:
                 "Tool candidate normalization failed.",
                 error_code="LLM_SCHEMA_MISMATCH",
             ) from None
-        if not isinstance(normalization, (ReadyNormalization, NeedsInputNormalization)):
+        if not isinstance(
+            normalization,
+            (ReadyNormalization, NeedsInputNormalization, InvalidNormalization),
+        ):
             raise ChatOrchestrationProtocolError(
                 "Tool normalizer returned an invalid result.",
                 error_code="LLM_SCHEMA_MISMATCH",
@@ -1635,9 +2254,100 @@ class ChatOrchestrationService:
             result,
             refs,
             authorization.authorized_ref,
-            proposal.candidate_input,
+            candidate_input,
             controlled_normalization,
         )
+
+    def _candidate_input_with_history(
+        self,
+        proposal: ToolCandidateProposal,
+        *,
+        context_result: ContextBuildResult,
+        actor_context: ActorContext,
+        current_text: str,
+        conversation_id: str,
+    ) -> Mapping[str, object]:
+        delta = self._plain_json(proposal.candidate_input_delta)
+        if not isinstance(delta, dict):
+            raise ChatOrchestrationProtocolError(
+                "Tool candidate delta is invalid.",
+                error_code="LLM_SCHEMA_MISMATCH",
+            )
+        history_reference = proposal.history_reference
+        if history_reference is None:
+            return delta
+        if not isinstance(history_reference, HistoryReference):
+            raise ChatOrchestrationProtocolError(
+                "Tool history reference is invalid.",
+                error_code="LLM_SCHEMA_MISMATCH",
+            )
+        normalized_reference = self._normalized_reference_text(
+            history_reference.reference_text
+        )
+        normalized_current = self._normalized_reference_text(current_text)
+        if (
+            not normalized_reference
+            or normalized_reference not in normalized_current
+        ):
+            raise ChatOrchestrationProtocolError(
+                "Tool history reference text is not present in the current message.",
+                error_code="LLM_SCHEMA_MISMATCH",
+            )
+        resolution = context_result.reference_resolutions.get(
+            history_reference.context_ref
+        )
+        if (
+            resolution is None
+            or resolution.conversation_id != conversation_id
+            or resolution.tool_ref.tool_id != proposal.tool_id
+        ):
+            raise ChatOrchestrationProtocolError(
+                "Tool history reference is outside the current Context Window.",
+                error_code="LLM_SCHEMA_MISMATCH",
+            )
+        try:
+            with self._unit_of_work_factory() as unit_of_work:
+                task = unit_of_work.tasks.get_owned(
+                    resolution.task_id,
+                    actor_context.actor_id,
+                )
+                revision = unit_of_work.task_input_revisions.get(
+                    resolution.task_input_revision_id
+                )
+        except PersistenceError as error:
+            raise from_persistence_error(
+                error,
+                conversation_id=conversation_id,
+            ) from None
+        if (
+            task is None
+            or revision is None
+            or task.conversation_id != conversation_id
+            or revision.task_id != task.task_id
+            or task.bound_tool_ref != resolution.tool_ref
+            or revision.normalized_input is None
+            or not self._standard_json_equivalent(
+                revision.normalized_input,
+                resolution.normalized_input,
+            )
+        ):
+            raise ChatOrchestrationProtocolError(
+                "Tool history reference no longer resolves to the selected facts.",
+                error_code="LLM_SCHEMA_MISMATCH",
+            )
+        base = self._plain_json(revision.normalized_input)
+        if not isinstance(base, dict):
+            raise ChatOrchestrationProtocolError(
+                "Tool history reference input is invalid.",
+                error_code="LLM_SCHEMA_MISMATCH",
+            )
+        base.update(delta)
+        return base
+
+    @staticmethod
+    def _normalized_reference_text(value: str) -> str:
+        normalized = unicodedata.normalize("NFKC", value)
+        return re.sub(r"\s+", " ", normalized).strip()
 
     @staticmethod
     def _controlled_normalization(
@@ -1650,12 +2360,17 @@ class ChatOrchestrationService:
                     normalized_input=normalization.normalized_input,
                     requested_outputs=normalization.requested_outputs,
                 )
-            else:
+            elif isinstance(normalization, NeedsInputNormalization):
                 controlled = NeedsInputNormalization(
                     normalized_input=normalization.normalized_input,
                     missing_fields=normalization.missing_fields,
                     ambiguous_fields=normalization.ambiguous_fields,
                     follow_up_suggestion=normalization.follow_up_suggestion,
+                )
+            else:
+                controlled = InvalidNormalization(
+                    normalized_input=normalization.normalized_input,
+                    validation_errors=normalization.validation_errors,
                 )
         except (
             AttributeError,
@@ -1671,6 +2386,8 @@ class ChatOrchestrationService:
         normalized = controlled.normalized_input
         if not isinstance(normalized, Mapping) or not normalized:
             return None
+        if isinstance(controlled, InvalidNormalization):
+            return controlled
         has_normalized_outputs = "requested_outputs" in normalized
         normalized_outputs = normalized.get("requested_outputs")
         input_schema = getattr(definition, "input_schema", None)
@@ -1766,7 +2483,19 @@ class ChatOrchestrationService:
             "candidates": [
                 {
                     "tool_id": candidate.tool_id,
-                    "candidate_input": cls._plain_json(candidate.candidate_input),
+                    "candidate_input_delta": cls._plain_json(
+                        candidate.candidate_input_delta
+                    ),
+                    **(
+                        {}
+                        if candidate.history_reference is None
+                        else {
+                            "history_reference": {
+                                "context_ref": candidate.history_reference.context_ref,
+                                "reference_text": candidate.history_reference.reference_text,
+                            }
+                        }
+                    ),
                 }
                 for candidate in result.candidates
             ],
@@ -1790,6 +2519,8 @@ class ChatOrchestrationService:
         submission: PreparedSubmission,
         metadata: ChatOrchestrationRequestMetadata,
         orchestration_input: ChatOrchestrationInput,
+        *,
+        context_snapshot: Mapping[str, object],
     ) -> LLMCall:
         timestamp = _validated_utc_now(self._clock)
         call = LLMCall(
@@ -1819,19 +2550,49 @@ class ChatOrchestrationService:
                 entry.ref for entry in orchestration_input.routing_catalog.entries
             ),
             catalog_hash=self._catalog_hash(orchestration_input.routing_catalog),
+            context_snapshot=context_snapshot,
         )
         try:
             with self._unit_of_work_factory() as unit_of_work:
-                self._require_submission_sources(
+                task = self._require_submission_sources(
                     unit_of_work,
                     actor_context,
                     submission,
-                    expected_task_status=(
-                        TASK_PENDING
-                        if submission.submission_mode == NEW_TASK
-                        else TASK_NEEDS_INPUT
-                    ),
+                    expected_task_status=None,
                 )
+                existing_calls = [
+                    existing
+                    for existing in unit_of_work.llm_calls.list_for_task(
+                        submission.task.task_id,
+                        request_id=submission.user_message.request_id,
+                    )
+                    if existing.purpose == CHAT_ORCHESTRATION
+                    and not (
+                        existing.status == LLM_FAILED
+                        and existing.error_code
+                        == "PROCESS_INTERRUPTED_BEFORE_START"
+                    )
+                ]
+                if len(existing_calls) > 1:
+                    raise self._conflict(submission)
+                if existing_calls:
+                    existing = existing_calls[0]
+                    if not self._call_matches_request(
+                        existing,
+                        submission=submission,
+                        metadata=metadata,
+                        orchestration_input=orchestration_input,
+                        context_snapshot=context_snapshot,
+                    ):
+                        raise self._conflict(submission)
+                    return existing
+                expected_task_status = (
+                    TASK_PENDING
+                    if submission.submission_mode == NEW_TASK
+                    else TASK_NEEDS_INPUT
+                )
+                if task.current_status != expected_task_status:
+                    raise self._conflict(submission)
                 unit_of_work.llm_calls.add(call)
                 unit_of_work.commit()
         except PersistenceError as error:
@@ -1873,14 +2634,30 @@ class ChatOrchestrationService:
                     unit_of_work,
                     actor_context,
                     submission,
-                    expected_task_status=(
-                        TASK_PENDING
-                        if submission.submission_mode == NEW_TASK
-                        else TASK_NEEDS_INPUT
-                    ),
+                    expected_task_status=None,
                 )
                 persisted_call = unit_of_work.llm_calls.get(call.llm_call_id)
                 if persisted_call != call:
+                    if (
+                        persisted_call is not None
+                        and persisted_call.task_id == call.task_id
+                        and persisted_call.conversation_id == call.conversation_id
+                        and persisted_call.request_id == call.request_id
+                        and persisted_call.purpose == call.purpose
+                        and persisted_call.status
+                        in {LLM_RUNNING, LLM_SUCCEEDED, LLM_FAILED}
+                    ):
+                        return _StartedChatCall(
+                            call=persisted_call,
+                            invoke_adapter=False,
+                        )
+                    raise self._conflict(submission)
+                expected_task_status = (
+                    TASK_PENDING
+                    if submission.submission_mode == NEW_TASK
+                    else TASK_NEEDS_INPUT
+                )
+                if task.current_status != expected_task_status:
                     raise self._conflict(submission)
                 running_task = replace(
                     task,
@@ -1896,11 +2673,7 @@ class ChatOrchestrationService:
                     expected_status=LLM_PENDING,
                 ) is None or unit_of_work.tasks.update(
                     running_task,
-                    expected_status=(
-                        TASK_PENDING
-                        if submission.submission_mode == NEW_TASK
-                        else TASK_NEEDS_INPUT
-                    ),
+                    expected_status=expected_task_status,
                 ) is None:
                     raise self._conflict(submission)
                 unit_of_work.commit()
@@ -1932,6 +2705,33 @@ class ChatOrchestrationService:
         return _StartedChatCall(
             call=running_call,
             invoke_adapter=True,
+        )
+
+    def _call_matches_request(
+        self,
+        call: LLMCall,
+        *,
+        submission: PreparedSubmission,
+        metadata: ChatOrchestrationRequestMetadata,
+        orchestration_input: ChatOrchestrationInput,
+        context_snapshot: Mapping[str, object],
+    ) -> bool:
+        return (
+            call.task_id == submission.task.task_id
+            and call.conversation_id == submission.conversation_id
+            and call.request_id == submission.user_message.request_id
+            and call.purpose == CHAT_ORCHESTRATION
+            and call.provider == metadata.provider
+            and call.model_name == metadata.model_name
+            and call.prompt_template_id == metadata.prompt_template_id
+            and call.prompt_template_version == metadata.prompt_template_version
+            and call.prompt_digest == metadata.prompt_digest
+            and dict(call.generation_parameters)
+            == dict(metadata.generation_parameters)
+            and call.catalog_hash
+            == self._catalog_hash(orchestration_input.routing_catalog)
+            and self._plain_json(call.context_snapshot)
+            == self._plain_json(context_snapshot)
         )
 
     def _recover_call_after_uncertain_commit(
@@ -1982,6 +2782,7 @@ class ChatOrchestrationService:
                 "catalog_snapshot_refs",
                 "catalog_hash",
                 "tool_context_ref",
+                "context_snapshot",
                 "created_at",
             )
         )
@@ -2043,6 +2844,7 @@ class ChatOrchestrationService:
                 raise self._conflict(submission)
             summary = self._candidate_summary(result.proposal_set)
             candidate_refs = result.candidate_refs if result.selected_ref is None else ()
+            validation_errors: list[dict[str, object]] = []
             if result.selected_ref is None:
                 raw_input = {
                     "candidates": summary["candidates"],
@@ -2060,7 +2862,13 @@ class ChatOrchestrationService:
                 )
                 missing_fields = []
                 ambiguous_fields = []
-                if isinstance(result.normalization, NeedsInputNormalization):
+                if isinstance(result.normalization, InvalidNormalization):
+                    validation_errors = [
+                        self._plain_json(error)
+                        for error in result.normalization.validation_errors
+                    ]
+                    status = TASK_FAILED
+                elif isinstance(result.normalization, NeedsInputNormalization):
                     missing_fields = list(result.normalization.missing_fields)
                     ambiguous_fields = [
                         {
@@ -2098,9 +2906,13 @@ class ChatOrchestrationService:
                 selected_tool_run_id=None,
                 selected_result_id=None,
                 updated_at=completed_at,
-                completed_at=None,
-                error_code=None,
-                safe_error_message=None,
+                completed_at=(completed_at if status == TASK_FAILED else None),
+                error_code=(
+                    "VALIDATION_FAILED" if status == TASK_FAILED else None
+                ),
+                safe_error_message=(
+                    VALIDATION_ERROR_MESSAGE if status == TASK_FAILED else None
+                ),
             )
             prior_revisions = unit_of_work.task_input_revisions.list_for_task(
                 task.task_id
@@ -2125,7 +2937,7 @@ class ChatOrchestrationService:
                 normalized_input=normalized_input,  # type: ignore[arg-type]
                 missing_fields=missing_fields,
                 ambiguous_fields=ambiguous_fields,
-                validation_errors=[],
+                validation_errors=validation_errors,
                 created_at=completed_at,
                 candidate_tool_refs=candidate_refs,
             )
@@ -2487,6 +3299,16 @@ class ChatOrchestrationService:
             or assistant_message.llm_call_id != call.llm_call_id
         ):
             raise ChatOrchestrationService._conflict(submission)
+        if assistant_message is not None and (
+            call.purpose == TOOL_INPUT_EXTRACTION
+            or (
+                call.purpose == CHAT_ORCHESTRATION
+                and isinstance(call.structured_output_summary, Mapping)
+                and call.structured_output_summary.get("route")
+                == "TOOL_CANDIDATES"
+            )
+        ) and assistant_message.content_text != FOLLOW_UP_TEXT:
+            raise ChatOrchestrationService._conflict(submission)
         for revision in revisions:
             expected_source_messages = [
                 message.message_id
@@ -2529,6 +3351,17 @@ class ChatOrchestrationService:
             reject()
 
         if call.status == LLM_FAILED:
+            if (
+                call.purpose == TOOL_INPUT_EXTRACTION
+                and call.error_code == "CONTEXT_BUDGET_EXCEEDED"
+                and task.current_status == TASK_NEEDS_INPUT
+                and task.error_code is None
+                and task.safe_error_message is None
+                and call.structured_output_summary is None
+                and assistant_message is None
+                and not revisions
+            ):
+                return
             detailed_public_code = {
                 "LLM_TIMEOUT": "UPSTREAM_TIMEOUT",
                 "LLM_AUTHENTICATION_FAILED": "CHAT_ORCHESTRATION_FAILED",
@@ -2586,7 +3419,11 @@ class ChatOrchestrationService:
                     reject()
                 return
             if task.current_status == TASK_NEEDS_INPUT:
-                if assistant_message is None or revision.is_complete:
+                if (
+                    assistant_message is None
+                    or assistant_message.content_text != FOLLOW_UP_TEXT
+                    or revision.is_complete
+                ):
                     reject()
                 return
             reject()
@@ -2603,6 +3440,22 @@ class ChatOrchestrationService:
                 or task.safe_error_message is not None
             ):
                 reject()
+            return
+
+        if (
+            route == "TOOL_CANDIDATES"
+            and task.task_type == TOOL_EXECUTION
+            and task.current_status == TASK_FAILED
+            and task.error_code == "VALIDATION_FAILED"
+            and task.safe_error_message == VALIDATION_ERROR_MESSAGE
+            and task.bound_tool_ref is not None
+            and len(revisions) == 1
+            and revisions[0].validation_errors
+            and not revisions[0].missing_fields
+            and not revisions[0].ambiguous_fields
+            and not revisions[0].candidate_tool_refs
+            and assistant_message is None
+        ):
             return
 
         if route != "TOOL_CANDIDATES" or (
@@ -2623,7 +3476,10 @@ class ChatOrchestrationService:
                 reject()
             return
         if task.current_status == TASK_NEEDS_INPUT:
-            if assistant_message is None:
+            if (
+                assistant_message is None
+                or assistant_message.content_text != FOLLOW_UP_TEXT
+            ):
                 reject()
             if task.bound_tool_ref is None and len(revision.candidate_tool_refs) < 2:
                 reject()
@@ -2666,6 +3522,95 @@ class ChatOrchestrationService:
         except Exception:
             # Observability is best-effort and must not change business facts.
             return
+
+    @staticmethod
+    def _context_budget(
+        adapter: object,
+        *,
+        purpose: str,
+    ) -> ContextBudget:
+        configured = getattr(adapter, "context_budget", None)
+        if isinstance(configured, ContextBudget):
+            return configured
+        if purpose == CHAT_ORCHESTRATION:
+            prompt_limit, history_limit, max_output = 16_384, 8_192, 1_024
+        else:
+            prompt_limit, history_limit, max_output = 8_192, 4_096, 1_024
+        safety_margin = 1_024
+        return ContextBudget(
+            prompt_limit_tokens=prompt_limit,
+            history_token_budget=history_limit,
+            safety_margin_tokens=safety_margin,
+            context_window_tokens=prompt_limit + max_output + safety_margin,
+            max_output_tokens=max_output,
+        )
+
+    def _chat_prompt_tokens(self, value: ChatOrchestrationInput) -> int:
+        counter = getattr(self._orchestration_port, "count_prompt_tokens", None)
+        if callable(counter):
+            count = counter(value)
+        else:
+            count = self._token_counter.count_text(
+                json.dumps(
+                    {
+                        "content_text": value.content_text,
+                        "catalog": self._catalog_hash(value.routing_catalog),
+                        "context": [
+                            [turn.user_content, turn.assistant_content]
+                            for turn in value.context_window.recent_turns
+                        ],
+                        "agent_state": self._plain_json(
+                            value.context_window.agent_state
+                        ),
+                    },
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            )
+        if type(count) is not int or count < 0:
+            raise ChatOrchestrationProtocolError(
+                "Chat prompt token counter returned an invalid value."
+            )
+        return count
+
+    def _tool_prompt_tokens(
+        self,
+        extractor: object,
+        value: ToolInputExtractionInput,
+    ) -> int:
+        counter = getattr(extractor, "count_prompt_tokens", None)
+        if callable(counter):
+            count = counter(value)
+        else:
+            count = self._token_counter.count_text(
+                json.dumps(
+                    {
+                        "content_text": value.content_text,
+                        "tool_id": value.tool_context_ref.tool_id,
+                        "schema": self._plain_json(value.candidate_input_schema),
+                        "missing_fields": value.missing_fields,
+                        "ambiguous_fields": value.ambiguous_fields,
+                        "context": [
+                            [turn.user_content, turn.assistant_content]
+                            for turn in value.context_window.recent_turns
+                        ],
+                        "agent_state": self._plain_json(
+                            value.context_window.agent_state
+                        ),
+                    },
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            )
+        if type(count) is not int or count < 0:
+            raise ToolInputExtractionProtocolError(
+                "Tool prompt token counter returned an invalid value."
+            )
+        return count
 
     def _required_adapter_text(self, field_name: str) -> str:
         value = getattr(self._orchestration_port, field_name, None)

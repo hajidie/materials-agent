@@ -163,6 +163,10 @@ class LLMCallRow(Base):
             "usage IS NULL OR jsonb_typeof(usage) = 'object'",
             name="ck_llm_call_usage_object",
         ),
+        CheckConstraint(
+            "context_snapshot IS NULL OR jsonb_typeof(context_snapshot) = 'object'",
+            name="ck_llm_call_context_snapshot_object",
+        ),
         Index(
             "ix_llm_call_task_request_created",
             "task_id",
@@ -176,7 +180,7 @@ class LLMCallRow(Base):
         ForeignKey(
             "task.task_id",
             name="fk_llm_call_task",
-            ondelete="RESTRICT",
+            ondelete="CASCADE",
         ),
         nullable=False,
     )
@@ -184,7 +188,7 @@ class LLMCallRow(Base):
         ForeignKey(
             "conversation.conversation_id",
             name="fk_llm_call_conversation",
-            ondelete="RESTRICT",
+            ondelete="CASCADE",
         ),
         nullable=False,
     )
@@ -194,7 +198,7 @@ class LLMCallRow(Base):
         ForeignKey(
             "tool_result.result_id",
             name="fk_llm_call_input_result",
-            ondelete="RESTRICT",
+            ondelete="SET NULL",
             use_alter=True,
         ),
         nullable=True,
@@ -228,6 +232,10 @@ class LLMCallRow(Base):
         nullable=True,
     )
     usage: Mapped[dict[str, object] | None] = mapped_column(
+        JSONB(none_as_null=True),
+        nullable=True,
+    )
+    context_snapshot: Mapped[dict[str, object] | None] = mapped_column(
         JSONB(none_as_null=True),
         nullable=True,
     )
@@ -297,6 +305,11 @@ def _from_row(row: LLMCallRow) -> LLMCall:
             else None
         ),
         usage=dict(row.usage) if row.usage is not None else None,
+        context_snapshot=(
+            dict(row.context_snapshot)
+            if row.context_snapshot is not None
+            else None
+        ),
         provider_request_id=row.provider_request_id,
         status=row.status,
         created_at=row.created_at,
@@ -327,11 +340,15 @@ def _immutable_matches(row: LLMCallRow, call: LLMCall) -> bool:
             "created_at",
         )
     )
-    return scalar_fields_match and row.generation_parameters == _jsonb_container(
-        call.generation_parameters
-    ) and row.catalog_snapshot_refs == _jsonb_container(
-        call.catalog_snapshot_refs
-    ) and row.tool_context_ref == _jsonb_container(call.tool_context_ref)
+    return (
+        scalar_fields_match
+        and row.generation_parameters
+        == _jsonb_container(call.generation_parameters)
+        and row.catalog_snapshot_refs
+        == _jsonb_container(call.catalog_snapshot_refs)
+        and row.tool_context_ref == _jsonb_container(call.tool_context_ref)
+        and row.context_snapshot == _jsonb_container(call.context_snapshot)
+    )
 
 
 ALLOWED_TRANSITIONS: Final = {
@@ -380,6 +397,7 @@ class SQLAlchemyLLMCallRepository:
                         call.structured_output_summary
                     ),
                     usage=_jsonb_container(call.usage),
+                    context_snapshot=_jsonb_container(call.context_snapshot),
                     provider_request_id=call.provider_request_id,
                     status=call.status,
                     created_at=call.created_at,

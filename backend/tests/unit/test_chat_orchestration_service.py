@@ -88,6 +88,26 @@ class _MessageRepository:
             key=lambda message: (message.created_at, message.message_id),
         )
 
+    def list_for_conversation_before(
+        self,
+        conversation_id: str,
+        actor_id: str,
+        *,
+        before_created_at: datetime,
+        before_message_id: str,
+    ) -> list[Message]:
+        return sorted(
+            (
+                message
+                for message in self._store.messages.values()
+                if message.conversation_id == conversation_id
+                and message.actor_id == actor_id
+                and (message.created_at, message.message_id)
+                < (before_created_at, before_message_id)
+            ),
+            key=lambda message: (message.created_at, message.message_id),
+        )
+
     def add(self, message: Message) -> None:
         if message.message_id in self._store.messages or (
             message.llm_call_id is not None
@@ -201,6 +221,11 @@ class _LLMCallRepository:
         return call
 
 
+class _ToolRunRepository:
+    def list_for_task(self, _task_id: str) -> list[object]:
+        return []
+
+
 class _IdempotencyRepository:
     def __init__(self, store: _Store) -> None:
         self._store = store
@@ -231,6 +256,7 @@ class _UnitOfWork:
         self.tasks = _TaskRepository(factory.store)
         self.task_input_revisions = _RevisionRepository(factory.store)
         self.llm_calls = _LLMCallRepository(factory.store)
+        self.tool_runs = _ToolRunRepository()
         self.idempotency_records = _IdempotencyRepository(factory.store)
         self._snapshot: tuple[dict[str, object], ...] | None = None
         self._committed = False
@@ -418,7 +444,7 @@ def _service(
             "route": "TOOL_CANDIDATES",
             "candidates": [{
                 "tool_id": payload["tool_id"],
-                "candidate_input": candidate_input,
+                "candidate_input_delta": candidate_input,
             }],
         }
 
@@ -428,6 +454,270 @@ def _service(
         clock=_SequenceClock(),
         id_factory=_id_factory,
     )
+
+
+def test_replay_resumes_same_task_and_pending_call_after_pre_start_commit_failure() -> None:
+    actor, submission, store = _submission()
+    factory = _UnitOfWorkFactory(store, fail_commit_calls={2})
+    provider_calls = 0
+
+    def responder(_value: object) -> dict[str, object]:
+        nonlocal provider_calls
+        provider_calls += 1
+        return {"route": "KNOWLEDGE_ANSWER", "answer_text": "恢复后的答案。"}
+
+    service = _service(factory, responder)
+
+    with pytest.raises(Exception) as captured:
+        service.orchestrate_submission(actor, submission)
+
+    assert captured.value.code == "INTERNAL_ERROR"
+    assert provider_calls == 0
+    assert list(store.tasks) == [submission.task.task_id]
+    assert list(store.messages) == [submission.user_message.message_id]
+    assert len(store.llm_calls) == 1
+    pending_call = next(iter(store.llm_calls.values()))
+    assert pending_call.status == "PENDING"
+
+    factory.fail_commit_calls.clear()
+    recovered = service.resume_or_load_submission(actor, submission)
+
+    assert provider_calls == 1
+    assert recovered.task.task_id == submission.task.task_id
+    assert recovered.llm_call.llm_call_id == pending_call.llm_call_id
+    assert recovered.llm_call.status == "SUCCEEDED"
+    assert len(store.tasks) == 1
+    assert len([message for message in store.messages.values() if message.role == "USER"]) == 1
+
+
+def _history_reference_case(
+    content_text: str,
+) -> tuple[
+    ActorContext,
+    PreparedSubmission,
+    _Store,
+    _UnitOfWorkFactory,
+    object,
+    list[tuple[str, object]],
+]:
+    from materialsagent.application.tool_registry import ToolRegistry
+    from materialsagent.application.zta35g_tool import build_zta35g_tool_definition
+
+    actor, submission, store = _submission()
+    current_message = replace(
+        submission.user_message,
+        content_text=content_text,
+    )
+    submission = replace(submission, user_message=current_message)
+    store.messages[current_message.message_id] = current_message
+
+    original_definition = build_zta35g_tool_definition()
+    normalization_calls: list[tuple[str, object]] = []
+
+    def recorded_normalizer(candidate_input, prior_normalized_input=None):
+        normalization_calls.append(("normalize", candidate_input))
+        assert prior_normalized_input is None
+        return original_definition.normalize(
+            candidate_input,
+            prior_normalized_input=prior_normalized_input,
+        )
+
+    registry = ToolRegistry(
+        (replace(original_definition, normalizer=recorded_normalizer),)
+    )
+    definition = registry.resolve("zta35g_sem_virtual_lab")
+    prior_time = BASE_TIME - timedelta(minutes=1)
+    prior_task = Task(
+        task_id="task_prior",
+        conversation_id=submission.conversation_id,
+        actor_id=actor.actor_id,
+        task_type="TOOL_EXECUTION",
+        current_status="READY",
+        selected_tool_run_id=None,
+        selected_result_id=None,
+        created_at=prior_time,
+        started_at=prior_time,
+        updated_at=prior_time,
+        completed_at=None,
+        error_code=None,
+        safe_error_message=None,
+        tool_id=definition.tool_id,
+        bound_tool_version=definition.version,
+        bound_schema_hash=definition.schema_hash,
+    )
+    prior_message = Message.user(
+        message_id="msg_prior",
+        conversation_id=submission.conversation_id,
+        task_id=prior_task.task_id,
+        actor_id=actor.actor_id,
+        request_id="req_prior",
+        content_text="1000℃ 固溶2h，750℃时效4h。",
+        created_at=prior_time,
+    )
+    prior_input = {
+        "material": "ZTA35G",
+        "solution_temperature": {"value": 1000, "unit": "°C"},
+        "solution_time": {"value": 2, "unit": "h"},
+        "aging_temperature": {"value": 750, "unit": "°C"},
+        "aging_time": {"value": 4, "unit": "h"},
+        "requested_outputs": ["sem_image", "mechanical_properties"],
+    }
+    prior_revision = TaskInputRevision(
+        task_input_revision_id="revision_prior",
+        task_id=prior_task.task_id,
+        request_id=prior_message.request_id,
+        source_llm_call_id=None,
+        source_message_ids=[prior_message.message_id],
+        revision=1,
+        raw_input=prior_input,
+        normalized_input=prior_input,
+        missing_fields=[],
+        ambiguous_fields=[],
+        validation_errors=[],
+        created_at=prior_time,
+    )
+    store.tasks[prior_task.task_id] = prior_task
+    store.messages[prior_message.message_id] = prior_message
+    store.revisions[prior_revision.task_input_revision_id] = prior_revision
+    return (
+        actor,
+        submission,
+        store,
+        _UnitOfWorkFactory(store),
+        registry,
+        normalization_calls,
+    )
+
+
+def test_new_task_without_explicit_history_reference_does_not_inherit_parameters() -> None:
+    (
+        actor,
+        submission,
+        _store,
+        factory,
+        registry,
+        normalization_calls,
+    ) = _history_reference_case("帮我再做一个实验，固溶温度1050℃")
+    delta = {
+        "solution_temperature": {"value": 1050, "unit": "°C"},
+        "requested_outputs": ["sem_image", "mechanical_properties"],
+    }
+
+    service = _service_type()(
+        factory,
+        MockChatOrchestrationAdapter(
+            lambda command: {
+                "route": "TOOL_CANDIDATES",
+                "candidates": [
+                    {
+                        "tool_id": "zta35g_sem_virtual_lab",
+                        "candidate_input_delta": delta,
+                    }
+                ],
+            }
+        ),
+        tool_registry=registry,
+        clock=_SequenceClock(),
+        id_factory=_id_factory,
+    )
+
+    projection = service.orchestrate_submission(actor, submission)
+
+    assert projection.task.current_status == "NEEDS_INPUT"
+    assert projection.revision is not None
+    assert projection.revision.normalized_input == {
+        "material": None,
+        "solution_temperature": {"value": 1050, "unit": "°C"},
+        "solution_time": None,
+        "aging_temperature": None,
+        "aging_time": None,
+        "requested_outputs": ["sem_image", "mechanical_properties"],
+    }
+    assert set(projection.revision.missing_fields) == {
+        "material",
+        "solution_time",
+        "aging_temperature",
+        "aging_time",
+    }
+    assert normalization_calls == [("normalize", delta)]
+
+
+def test_new_task_explicit_history_reference_merges_then_validates_and_authorizes() -> None:
+    text = "沿用上一组条件，只把固溶温度改成1050℃"
+    (
+        actor,
+        submission,
+        _store,
+        factory,
+        registry,
+        normalization_calls,
+    ) = _history_reference_case(text)
+    authorization_calls: list[object] = []
+    original_authorize = registry.authorize
+
+    class _RecordingRegistry:
+        def routing_snapshot(self):
+            return registry.routing_snapshot()
+
+        def resolve(self, *args, **kwargs):
+            return registry.resolve(*args, **kwargs)
+
+        def authorize(self, **kwargs):
+            authorization_calls.append(kwargs["action"])
+            return original_authorize(**kwargs)
+
+    recording_registry = _RecordingRegistry()
+
+    def responder(command):
+        assert len(command.context_window.recent_turns) == 1
+        history_payload = json.loads(
+            command.context_window.recent_turns[0].assistant_content
+        )
+        context_ref = history_payload["task_fact"]["context_ref"]
+        return {
+            "route": "TOOL_CANDIDATES",
+            "candidates": [
+                {
+                    "tool_id": "zta35g_sem_virtual_lab",
+                    "candidate_input_delta": {
+                        "solution_temperature": {"value": 1050, "unit": "°C"}
+                    },
+                    "history_reference": {
+                        "context_ref": context_ref,
+                        "reference_text": "沿用上一组条件",
+                    },
+                }
+            ],
+        }
+
+    service = _service_type()(
+        factory,
+        MockChatOrchestrationAdapter(responder),
+        tool_registry=recording_registry,
+        clock=_SequenceClock(),
+        id_factory=_id_factory,
+    )
+
+    projection = service.orchestrate_submission(actor, submission)
+
+    assert projection.task.current_status == "READY"
+    assert projection.revision is not None
+    normalized = projection.revision.normalized_input
+    assert normalized == {
+        "material": "ZTA35G",
+        "solution_temperature": {"value": 1050, "unit": "°C"},
+        "solution_time": {"value": 2, "unit": "h"},
+        "aging_temperature": {"value": 750, "unit": "°C"},
+        "aging_time": {"value": 4, "unit": "h"},
+        "requested_outputs": ["sem_image", "mechanical_properties"],
+    }
+    assert normalization_calls == [("normalize", normalized)]
+    from materialsagent.domain.ports.tool_registry import ToolAction
+
+    assert authorization_calls == [ToolAction.NEW_BINDING]
+    definition = registry.resolve("zta35g_sem_virtual_lab")
+    assert projection.task.bound_tool_ref == definition.ref
+    assert definition.tool.validate_input(dict(normalized), seed=0)
 
 
 def test_knowledge_answer_calls_adapter_outside_uow_and_persists_once() -> None:
@@ -659,7 +949,7 @@ def test_ambiguity_is_formally_recomputed_without_becoming_missing_or_invalid() 
         ),
     ],
 )
-def test_complete_hard_invalid_candidate_is_agent_internal_without_binding(
+def test_complete_hard_invalid_candidate_is_persisted_as_validation_failure(
     payload_overrides: dict[str, object],
     expected_code: str,
 ) -> None:
@@ -672,15 +962,15 @@ def test_complete_hard_invalid_candidate_is_agent_internal_without_binding(
             lambda _: _valid_tool_payload(**payload_overrides),
         ).orchestrate_submission(actor, submission)
 
-    assert captured.value.status_code == 500
-    assert captured.value.code == "AGENT_INTERNAL_ERROR"
-    assert expected_code
-    assert store.revisions == {}
-    assert store.llm_calls["llm_unit"].status == "FAILED"
-    assert store.llm_calls["llm_unit"].error_code == "LLM_SCHEMA_MISMATCH"
+    assert captured.value.status_code == 422
+    assert captured.value.code == "VALIDATION_FAILED"
+    revision = next(iter(store.revisions.values()))
+    assert [error["code"] for error in revision.validation_errors] == [expected_code]
+    assert store.llm_calls["llm_unit"].status == "SUCCEEDED"
+    assert store.llm_calls["llm_unit"].error_code is None
     assert store.tasks[submission.task.task_id].current_status == "FAILED"
-    assert store.tasks[submission.task.task_id].error_code == "AGENT_INTERNAL_ERROR"
-    assert store.tasks[submission.task.task_id].tool_id is None
+    assert store.tasks[submission.task.task_id].error_code == "VALIDATION_FAILED"
+    assert store.tasks[submission.task.task_id].tool_id == "zta35g_sem_virtual_lab"
     assert len(store.messages) == 1
 
 
@@ -747,7 +1037,7 @@ def test_complete_valid_tool_candidate_stays_running_when_m7_chain_is_enabled() 
                 "route": "TOOL_CANDIDATES",
                 "candidates": [{
                     "tool_id": "zta35g_sem_virtual_lab",
-                    "candidate_input": {
+                    "candidate_input_delta": {
                         "material": "ZTA35G",
                         **_valid_tool_payload()["candidate_parameters"],
                         "requested_outputs": ["sem_image", "mechanical_properties"],
@@ -1328,7 +1618,7 @@ def test_tool_unavailable_with_assistant_is_rejected_on_repeat() -> None:
     _assert_repeat_conflict(service, actor, submission)
 
 
-def test_normalizer_failure_without_revision_is_rejected_on_repeat() -> None:
+def test_normalizer_validation_failure_with_revision_is_stable_on_repeat() -> None:
     actor, submission, store = _submission()
     factory = _UnitOfWorkFactory(store)
     parameters = dict(_valid_tool_payload()["candidate_parameters"])
@@ -1339,7 +1629,7 @@ def test_normalizer_failure_without_revision_is_rejected_on_repeat() -> None:
     )
     with pytest.raises(Exception):
         service.orchestrate_submission(actor, submission)
-    assert store.revisions == {}
+    assert len(store.revisions) == 1
 
     repeated = service.finalize_result(
         actor,
@@ -1347,7 +1637,7 @@ def test_normalizer_failure_without_revision_is_rejected_on_repeat() -> None:
         llm_call_id="llm_unit",
         result=KnowledgeAnswer("stale"),
     )
-    assert repeated.task.error_code == "AGENT_INTERNAL_ERROR"
+    assert repeated.task.error_code == "VALIDATION_FAILED"
 
 
 def test_two_revisions_for_same_call_are_rejected_on_repeat() -> None:
@@ -1559,7 +1849,7 @@ def test_unique_complete_candidate_resolves_normalizes_then_binds_ready() -> Non
             "candidates": [
                 {
                     "tool_id": "zta35g_sem_virtual_lab",
-                    "candidate_input": {"value": "zta35g_sem_virtual_lab"},
+                    "candidate_input_delta": {"value": "zta35g_sem_virtual_lab"},
                 }
             ],
         },
@@ -1603,7 +1893,7 @@ def test_unique_incomplete_candidate_binds_before_needs_input_persistence() -> N
             "candidates": [
                 {
                     "tool_id": "zta35g_sem_virtual_lab",
-                    "candidate_input": {"value": "zta35g_sem_virtual_lab"},
+                    "candidate_input_delta": {"value": "zta35g_sem_virtual_lab"},
                 }
             ],
         },
@@ -1630,8 +1920,8 @@ def test_multiple_valid_candidates_remain_unbound_without_normalization() -> Non
         lambda _: {
             "route": "TOOL_CANDIDATES",
             "candidates": [
-                {"tool_id": "tool_one", "candidate_input": {"value": "tool_one"}},
-                {"tool_id": "tool_two", "candidate_input": {"value": "tool_two"}},
+                {"tool_id": "tool_one", "candidate_input_delta": {"value": "tool_one"}},
+                {"tool_id": "tool_two", "candidate_input_delta": {"value": "tool_two"}},
             ],
         },
     ).orchestrate_submission(actor, submission)
@@ -1671,10 +1961,10 @@ def test_any_unresolvable_candidate_rejects_the_entire_candidate_set(
         lambda _: {
             "route": "TOOL_CANDIDATES",
             "candidates": [
-                {"tool_id": "tool_one", "candidate_input": {"value": "tool_one"}},
+                {"tool_id": "tool_one", "candidate_input_delta": {"value": "tool_one"}},
                 {
                     "tool_id": rejected_tool_id,
-                    "candidate_input": {"value": rejected_tool_id},
+                    "candidate_input_delta": {"value": rejected_tool_id},
                 },
             ],
         },
@@ -1773,7 +2063,7 @@ def test_tool_candidate_cannot_resolve_from_an_empty_routing_catalog() -> None:
             "candidates": [
                 {
                     "tool_id": "ml_training_test",
-                    "candidate_input": {
+                    "candidate_input_delta": {
                         "dataset": "dataset_fixture_1",
                         "task_type": "regression",
                         "split_ratio": 0.8,
@@ -1815,7 +2105,7 @@ def test_unknown_candidate_becomes_agent_internal_error_without_binding() -> Non
         lambda _: {
             "route": "TOOL_CANDIDATES",
             "candidates": [
-                {"tool_id": "unknown_tool", "candidate_input": {"value": "unknown_tool"}}
+                {"tool_id": "unknown_tool", "candidate_input_delta": {"value": "unknown_tool"}}
             ],
         },
     )
@@ -1854,7 +2144,7 @@ def test_new_binding_is_normalized_before_current_authorization_denial() -> None
             "candidates": [
                 {
                     "tool_id": "disabled_tool",
-                    "candidate_input": {"value": "disabled_tool"},
+                    "candidate_input_delta": {"value": "disabled_tool"},
                 }
             ],
         },
@@ -1888,7 +2178,7 @@ def test_inconsistent_ready_normalization_is_rejected_before_binding() -> None:
         lambda _: {
             "route": "TOOL_CANDIDATES",
             "candidates": [
-                {"tool_id": "tool_one", "candidate_input": {"value": "tool_one"}}
+                {"tool_id": "tool_one", "candidate_input_delta": {"value": "tool_one"}}
             ],
         },
     )
@@ -1923,7 +2213,7 @@ def test_ready_normalization_cannot_omit_schema_declared_outputs() -> None:
         lambda _: {
             "route": "TOOL_CANDIDATES",
             "candidates": [
-                {"tool_id": "tool_one", "candidate_input": {"value": "tool_one"}}
+                {"tool_id": "tool_one", "candidate_input_delta": {"value": "tool_one"}}
             ],
         },
     )
@@ -1979,7 +2269,7 @@ def test_forged_invalid_needs_input_is_rejected_before_binding(
         lambda _: {
             "route": "TOOL_CANDIDATES",
             "candidates": [
-                {"tool_id": "tool_one", "candidate_input": {"value": "tool_one"}}
+                {"tool_id": "tool_one", "candidate_input_delta": {"value": "tool_one"}}
             ],
         },
     )
@@ -2011,7 +2301,7 @@ def test_incomplete_forged_normalization_maps_to_controlled_schema_mismatch() ->
         lambda _: {
             "route": "TOOL_CANDIDATES",
             "candidates": [
-                {"tool_id": "tool_one", "candidate_input": {"value": "tool_one"}}
+                {"tool_id": "tool_one", "candidate_input_delta": {"value": "tool_one"}}
             ],
         },
     )
@@ -2131,7 +2421,7 @@ def test_uncertain_finalize_rejects_different_committed_tool_route(mutation: str
         lambda _: {
             "route": "TOOL_CANDIDATES",
             "candidates": [
-                {"tool_id": "tool_one", "candidate_input": {"value": "tool_one"}}
+                {"tool_id": "tool_one", "candidate_input_delta": {"value": "tool_one"}}
             ],
         },
     )
@@ -2166,7 +2456,7 @@ def test_uncertain_finalize_recovers_exact_committed_tool_route() -> None:
         lambda _: {
             "route": "TOOL_CANDIDATES",
             "candidates": [
-                {"tool_id": "tool_one", "candidate_input": {"value": "tool_one"}}
+                {"tool_id": "tool_one", "candidate_input_delta": {"value": "tool_one"}}
             ],
         },
     ).orchestrate_submission(actor, submission)
@@ -2208,7 +2498,7 @@ def test_uncertain_finalize_recovers_schema_less_fixed_output_tool_route() -> No
             "candidates": [
                 {
                     "tool_id": "ml_training_test",
-                    "candidate_input": candidate_input,
+                    "candidate_input_delta": candidate_input,
                 }
             ],
         },
@@ -2248,7 +2538,7 @@ def test_uncertain_bound_needs_input_rejects_extra_assistant_structure() -> None
         lambda _: {
             "route": "TOOL_CANDIDATES",
             "candidates": [
-                {"tool_id": "tool_one", "candidate_input": {"value": "tool_one"}}
+                {"tool_id": "tool_one", "candidate_input_delta": {"value": "tool_one"}}
             ],
         },
     )
@@ -2310,7 +2600,7 @@ def test_uncertain_recovery_compares_full_intended_resolved_route(difference: st
         lambda _: {
             "route": "TOOL_CANDIDATES",
             "candidates": [
-                {"tool_id": "tool_one", "candidate_input": {"value": "tool_one"}}
+                {"tool_id": "tool_one", "candidate_input_delta": {"value": "tool_one"}}
             ],
         },
     )
@@ -2388,8 +2678,8 @@ def test_uncertain_recovery_compares_ambiguous_refs_and_follow_up(difference: st
         lambda _: {
             "route": "TOOL_CANDIDATES",
             "candidates": [
-                {"tool_id": "tool_one", "candidate_input": {"value": "tool_one"}},
-                {"tool_id": "tool_two", "candidate_input": {"value": "tool_two"}},
+                {"tool_id": "tool_one", "candidate_input_delta": {"value": "tool_one"}},
+                {"tool_id": "tool_two", "candidate_input_delta": {"value": "tool_two"}},
             ],
         },
     )
@@ -2712,6 +3002,20 @@ class _RecordingToolInputExtractor:
         self.calls = 0
         self.commands = []
 
+    def request_metadata(self, _command):
+        from materialsagent.domain.ports.tool_input_extraction import (
+            ToolInputExtractionRequestMetadata,
+        )
+
+        return ToolInputExtractionRequestMetadata(
+            provider=self.provider,
+            model_name=self.model_name,
+            prompt_template_id="tool-input-extraction",
+            prompt_template_version="1",
+            prompt_digest="a" * 64,
+            generation_parameters={"temperature": 0, "max_tokens": 256},
+        )
+
     def extract(self, command):
         from materialsagent.domain.ports.tool_input_extraction import (
             ToolInputExtractionOutcome,
@@ -2896,14 +3200,15 @@ def test_supplement_rechecks_latest_revision_after_external_extraction() -> None
 
     assert captured.value.code == "RESOURCE_CONFLICT"
     assert competing_uows and competing_uows[0]._committed
-    assert len(factory.instances) == 3
+    assert len(factory.instances) >= 5
     assert factory.active == 0
     assert len(store.revisions) == 2
     assert all(
         revision.request_id != submission.user_message.request_id
         for revision in store.revisions.values()
     )
-    assert store.llm_calls == {}
+    assert len(store.llm_calls) == 1
+    assert store.llm_calls["llm_unit"].status == "RUNNING"
     assert store.tasks[submission.task.task_id].bound_tool_ref == bound_ref
     assert original_task.bound_tool_ref == bound_ref
 
@@ -3596,7 +3901,7 @@ def _uncertain_supplement_service(
     extractor = _RecordingToolInputExtractor(registry.events)
     factory = _UnitOfWorkFactory(
         store,
-        uncertain_commit_call=1,
+        uncertain_commit_call=3,
         uncertain_commit_mutator=mutate,
     )
     service = _service_type()(
@@ -3608,6 +3913,59 @@ def _uncertain_supplement_service(
         id_factory=_id_factory,
     )
     return service, extractor
+
+
+def test_supplement_replay_resumes_same_task_and_pending_extraction_call() -> None:
+    from materialsagent.domain.ports.tool_registry import NeedsInputNormalization
+
+    actor, submission, store, _prior, _bound_ref = _bound_supplement_case()
+    normalization = NeedsInputNormalization(
+        normalized_input={"value": None, "requested_outputs": ["result"]},
+        missing_fields=("value",),
+        ambiguous_fields=(),
+        follow_up_suggestion="Provide value.",
+    )
+    registry = _RoutingRegistrySpy({"tool_one": normalization})
+    definition = registry._definitions["tool_one"]
+    definition.normalize = lambda *_args, **_kwargs: normalization
+    definition.normalizer = definition.normalize
+    extractor = _RecordingToolInputExtractor(registry.events)
+    factory = _UnitOfWorkFactory(store, fail_commit_calls={2})
+    service = _service_type()(
+        factory,
+        _RouterMustNotRun(),
+        tool_input_extraction_port=extractor,
+        tool_registry=registry,
+        clock=_SequenceClock(),
+        id_factory=_id_factory,
+    )
+
+    with pytest.raises(Exception):
+        service.orchestrate_submission(actor, submission)
+
+    assert extractor.calls == 0
+    assert len(store.tasks) == 1
+    assert len([message for message in store.messages.values() if message.role == "USER"]) == 2
+    assert sum(
+        message.message_id == submission.user_message.message_id
+        for message in store.messages.values()
+    ) == 1
+    pending_call = store.llm_calls["llm_unit"]
+    assert pending_call.status == "PENDING"
+
+    factory.fail_commit_calls.clear()
+    projection = service.resume_or_load_submission(actor, submission)
+
+    assert extractor.calls == 1
+    assert projection.task.task_id == submission.task.task_id
+    assert projection.llm_call.llm_call_id == pending_call.llm_call_id
+    assert projection.llm_call.status == "SUCCEEDED"
+    assert len(store.tasks) == 1
+    assert len([message for message in store.messages.values() if message.role == "USER"]) == 2
+    assert sum(
+        message.message_id == submission.user_message.message_id
+        for message in store.messages.values()
+    ) == 1
 
 
 def test_uncertain_supplement_success_recovers_exact_committed_projection() -> None:
@@ -3808,7 +4166,7 @@ def test_ml_candidate_binds_once_and_fixed_tool_supplement_becomes_ready() -> No
             "candidates": [
                 {
                     "tool_id": "ml_training_test",
-                    "candidate_input": {
+                    "candidate_input_delta": {
                         "dataset": "dataset_fixture_1",
                         "task_type": "regression",
                         "split_ratio": None,

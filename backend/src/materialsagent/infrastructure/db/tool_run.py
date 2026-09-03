@@ -63,9 +63,9 @@ class ToolRunRow(Base):
     )
 
     tool_run_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    task_id: Mapped[str] = mapped_column(ForeignKey("task.task_id", name="fk_tool_run_task", ondelete="RESTRICT"), nullable=False)
+    task_id: Mapped[str] = mapped_column(ForeignKey("task.task_id", name="fk_tool_run_task", ondelete="CASCADE"), nullable=False)
     request_id: Mapped[str] = mapped_column(Text, nullable=False)
-    task_input_revision_id: Mapped[str] = mapped_column(ForeignKey("task_input_revision.task_input_revision_id", name="fk_tool_run_revision", ondelete="RESTRICT"), nullable=False)
+    task_input_revision_id: Mapped[str] = mapped_column(ForeignKey("task_input_revision.task_input_revision_id", name="fk_tool_run_revision", ondelete="CASCADE"), nullable=False)
     input_revision_no: Mapped[int] = mapped_column(Integer, nullable=False)
     attempt_no: Mapped[int] = mapped_column(Integer, nullable=False)
     tool_id: Mapped[str] = mapped_column(Text, nullable=False)

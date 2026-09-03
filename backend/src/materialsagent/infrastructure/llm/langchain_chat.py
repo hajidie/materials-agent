@@ -22,10 +22,12 @@ from materialsagent.domain.ports.chat_orchestration import (
     ChatOrchestrationProviderError,
     ChatOrchestrationRequestMetadata,
     ChatOrchestrationTimeoutError,
+    HistoryReference,
     KnowledgeAnswer,
     ToolCandidateProposal,
     ToolCandidateSet,
 )
+from materialsagent.domain.ports.conversation_context import ContextBudget
 from materialsagent.infrastructure.llm.common import (
     PromptRenderCache,
     SAFE_MESSAGES,
@@ -36,6 +38,7 @@ from materialsagent.infrastructure.llm.common import (
 )
 from materialsagent.infrastructure.llm.configuration import ConfiguredRole
 from materialsagent.infrastructure.llm.factory import create_chat_model
+from materialsagent.infrastructure.llm.token_counter import Cl100kTokenCounter
 from materialsagent.infrastructure.llm.prompts import (
     CHAT_ORCHESTRATION_PROMPT_ID,
     CHAT_ORCHESTRATION_PROMPT_VERSION,
@@ -43,10 +46,17 @@ from materialsagent.infrastructure.llm.prompts import (
 )
 
 
+class ProviderHistoryReference(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    context_ref: StrictStr
+    reference_text: StrictStr
+
+
 class ProviderToolCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     tool_id: StrictStr
-    candidate_input: dict[StrictStr, JsonValue]
+    candidate_input_delta: dict[StrictStr, JsonValue]
+    history_reference: ProviderHistoryReference | None = None
 
 
 class ProviderChatResponse(BaseModel):
@@ -107,7 +117,18 @@ def _domain_result(
         return KnowledgeAnswer(answer_text=value.answer_text or "")
     return ToolCandidateSet(
         tuple(
-            ToolCandidateProposal(candidate.tool_id, candidate.candidate_input)
+            ToolCandidateProposal(
+                candidate.tool_id,
+                candidate.candidate_input_delta,
+                (
+                    None
+                    if candidate.history_reference is None
+                    else HistoryReference(
+                        context_ref=candidate.history_reference.context_ref,
+                        reference_text=candidate.history_reference.reference_text,
+                    )
+                ),
+            )
             for candidate in value.candidates or ()
         )
     )
@@ -128,8 +149,16 @@ class LangChainChatOrchestrationAdapter:
             raise ValueError("Chat adapter requires chat_orchestration config.")
         self._config = config
         self._prompt_cache = PromptRenderCache()
+        self._token_counter = Cl100kTokenCounter()
         self.provider = config.provider
         self.model_name = config.model_name
+        self.context_budget = ContextBudget(
+            prompt_limit_tokens=config.prompt_limit_tokens,
+            history_token_budget=config.history_token_budget,
+            safety_margin_tokens=config.safety_margin_tokens,
+            context_window_tokens=config.context_window_tokens,
+            max_output_tokens=config.max_tokens or 1024,
+        )
         if structured_runnable is None:
             model = chat_model or create_chat_model(config)
             structured_runnable = model.with_structured_output(  # type: ignore[attr-defined]
@@ -138,6 +167,16 @@ class LangChainChatOrchestrationAdapter:
                 include_raw=True,
             )
         self._structured_runnable = structured_runnable
+
+    def count_prompt_tokens(
+        self,
+        orchestration_input: ChatOrchestrationInput,
+    ) -> int:
+        return self._token_counter.count_messages(
+            render_chat_orchestration_prompt(orchestration_input)
+        ) + self._token_counter.count_schema(
+            ProviderChatResponse.model_json_schema()
+        )
 
     def request_metadata(
         self,

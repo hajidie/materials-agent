@@ -16,6 +16,7 @@ from materialsagent.domain.ports.tool_execution import (
 )
 from materialsagent.domain.ports.tool_registry import (
     ExecutionPolicy,
+    InvalidNormalization,
     NeedsInputNormalization,
     ReadyNormalization,
     ToolDefinition,
@@ -129,7 +130,7 @@ def _zta35g_metadata() -> ToolMetadata:
 def _normalizer(
     candidate_input: Mapping[str, object],
     prior_normalized_input: Mapping[str, object] | None = None,
-) -> ReadyNormalization | NeedsInputNormalization:
+) -> ReadyNormalization | NeedsInputNormalization | InvalidNormalization:
     if not isinstance(candidate_input, Mapping):
         raise ValueError("ZTA35G candidate input must be an object.")
     if prior_normalized_input is not None and not isinstance(
@@ -141,12 +142,15 @@ def _normalizer(
         candidate_input,
         prior_normalized_input=prior_normalized_input,
     )
-    if validation.validation_errors:
-        raise ValueError("ZTA35G candidate input is invalid.")
     payloads = validation.to_revision_payloads()
     normalized_input = payloads["normalized_input"]
     if not isinstance(normalized_input, dict):
         raise ValueError("ZTA35G normalized input is invalid.")
+    if validation.validation_errors:
+        return InvalidNormalization(
+            normalized_input=normalized_input,
+            validation_errors=tuple(payloads["validation_errors"]),
+        )
     if validation.missing_fields or validation.ambiguous_fields:
         return NeedsInputNormalization(
             normalized_input=normalized_input,
@@ -225,8 +229,38 @@ def _candidate_input_schema() -> dict[str, object]:
     return {
         "type": "object",
         "additionalProperties": False,
-        "required": ["material", *PROCESS_FIELDS, "requested_outputs"],
         "properties": properties,
+    }
+
+
+def _context_projection(value: Mapping[str, object]) -> Mapping[str, object]:
+    data = value.get("data")
+    mechanical_properties: dict[str, object] = {}
+    if isinstance(data, Mapping):
+        for field_name in ("yield_strength", "elongation"):
+            item = data.get(field_name)
+            if isinstance(item, Mapping) and set(item) == {"value", "unit"}:
+                mechanical_properties[field_name] = {
+                    "value": item["value"],
+                    "unit": item["unit"],
+                }
+    error = value.get("error")
+    safe_error = (
+        {
+            field_name: error[field_name]
+            for field_name in ("code", "safe_message", "retryable")
+        }
+        if isinstance(error, Mapping)
+        and set(error) == {"code", "safe_message", "retryable"}
+        else None
+    )
+    return {
+        "status": value["status"],
+        "requested_outputs": value["requested_outputs"],
+        "completed_outputs": value["completed_outputs"],
+        "failed_outputs": value["failed_outputs"],
+        "mechanical_properties": mechanical_properties,
+        "error": safe_error,
     }
 
 
@@ -252,4 +286,6 @@ def build_zta35g_tool_definition(client: ToolClientPort | None = None) -> ToolDe
         supported_asset_types=metadata.supported_asset_types, limitations=metadata.limitations,
         normalizer=_normalizer,
         candidate_input_schema=_candidate_input_schema(),
+        context_projector=_context_projection,
+        context_projection_version="zta35g-result-context-v1",
     )

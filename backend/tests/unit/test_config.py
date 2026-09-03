@@ -446,7 +446,12 @@ def test_committed_llm_toml_resolves_default_roles_and_keeps_secret_safe() -> No
     assert chat.provider == explanation.provider == "deepseek"
     assert chat.model_name == "deepseek-v4-flash"
     assert chat.max_tokens == 1024
+    assert chat.context_window_tokens == 1_000_000
+    assert chat.prompt_limit_tokens == 16_384
+    assert chat.history_token_budget == 8_192
+    assert chat.safety_margin_tokens == 1_024
     assert explanation.max_tokens == 768
+    assert explanation.history_token_budget == 0
     assert chat.endpoint == "https://api.deepseek.com"
     assert chat.api_key.get_secret_value() == secret
     assert secret not in repr(configured)
@@ -480,6 +485,9 @@ def test_qwen_default_and_role_override_select_only_required_keys(tmp_path) -> N
     assert {
         role.provider for role in configured.roles.values()
     } == {"qwen"}
+    assert {
+        role.context_window_tokens for role in configured.roles.values()
+    } == {1_000_000}
 
     mixed = tmp_path / "mixed.toml"
     mixed.write_text(

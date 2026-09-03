@@ -374,22 +374,24 @@ function Invoke-WithProcessEnvironment {
     }
     try {
         foreach ($name in $Values.Keys) {
-            [Environment]::SetEnvironmentVariable(
-                $name,
-                $Values[$name],
-                [EnvironmentVariableTarget]::Process
-            )
+            if ($null -eq $Values[$name]) {
+                Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+            }
+            else {
+                Set-Item -LiteralPath "Env:$name" -Value ([string]$Values[$name])
+            }
         }
         return & $Operation
     }
     finally {
         foreach ($name in $Values.Keys) {
             $item = $backup[$name]
-            [Environment]::SetEnvironmentVariable(
-                $name,
-                $(if ($item.existed) { [string]$item.value } else { $null }),
-                [EnvironmentVariableTarget]::Process
-            )
+            if ($item.existed) {
+                Set-Item -LiteralPath "Env:$name" -Value ([string]$item.value)
+            }
+            else {
+                Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+            }
         }
     }
 }
@@ -461,7 +463,7 @@ except ConfigurationError as error:
                     DASHSCOPE_API_KEY = $null
                 } `
                 -Operation {
-                    & $python -c $probeCode *> $null
+                    $probeCode | & $python - *> $null
                     return [int]$LASTEXITCODE
                 }
         }

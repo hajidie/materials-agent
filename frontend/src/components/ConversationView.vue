@@ -12,7 +12,7 @@ import TimelineList from "./TimelineList.vue";
 
 defineOptions({ name: "ConversationView" });
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   selectedConversation:
     | ConversationListItem
     | DeepReadonly<ConversationListItem>
@@ -25,7 +25,10 @@ const props = defineProps<{
     | null;
   mutationStatus: MutationStatus;
   writeBusy: boolean;
-}>();
+  initialDraft?: string;
+}>(), {
+  initialDraft: "",
+});
 
 defineEmits<{
   "submit-new-task": [contentText: string];
@@ -51,17 +54,31 @@ const title = computed(() => {
       aria-labelledby="conversation-guide-title"
     >
       <p class="eyebrow">开始研究</p>
-      <h2 id="conversation-guide-title">请选择或新建一个对话</h2>
+      <h2 id="conversation-guide-title">从一个问题开始</h2>
       <p>
         你可以提出材料知识问题，也可以描述完整的 ZTA35G 工艺与期望输出。
       </p>
     </section>
+
+    <ChatComposer
+      v-if="!selectedConversation"
+      key="blank-workspace"
+      :disabled="writeBusy"
+      :sending="mutationStatus === 'SENDING'"
+      :supplement-target="null"
+      :mutation-status="mutationStatus"
+      :initial-draft="initialDraft"
+      @submit-new-task="$emit('submit-new-task', $event)"
+    />
 
     <template v-else>
       <header class="conversation-view__header">
         <div>
           <p class="eyebrow">当前对话</p>
           <h2>{{ title }}</h2>
+          <p class="conversation-memory-note">
+            同一对话会使用近期上下文；新建对话不会共享历史。
+          </p>
         </div>
         <button
           type="button"
@@ -94,6 +111,7 @@ const title = computed(() => {
         :sending="mutationStatus === 'SENDING'"
         :supplement-target="supplementTarget"
         :mutation-status="mutationStatus"
+        :initial-draft="initialDraft"
         @submit-new-task="$emit('submit-new-task', $event)"
         @submit-supplement="$emit('submit-supplement', $event)"
         @cancel-supplement="$emit('cancel-supplement-target')"

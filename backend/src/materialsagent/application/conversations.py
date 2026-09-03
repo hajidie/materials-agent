@@ -11,10 +11,22 @@ from materialsagent.application.context import ActorContext
 from materialsagent.application.errors import (
     ApplicationInternalError,
     ApplicationValidationError,
+    IdempotencyConflictError,
     InvalidCursorError,
+    ResourceNotFoundError,
     from_persistence_error,
 )
+from materialsagent.application.idempotency import (
+    IdempotencyOutcome,
+    canonical_request_digest,
+    recovered_idempotency_outcome,
+    validate_idempotency_key,
+)
 from materialsagent.domain.models.conversation import Conversation
+from materialsagent.domain.models.idempotency_record import (
+    CONVERSATION_CREATE,
+    IdempotencyRecord,
+)
 from materialsagent.domain.ports.unit_of_work import (
     PersistenceError,
     UnitOfWorkFactory,
@@ -46,6 +58,16 @@ class ConversationListItem:
 class ConversationListPage:
     items: tuple[ConversationListItem, ...]
     next_cursor: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationCreation:
+    conversation: Conversation
+    idempotency_outcome: IdempotencyOutcome
+
+    @property
+    def idempotency_replayed(self) -> bool:
+        return self.idempotency_outcome.replayed
 
 
 def _collapse_whitespace(value: str) -> str:
@@ -207,6 +229,136 @@ class ConversationService:
         except PersistenceError as error:
             raise from_persistence_error(error) from None
         return conversation
+
+    def create_idempotent(
+        self,
+        actor_context: ActorContext,
+        title: str | None,
+        *,
+        request_id: str,
+        idempotency_key: str,
+    ) -> ConversationCreation:
+        if title is not None:
+            if not isinstance(title, str) or not title.strip():
+                raise ApplicationValidationError()
+            normalized_title = title.strip()
+        else:
+            normalized_title = None
+        if not isinstance(request_id, str) or not request_id.strip():
+            raise ApplicationValidationError()
+        try:
+            validated_key = validate_idempotency_key(idempotency_key)
+        except (TypeError, ValueError):
+            raise ApplicationValidationError() from None
+        digest = canonical_request_digest({"title": normalized_title})
+        timestamp = _validated_utc_now(self._clock)
+        conversation = Conversation(
+            conversation_id=self._id_factory("conv"),
+            actor_id=actor_context.actor_id,
+            title=normalized_title,
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+        record = IdempotencyRecord(
+            idempotency_record_id=self._id_factory("idem"),
+            actor_id=actor_context.actor_id,
+            operation=CONVERSATION_CREATE,
+            idempotency_key=validated_key,
+            request_digest=digest,
+            first_request_id=request_id,
+            task_id=None,
+            message_id=None,
+            task_input_revision_id=None,
+            tool_run_id=None,
+            explanation_id=None,
+            created_at=timestamp,
+            expires_at=None,
+            conversation_id=conversation.conversation_id,
+        )
+        try:
+            with self._unit_of_work_factory() as unit_of_work:
+                if unit_of_work.actors.get_for_update(actor_context.actor_id) is None:
+                    raise ResourceNotFoundError()
+                existing = unit_of_work.idempotency_records.get_by_scope(
+                    actor_context.actor_id,
+                    CONVERSATION_CREATE,
+                    validated_key,
+                )
+                if existing is not None:
+                    return self._load_creation(
+                        unit_of_work,
+                        actor_context,
+                        record=existing,
+                        request_digest=digest,
+                        outcome=IdempotencyOutcome.REPLAY,
+                    )
+                unit_of_work.conversations.add(conversation)
+                unit_of_work.idempotency_records.add(record)
+                unit_of_work.commit()
+        except PersistenceError as error:
+            recovered = self._recover_creation(
+                actor_context,
+                idempotency_key=validated_key,
+                request_digest=digest,
+                request_id=request_id,
+            )
+            if recovered is not None:
+                return recovered
+            raise from_persistence_error(error) from None
+        return ConversationCreation(conversation, IdempotencyOutcome.CREATED)
+
+    def _recover_creation(
+        self,
+        actor_context: ActorContext,
+        *,
+        idempotency_key: str,
+        request_digest: str,
+        request_id: str,
+    ) -> ConversationCreation | None:
+        try:
+            with self._unit_of_work_factory() as unit_of_work:
+                record = unit_of_work.idempotency_records.get_by_scope(
+                    actor_context.actor_id,
+                    CONVERSATION_CREATE,
+                    idempotency_key,
+                )
+                if record is None:
+                    return None
+                return self._load_creation(
+                    unit_of_work,
+                    actor_context,
+                    record=record,
+                    request_digest=request_digest,
+                    outcome=recovered_idempotency_outcome(
+                        first_request_id=record.first_request_id,
+                        current_request_id=request_id,
+                    ),
+                )
+        except PersistenceError:
+            return None
+
+    @staticmethod
+    def _load_creation(
+        unit_of_work: object,
+        actor_context: ActorContext,
+        *,
+        record: IdempotencyRecord,
+        request_digest: str,
+        outcome: IdempotencyOutcome,
+    ) -> ConversationCreation:
+        if record.request_digest != request_digest:
+            raise IdempotencyConflictError()
+        conversation = (
+            None
+            if record.conversation_id is None
+            else unit_of_work.conversations.get_owned(
+                record.conversation_id,
+                actor_context.actor_id,
+            )
+        )
+        if conversation is None:
+            raise ResourceNotFoundError()
+        return ConversationCreation(conversation, outcome)
 
     def list(
         self,

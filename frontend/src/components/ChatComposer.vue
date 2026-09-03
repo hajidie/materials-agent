@@ -11,6 +11,7 @@ const props = defineProps<{
   sending: boolean;
   supplementTarget: SupplementTarget | null;
   mutationStatus: MutationStatus;
+  initialDraft?: string;
 }>();
 
 const emit = defineEmits<{
@@ -31,6 +32,16 @@ watch(draft, (value) => {
     validationMessage.value = null;
   }
 });
+
+watch(
+  () => props.initialDraft,
+  (value) => {
+    if (typeof value === "string" && value && draft.value !== value) {
+      draft.value = value;
+    }
+  },
+  { immediate: true },
+);
 
 watch(
   () => props.mutationStatus,

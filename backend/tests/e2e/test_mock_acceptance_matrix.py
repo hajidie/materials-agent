@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 import json
 from urllib.parse import urlparse
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select
@@ -58,7 +59,11 @@ def _counts(e2e_app_factory) -> dict[str, int]:
 
 
 def _create_conversation(client) -> str:
-    response = client.post("/api/v1/conversations", json={})
+    response = client.post(
+        "/api/v1/conversations",
+        headers={"Idempotency-Key": f"e2e-conversation-{uuid4().hex}"},
+        json={},
+    )
     assert response.status_code == 201, response.text
     return response.json()["data"]["conversation_id"]
 
@@ -110,28 +115,32 @@ def _controlled_tool_payload(
     ),
 ) -> dict[str, object]:
     return {
-        "route": "TOOL_EXECUTION",
-        "tool_id": "zta35g_sem_virtual_lab",
-        "material": material,
-        "candidate_parameters": {
-            "solution_temperature": {
-                "value": solution_temperature,
-                "unit": solution_temperature_unit,
-            },
-            "solution_time": {
-                "value": solution_time,
-                "unit": solution_time_unit,
-            },
-            "aging_temperature": {
-                "value": aging_temperature,
-                "unit": aging_temperature_unit,
-            },
-            "aging_time": {
-                "value": aging_time,
-                "unit": aging_time_unit,
-            },
-        },
-        "requested_outputs": list(requested_outputs),
+        "route": "TOOL_CANDIDATES",
+        "candidates": [
+            {
+                "tool_id": "zta35g_sem_virtual_lab",
+                "candidate_input_delta": {
+                    "material": material,
+                    "solution_temperature": {
+                        "value": solution_temperature,
+                        "unit": solution_temperature_unit,
+                    },
+                    "solution_time": {
+                        "value": solution_time,
+                        "unit": solution_time_unit,
+                    },
+                    "aging_temperature": {
+                        "value": aging_temperature,
+                        "unit": aging_temperature_unit,
+                    },
+                    "aging_time": {
+                        "value": aging_time,
+                        "unit": aging_time_unit,
+                    },
+                    "requested_outputs": list(requested_outputs),
+                },
+            }
+        ],
     }
 
 
@@ -408,7 +417,11 @@ def test_dependency_failure_postgresql_unavailable_is_safe_and_isolated(
                 "postgres_port": _unused_port(unused),
             },
         ) as client:
-            response = client.post("/api/v1/conversations", json={})
+            response = client.post(
+                "/api/v1/conversations",
+                headers={"Idempotency-Key": "postgres-unavailable-conversation"},
+                json={},
+            )
     after = _counts(e2e_app_factory)
 
     assert response.status_code == 503

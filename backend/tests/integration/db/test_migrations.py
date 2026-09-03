@@ -30,7 +30,7 @@ IMMEDIATE_PREVIOUS_REVISION = "0006_asset"
 M8_REVISION = "0008_idempotency_record"
 M9_REVISION = "0009_timeline_query_indexes"
 M10_REVISION = "0010_registry_routing_state"
-EXPECTED_REVISION = "0011_tool_run_provenance"
+EXPECTED_REVISION = "0013_conversation_delete"
 ALEMBIC_INI = Path(__file__).resolve().parents[3] / "alembic.ini"
 NEW_TASK_TIME_CHECKS = {
     "ck_task_started_at_not_before_created_at",
@@ -52,7 +52,10 @@ M7_TABLES = M6_TABLES | {
     "result_asset_link",
     "natural_language_explanation",
 }
-M8_TABLES = M7_TABLES | {"idempotency_record"}
+M8_TABLES = M7_TABLES | {
+    "idempotency_record",
+    "conversation_object_cleanup",
+}
 
 
 def _make_alembic_config(settings: AppSettings) -> Config:
@@ -147,6 +150,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             "idempotency_key",
             "request_digest",
             "first_request_id",
+            "conversation_id",
             "task_id",
             "message_id",
             "task_input_revision_id",
@@ -174,6 +178,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             for item in inspector.get_foreign_keys("idempotency_record")
         } == {
             "fk_idempotency_actor": "actor",
+            "fk_idempotency_conversation": "conversation",
             "fk_idempotency_explanation": (
                 "natural_language_explanation"
             ),
@@ -307,6 +312,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "catalog_snapshot_refs",
                 "catalog_hash",
                 "tool_context_ref",
+                "context_snapshot",
                 "generation_parameters",
                 "structured_output_summary",
                 "usage",
@@ -357,7 +363,10 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "asset_type",
                 "source_type",
                 "role",
-                "object_key",
+                    "storage_identity_version",
+                    "storage_bucket",
+                    "storage_namespace",
+                    "object_key",
                 "media_type",
                 "width",
                 "height",
@@ -374,6 +383,24 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "safe_error_message",
                 "orphan_reason",
                 "orphan_details",
+            },
+            "conversation_object_cleanup": {
+                "cleanup_id",
+                "actor_id",
+                "conversation_id",
+                "asset_id",
+                "operation_id",
+                "producer_tool_run_id",
+                "object_key",
+                "bucket",
+                "storage_namespace",
+                "identity_version",
+                "status",
+                "attempts",
+                "created_at",
+                "last_attempt_at",
+                "completed_at",
+                "safety_error_code",
             },
             "tool_result": {
                 "result_id",
@@ -553,6 +580,53 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "fk_explanation_task": "task",
             },
         }
+        expected_ondelete = {
+            "conversation": {"fk_conversation_actor": "RESTRICT"},
+            "task": {
+                "fk_task_actor": "RESTRICT",
+                "fk_task_conversation": "CASCADE",
+                "fk_task_selected_result": "SET NULL",
+                "fk_task_selected_tool_run": "SET NULL",
+            },
+            "message": {
+                "fk_message_actor": "RESTRICT",
+                "fk_message_conversation": "CASCADE",
+                "fk_message_llm_call": "RESTRICT",
+                "fk_message_task": "CASCADE",
+            },
+            "task_input_revision": {
+                "fk_task_input_revision_llm_call": "SET NULL",
+                "fk_task_input_revision_task": "CASCADE",
+            },
+            "llm_call": {
+                "fk_llm_call_conversation": "CASCADE",
+                "fk_llm_call_input_result": "SET NULL",
+                "fk_llm_call_task": "CASCADE",
+            },
+            "tool_run": {
+                "fk_tool_run_revision": "CASCADE",
+                "fk_tool_run_task": "CASCADE",
+            },
+            "asset": {
+                "fk_asset_actor": "RESTRICT",
+                "fk_asset_task": "CASCADE",
+                "fk_asset_tool_run": "CASCADE",
+            },
+            "tool_result": {
+                "fk_tool_result_actor": "RESTRICT",
+                "fk_tool_result_task": "CASCADE",
+                "fk_tool_result_tool_run": "CASCADE",
+            },
+            "result_asset_link": {
+                "fk_result_asset_link_asset": "CASCADE",
+                "fk_result_asset_link_result": "CASCADE",
+            },
+            "natural_language_explanation": {
+                "fk_explanation_llm_call": "CASCADE",
+                "fk_explanation_result": "CASCADE",
+                "fk_explanation_task": "CASCADE",
+            },
+        }
         for table_name, expected in expected_foreign_keys.items():
             foreign_keys = {
                 constraint["name"]: constraint
@@ -562,10 +636,10 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 name: constraint["referred_table"]
                 for name, constraint in foreign_keys.items()
             } == expected
-            assert all(
-                constraint["options"].get("ondelete") == "RESTRICT"
-                for constraint in foreign_keys.values()
-            )
+            assert {
+                name: constraint["options"].get("ondelete")
+                for name, constraint in foreign_keys.items()
+            } == expected_ondelete[table_name]
 
         expected_check_names = {
             "conversation": {
@@ -622,6 +696,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             },
             "llm_call": {
                 "ck_llm_call_completed_not_before_started",
+                "ck_llm_call_context_snapshot_object",
                 "ck_llm_call_catalog_hash_sha256",
                 "ck_llm_call_catalog_snapshot_refs_array",
                 "ck_llm_call_conversation_id_not_blank",
@@ -702,7 +777,11 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "ck_asset_sha256_format",
                 "ck_asset_size_nonnegative",
                 "ck_asset_status_allowed",
-                "ck_asset_status_shape",
+                    "ck_asset_status_shape",
+                    "ck_asset_metadata_v1_storage_identity",
+                    "ck_asset_storage_bucket_not_blank",
+                    "ck_asset_storage_identity_version_allowed",
+                    "ck_asset_storage_namespace_not_blank",
                 "ck_asset_task_id_not_blank",
                 "ck_asset_tool_run_id_not_blank",
                 "ck_asset_type_sem_image",
@@ -1731,7 +1810,7 @@ def _seed_m10_run_for_m11(
             "duration_ms, error_code, safe_error_message) VALUES (:run_id, :task_id, "
             ":request_id, :revision_id, 1, :tool_id, '0.1.0', :schema_version, "
             "ARRAY['sem_image'], ARRAY['sem_image'], ARRAY[]::text[], "
-            "'{\"runtime_parameters\":{\"seed\":101}}'::jsonb, '{}'::jsonb, "
+            "CAST(:execution_input AS jsonb), '{}'::jsonb, "
             "'[]'::jsonb, '{}'::jsonb, 'SUCCEEDED', NULL, :created_at, "
             ":started_at, :completed_at, 1000, NULL, NULL)"
         ),
@@ -1742,6 +1821,7 @@ def _seed_m10_run_for_m11(
             "revision_id": f"revision_{suffix}",
             "tool_id": tool_id,
             "schema_version": run_schema_version,
+            "execution_input": '{"runtime_parameters":{"seed":101}}',
             "created_at": created_at,
             "started_at": created_at + timedelta(seconds=1),
             "completed_at": created_at + timedelta(seconds=2),
@@ -1979,7 +2059,7 @@ def test_m10_backfills_only_known_zta_tasks_and_refuses_ready_downgrade(
                     ") VALUES ('run_m10', 'task_m10_tool', 'request_m10', "
                     "'revision_m10', 1, 'zta35g_sem_virtual_lab', '0.1.0', '1.0', "
                     "ARRAY['sem_image'], ARRAY['sem_image'], ARRAY[]::text[], "
-                    "'{\"runtime_parameters\":{\"seed\":101}}'::jsonb, "
+                    "CAST(:execution_input AS jsonb), "
                     "'{}'::jsonb, '[]'::jsonb, '{}'::jsonb, "
                     "'SUCCEEDED', NULL, :created_at, :started_at, :completed_at, "
                     "1000, NULL, NULL)"
@@ -1988,6 +2068,7 @@ def test_m10_backfills_only_known_zta_tasks_and_refuses_ready_downgrade(
                     "created_at": created_at,
                     "started_at": created_at + timedelta(seconds=1),
                     "completed_at": created_at + timedelta(seconds=2),
+                    "execution_input": '{"runtime_parameters":{"seed":101}}',
                 },
             )
             connection.execute(
@@ -2086,6 +2167,13 @@ def test_m10_backfills_only_known_zta_tasks_and_refuses_ready_downgrade(
                 "bound_tool_version": None,
                 "bound_schema_hash": None,
             }
+    finally:
+        upgraded.dispose()
+
+    command.downgrade(config, M10_REVISION)
+    ready_engine = create_engine_from_settings(temporary_database)
+    try:
+        with ready_engine.begin() as connection:
             connection.execute(
                 text(
                     "UPDATE task SET current_status = 'READY' "
@@ -2093,7 +2181,7 @@ def test_m10_backfills_only_known_zta_tasks_and_refuses_ready_downgrade(
                 )
             )
     finally:
-        upgraded.dispose()
+        ready_engine.dispose()
 
     with pytest.raises(RuntimeError, match="READY Tasks"):
         command.downgrade(config, M9_REVISION)

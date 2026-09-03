@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import math
 import re
@@ -9,6 +9,10 @@ from types import MappingProxyType
 from typing import Protocol
 
 from materialsagent.domain.ports.tool_registry import ToolRef
+from materialsagent.domain.ports.conversation_context import (
+    ContextBudget,
+    PromptContextWindow,
+)
 
 
 MAX_CANDIDATE_INPUT_DELTA_BYTES = 4096
@@ -163,6 +167,9 @@ class ToolInputExtractionInput:
     candidate_input_schema: Mapping[str, object]
     missing_fields: tuple[str, ...]
     ambiguous_fields: tuple[str, ...]
+    context_window: PromptContextWindow = field(
+        default_factory=PromptContextWindow
+    )
 
     def __post_init__(self) -> None:
         _require_non_blank(self.content_text, "content_text")
@@ -182,6 +189,8 @@ class ToolInputExtractionInput:
             raise ValueError("A field cannot be both missing and ambiguous.")
         if not missing and not ambiguous:
             raise ValueError("A supplement requires an unresolved field.")
+        if not isinstance(self.context_window, PromptContextWindow):
+            raise ValueError("context_window must be a PromptContextWindow.")
         object.__setattr__(self, "candidate_input_schema", schema)
         object.__setattr__(self, "missing_fields", missing)
         object.__setattr__(self, "ambiguous_fields", ambiguous)
@@ -297,6 +306,17 @@ class ToolInputExtractionProtocolError(ToolInputExtractionError):
 class ToolInputExtractionPort(Protocol):
     provider: str
     model_name: str
+    context_budget: ContextBudget
+
+    def count_prompt_tokens(
+        self,
+        command: ToolInputExtractionInput,
+    ) -> int: ...
+
+    def request_metadata(
+        self,
+        command: ToolInputExtractionInput,
+    ) -> ToolInputExtractionRequestMetadata: ...
 
     def extract(
         self,

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from hashlib import sha256
-import json
 import re
 from typing import Final
 
@@ -14,16 +12,21 @@ from materialsagent.domain.ports.chat_orchestration import (
     ChatOrchestrationRequestMetadata,
     ChatOrchestrationResult,
     ChatOrchestrationTimeoutError,
+    HistoryReference,
     KnowledgeAnswer,
     ToolCandidateProposal,
     ToolCandidateSet,
 )
+from materialsagent.domain.ports.conversation_context import ContextBudget
+from materialsagent.infrastructure.llm.common import canonical_prompt_digest
+from materialsagent.infrastructure.llm.prompts import render_chat_orchestration_prompt
+from materialsagent.infrastructure.llm.token_counter import Cl100kTokenCounter
 
 
 MOCK_PROVIDER: Final = "mock"
 MOCK_MODEL_NAME: Final = "mock-chat-orchestration-v1"
 PROMPT_TEMPLATE_ID: Final = "chat-orchestration"
-PROMPT_TEMPLATE_VERSION: Final = "1"
+PROMPT_TEMPLATE_VERSION: Final = "6"
 GENERATION_PARAMETERS: Final = {"temperature": 0, "max_tokens": 256}
 _AGING_TEMPERATURE_SUPPLEMENT_PATTERN: Final = re.compile(
     r"(?:aging_temperature\s*=\s*|时效温度\s+)?730\s*°\s*C",
@@ -32,29 +35,6 @@ _AGING_TEMPERATURE_SUPPLEMENT_PATTERN: Final = re.compile(
 
 
 Responder = Callable[[ChatOrchestrationInput], Mapping[str, object]]
-
-
-def _plain_json(value: object) -> object:
-    if isinstance(value, Mapping):
-        return {key: _plain_json(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_plain_json(item) for item in value]
-    return value
-
-
-def _catalog_payload(value: ChatOrchestrationInput) -> list[dict[str, object]]:
-    return [
-        {
-            "tool_id": entry.tool_id,
-            "version": entry.version,
-            "schema_hash": entry.schema_hash,
-            "display_name": entry.display_name,
-            "description": entry.description,
-            "candidate_input_schema": _plain_json(entry.candidate_input_schema),
-            "supported_outputs": list(entry.supported_outputs),
-        }
-        for entry in value.routing_catalog.entries
-    ]
 
 
 def _default_parameters() -> dict[str, object]:
@@ -72,7 +52,7 @@ def _default_tool_payload() -> dict[str, object]:
         "candidates": [
             {
                 "tool_id": "zta35g_sem_virtual_lab",
-                "candidate_input": {
+                "candidate_input_delta": {
                     "material": "ZTA35G",
                     **_default_parameters(),
                     "requested_outputs": ["sem_image", "mechanical_properties"],
@@ -112,7 +92,7 @@ def default_mock_responder(
             "route": "TOOL_CANDIDATES",
             "candidates": [{
                 "tool_id": "zta35g_sem_virtual_lab",
-                "candidate_input": {
+                "candidate_input_delta": {
                     "material": "ZTA35G",
                     **parameters,
                     "requested_outputs": ["sem_image", "mechanical_properties"],
@@ -123,7 +103,7 @@ def default_mock_responder(
         payload = _default_tool_payload()
         parameters = _default_parameters()
         parameters["aging_temperature"] = {"value": 730, "unit": "°C"}
-        payload["candidates"][0]["candidate_input"].update(parameters)  # type: ignore[index,union-attr]
+        payload["candidates"][0]["candidate_input_delta"].update(parameters)  # type: ignore[index,union-attr]
         return payload
     if "歧义" in content:
         parameters = _default_parameters()
@@ -135,7 +115,7 @@ def default_mock_responder(
             "route": "TOOL_CANDIDATES",
             "candidates": [{
                 "tool_id": "zta35g_sem_virtual_lab",
-                "candidate_input": {
+                "candidate_input_delta": {
                     "material": "ZTA35G",
                     **parameters,
                     "requested_outputs": ["sem_image"],
@@ -146,12 +126,12 @@ def default_mock_responder(
     if "solution_time = 180 min" in lowered:
         parameters = _default_parameters()
         parameters["solution_time"] = {"value": 180, "unit": "min"}
-        payload["candidates"][0]["candidate_input"].update(parameters)  # type: ignore[index,union-attr]
+        payload["candidates"][0]["candidate_input_delta"].update(parameters)  # type: ignore[index,union-attr]
         return payload
     if "越界温度" in content:
         parameters = _default_parameters()
         parameters["solution_temperature"] = {"value": 1200, "unit": "°C"}
-        payload["candidates"][0]["candidate_input"].update(parameters)  # type: ignore[index,union-attr]
+        payload["candidates"][0]["candidate_input_delta"].update(parameters)  # type: ignore[index,union-attr]
         return payload
     if "完整合法" in content:
         return payload
@@ -192,15 +172,38 @@ def _decode(payload: Mapping[str, object]) -> ChatOrchestrationResult:
         for item in candidates:
             if not isinstance(item, Mapping):
                 raise ValueError("candidate must be an object.")
-            _exact_keys(item, {"tool_id", "candidate_input"}, "candidate")
+            if set(item) not in (
+                {"tool_id", "candidate_input_delta"},
+                {"tool_id", "candidate_input_delta", "history_reference"},
+            ):
+                raise ValueError("candidate has missing or unknown fields.")
             if not isinstance(item["tool_id"], str) or not isinstance(
-                item["candidate_input"], Mapping
+                item["candidate_input_delta"], Mapping
             ):
                 raise ValueError("candidate has invalid fields.")
+            history_reference = item.get("history_reference")
+            if history_reference is not None:
+                if (
+                    not isinstance(history_reference, Mapping)
+                    or set(history_reference) != {"context_ref", "reference_text"}
+                    or not all(
+                        isinstance(history_reference[key], str)
+                        for key in ("context_ref", "reference_text")
+                    )
+                ):
+                    raise ValueError("history_reference has invalid fields.")
             decoded.append(
                 ToolCandidateProposal(
                     tool_id=item["tool_id"],
-                    candidate_input=item["candidate_input"],
+                    candidate_input_delta=item["candidate_input_delta"],
+                    history_reference=(
+                        None
+                        if history_reference is None
+                        else HistoryReference(
+                            context_ref=history_reference["context_ref"],
+                            reference_text=history_reference["reference_text"],
+                        )
+                    ),
                 )
             )
         return ToolCandidateSet(tuple(decoded))
@@ -210,27 +213,49 @@ def _decode(payload: Mapping[str, object]) -> ChatOrchestrationResult:
 class MockChatOrchestrationAdapter:
     provider = MOCK_PROVIDER
     model_name = MOCK_MODEL_NAME
+    context_budget = ContextBudget(
+        prompt_limit_tokens=16_384,
+        history_token_budget=8_192,
+        safety_margin_tokens=1_024,
+        context_window_tokens=1_000_000,
+        max_output_tokens=256,
+    )
 
     def __init__(self, responder: Responder) -> None:
         if not callable(responder):
             raise TypeError("responder must be callable.")
         self._responder = responder
+        self._token_counter = Cl100kTokenCounter()
+
+    def count_prompt_tokens(
+        self,
+        orchestration_input: ChatOrchestrationInput,
+    ) -> int:
+        from materialsagent.infrastructure.llm.langchain_chat import (
+            ProviderChatResponse,
+        )
+
+        return self._token_counter.count_messages(
+            render_chat_orchestration_prompt(orchestration_input)
+        ) + self._token_counter.count_schema(
+            ProviderChatResponse.model_json_schema()
+        )
 
     def request_metadata(
         self,
         orchestration_input: ChatOrchestrationInput,
     ) -> ChatOrchestrationRequestMetadata:
-        canonical = (
-            f"{PROMPT_TEMPLATE_ID}:{PROMPT_TEMPLATE_VERSION}\n"
-            f"{json.dumps(_catalog_payload(orchestration_input), ensure_ascii=False, sort_keys=True, separators=(',', ':'))}\n"
-            f"{orchestration_input.content_text}"
-        )
+        messages = render_chat_orchestration_prompt(orchestration_input)
         return ChatOrchestrationRequestMetadata(
             provider=self.provider,
             model_name=self.model_name,
             prompt_template_id=PROMPT_TEMPLATE_ID,
             prompt_template_version=PROMPT_TEMPLATE_VERSION,
-            prompt_digest=sha256(canonical.encode("utf-8")).hexdigest(),
+            prompt_digest=canonical_prompt_digest(
+                template_id=PROMPT_TEMPLATE_ID,
+                template_version=PROMPT_TEMPLATE_VERSION,
+                messages=messages,
+            ),
             generation_parameters=GENERATION_PARAMETERS,
         )
 

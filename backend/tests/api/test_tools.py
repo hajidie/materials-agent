@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from sqlalchemy import func, select
 
@@ -86,7 +87,11 @@ def _settings(api_harness, *, enabled: bool):
 
 
 def _create_valid_revision(client, api_harness) -> tuple[str, str]:
-    conversation = client.post("/api/v1/conversations", json={})
+    conversation = client.post(
+        "/api/v1/conversations",
+        headers={"Idempotency-Key": f"tools-conversation-{uuid4().hex}"},
+        json={},
+    )
     assert conversation.status_code == 201
     conversation_id = conversation.json()["data"]["conversation_id"]
     message = client.post(
@@ -97,8 +102,8 @@ def _create_valid_revision(client, api_harness) -> tuple[str, str]:
             "content_text": "完整合法 Tool 请求",
         },
     )
-    assert message.status_code == 503
-    task_id = message.json()["resource"]["task_id"]
+    assert message.status_code == 200
+    task_id = message.json()["data"]["task"]["task_id"]
     with create_session_factory(api_harness.engine)() as session:
         revision = session.scalar(
             select(TaskInputRevisionRow).where(
@@ -210,8 +215,8 @@ def test_enabled_dev_path_executes_revision_and_queries_safe_running_tool_run(
     assert "data_base64" not in repr(run_data)
     assert query.status_code == 200
     assert query.json()["data"] == run_data
-    assert task.json()["data"]["status"] == "FAILED"
-    assert task.json()["data"]["error_code"] == "TOOL_UNAVAILABLE"
+    assert task.json()["data"]["status"] == "RUNNING"
+    assert task.json()["data"]["error_code"] is None
     assert task.json()["data"]["selected_tool_run_id"] is None
     assert task.json()["data"]["selected_result_id"] is None
     with create_session_factory(api_harness.engine)() as session:

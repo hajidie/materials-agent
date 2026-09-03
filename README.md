@@ -24,6 +24,9 @@
 
 - Vue 3 + Vite 的本地聊天界面；
 - 对话、消息、任务、输入 Revision、ToolRun、ToolResult、资产和解释结果持久化；
+- 空白工作区首条消息使用稳定幂等描述符创建 Conversation 并提交 Message；
+- 可永久删除 Conversation；数据库聚合先原子删除，生成图片由持久化 cleanup 记录安全清理；
+- 同一 Conversation 内按 token 预算注入近期完整对话轮次；新建 Conversation 不共享历史；
 - Mock 或受控 DeepSeek/Qwen Provider 聊天编排；当前使用 LangChain，不使用 LangGraph；
 - LLM 候选提议、Registry 解析与授权、固定 Tool 补参组成的自然语言单 Tool 链路；
 - 与 Backend 合同一致的 Mock Runtime；
@@ -104,7 +107,8 @@ Runtime 环境，不得安装到 Backend 环境。
 把 `.env.example` 复制为被 Git 忽略的根 `.env`，并为本机填写数据库、MinIO 和签名配置。
 使用 Provider 模式时，根据 `backend/config/llm.toml` 中三个角色实际选择的模型设置
 `DEEPSEEK_API_KEY` 和/或 `DASHSCOPE_API_KEY`。LLM 配置在 `.env` 中只保存 Secret；Provider、
-模型名、temperature、top-p、top-k、Reasoning 和 token 上限都在该 TOML 中配置，修改后重启
+模型名、每个具体模型的上下文窗口、temperature、top-p、top-k、Reasoning 和各角色 token
+预算都在该 TOML 中配置，修改后重启
 Backend 生效。不要提交真实 `.env`，也不要在终端、日志或问题报告中打印 Secret。
 
 `backend/config/llm.toml` 包含受控模型目录、全局默认模型、模型能力声明，以及
@@ -251,16 +255,21 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 
 - PostgreSQL 保存结构化业务事实，MinIO 保存图片；日志和公共响应不保存图片 bytes。
 - 不记录完整 Prompt、完整 Provider 原始响应、Tensor、Secret、权重路径或内部绝对路径。
+- LLMCall 只保存受控 Context Snapshot 审计元数据与 digest，不复制完整 Prompt；ToolResult
+  只通过 Tool 注册的安全投影或 metadata-only 投影进入上下文。
 - `.env`、数据库、MinIO 数据、生成输出、模型权重、缓存、日志和 `tmp/` 都不得提交。
 - `SEM/` 始终只读；完整性脚本只枚举文件并校验大小和 SHA-256，不导入模型代码。
 - 外部 LLM、Runtime 与 MinIO 调用不得放在数据库长事务中。
 - 不混合不同 ToolRun 的资产与结果；显式重试创建新的 ToolRun 和 seed。
+- Conversation 删除后的 MinIO cleanup 会在响应后、应用启动和后续删除时按上限重试；也可运行
+  `python -m materialsagent.maintenance.cleanup_conversation_objects --limit 100` 进行一次维护重试。
 
 ## 当前限制
 
 本项目不提供登录、多用户隔离、Redis、后台 Worker、SSE、WebSocket、文件上传、EBSD 输入、
 ML Training、Planner、多 Agent、动态插件上传或生产部署能力。ZTA35G Tool 只适用于 ZTA35G
-钛合金；不支持上传真实 SEM 后预测；只请求力学性能时仍会生成中间 SEM。
+钛合金；不支持上传真实 SEM 后预测；只请求力学性能时仍会生成中间 SEM。对话记忆不跨
+Conversation，也暂不提供滚动摘要、记忆开关或管理界面。
 
 ## 常见问题
 

@@ -8,6 +8,7 @@ from materialsagent.application.chat_orchestration import (
 from materialsagent.application.asset_service import AssetService
 from materialsagent.application.context import ActorContext
 from materialsagent.application.conversations import ConversationService
+from materialsagent.application.conversation_cleanup import ConversationCleanupService
 from materialsagent.application.errors import (
     DependencyUnavailableError,
     ResourceNotFoundError,
@@ -41,6 +42,10 @@ def get_actor_context(request: Request) -> ActorContext:
 
 def get_conversation_service(request: Request) -> ConversationService:
     return _required_app_state(request, "conversation_service")
+
+
+def get_conversation_cleanup_service(request: Request) -> ConversationCleanupService:
+    return _required_app_state(request, "conversation_cleanup_service")
 
 
 def get_message_submission_service(

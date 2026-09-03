@@ -76,6 +76,7 @@ Backend 与真实 Runtime 不共享 Python 包或虚拟环境。`SEM/` 是外部
 ```text
 用户消息
   -> 为本次路由创建 RoutingCatalogSnapshot
+  -> Context Builder 从同一 Conversation 选择预算内的近期完整轮次
   -> LLM Structured Output 提出 Tool candidates 与候选参数
   -> Registry.resolve(candidate, same snapshot)
   -> ToolDefinition.normalize(candidate, prior revision when applicable)
@@ -94,6 +95,35 @@ LLM 只根据本次受控 Catalog Snapshot 提出候选和候选参数，不决�
 通过 `Registry.authorize()` 决定动作。Catalog 查询结果、LLM 输出和历史策略快照都不授予执行
 权限。
 
+## Conversation 级上下文记忆
+
+Conversation Context 由应用层独立构建，Provider adapter 只接收已构建的消息序列和 Structured
+Output 合同，不查询数据库，也不负责参数合并、引用解析或 Tool 授权。历史选择以当前消息的
+`(created_at, message_id)` 为排他上界，从最近的完整 user/assistant 轮次反向选取连续后缀，
+不拆分单轮；首次路由限定在同一 Conversation，已绑定 Task 的补参限定在当前 Task，并附带
+结构化 Agent State。接口预留 `summary_segments + recent_turns + agent_state`，当前不生成滚动
+摘要。
+
+预算使用 `cl100k_base` 做确定性近似。每个具体模型必须声明自己的 `context_window_tokens`；
+角色分别配置应用 Prompt 上限、历史预算、最大输出和 safety margin。`1,024` 的默认 safety
+margin 是可调整的工程保护值，不保证覆盖所有 Provider tokenizer 差异。Context Builder 在
+选择历史后对最终消息重新计数；如果零历史时必需 Prompt 仍超限，不调用 Provider，并以
+`CONTEXT_BUDGET_EXCEEDED` 结束首次 Task，或让补参 Task 保持 `NEEDS_INPUT`。
+
+NEW_TASK 不隐式继承任何历史实验参数。模型只有在当前消息明确引用历史条件时，才能返回本次
+Context Window 内的局部 `context_ref` 和当前消息中的原文引用。应用对两段文本做 Unicode
+NFKC 与空白折叠后执行大小写敏感的精确包含检查，再把局部引用解析为同一 Conversation、同一
+Tool 的 Task/InputRevision 结构化事实。有效引用以历史 normalized input 为 base，按 Tool
+顶层字段合并当前 delta；嵌套参数整体替换。无引用时 base 为空。两条路径最终都经过 normalizer、
+当前执行 schema 的一致性门禁和 Registry `NEW_BINDING` 授权；无效引用进入协议失败，不猜测
+替代引用。
+
+历史中的 Task/InputRevision、ToolRun、ToolResult 与成功 Explanation 只形成受控 assistant
+投影。ToolResult 不默认复制完整 `data`；Tool 注册可提供带版本的安全 Context Projection；没有
+定制投影时只注入状态与输出类型等 metadata。历史轮次经带类型边界的 canonical JSON 安全序列化；
+历史消息、引用文本和投影结果在 Prompt 中均被标记为不可信数据，不能修改系统规则、Agent
+State 或 Tool 授权。
+
 ## Tool Registry 与扩展模型
 
 Registry 是显式、不可变、进程内的注册边界。一个 `ToolDefinition` 把以下事实绑定在一起：
@@ -101,6 +131,7 @@ Registry 是显式、不可变、进程内的注册边界。一个 `ToolDefiniti
 - `tool_id`、`version`、生命周期状态和执行策略；
 - 执行语义的 `input_schema` 与候选输入 schema；
 - normalizer、支持的输出和资产类型、限制说明；
+- 可选且版本化的安全 ToolResult Context Projection；未配置时使用 metadata-only；
 - Registry 持有的 Runtime metadata 与实际执行对象。
 
 Registry 启动时拒绝重复 ID、非法生命周期组合、Runtime metadata 不匹配、缺少 normalizer 的
@@ -205,6 +236,32 @@ PENDING -> RUNNING -> SUCCEEDED
 每个 ToolRun 只消费并产出自己的执行快照、图片、性能结果和诊断。结果提交必须核对 Task、
 ToolRun、输入 Revision、资产所有者和来源一致性，不能跨 actor、跨 Task 或跨 ToolRun 拼接。
 
+## Conversation 写入恢复与永久删除
+
+Conversation 创建和 Message/Task 提交分别使用持久化幂等记录。空白工作区的首条消息由一个
+客户端 operation descriptor 固定派生两个 key；刷新或结果不确定后的重试继续使用同一组 key，
+不通过 Timeline 推测写入结果。Message 已提交但编排尚未越过可靠启动边界时，重放继续原 Task；
+已有终态或 ToolRun、Result、Assistant Message 等真实执行事实时只返回现有投影，不重复创建
+Message/Task 或执行链。
+
+进程启动在接受请求前恢复旧进程遗留状态：可靠启动前的 PENDING LLMCall 以中断原因结束，原
+Task 保持可继续；旧 RUNNING LLMCall、ToolRun 和 Explanation 以进程中断失败，无法安全继续的
+Task 进入终态；PENDING Asset 只在数据库中标记 ORPHANED，不在恢复事务中访问 MinIO。删除时
+还会对目标 Conversation 使用同一进程 cutoff 再执行恢复，因此旧 PENDING/READY 不会永久造成
+`CONVERSATION_BUSY`。
+
+永久删除以 PostgreSQL 短事务为业务成功边界。事务锁定 owner、Conversation、Task 与相关执行
+记录，拒绝当前进程仍真实活动的聚合，从真实 Asset 行生成不可变 cleanup 快照，再级联删除
+Conversation 聚合；cleanup 写入失败会回滚整个事务。MinIO 调用只发生在事务提交和 HTTP 响应
+之后，失败不会恢复 Conversation。
+
+cleanup 只接受严格的系统对象路径，且路径中的 `asset_id` 必须与事务快照一致；bucket 与 storage
+namespace 在 Asset 创建或历史删除快照时固化。新 Asset 使用 `METADATA_V1`，上传后必须回读并
+核对 `asset-id`、`operation-id` 和 producer ToolRun；升级前的 `LEGACY_DB_KEY` 在三项身份 metadata
+完全不存在时可依赖数据库身份删除，部分存在或任何不匹配都进入非自动重试的 `SAFETY_BLOCKED`。
+自动 drain 只处理最旧的 `PENDING`，每次最多 100 条；触发点是应用启动、删除响应后的 best-effort
+处理和后续删除顺带重试，另保留一次性维护命令，不引入常驻 Worker。
+
 ## LLM Provider 与角色配置
 
 Backend 只在 `LLM_ADAPTER=provider` 时惰性导入 LangChain Provider 模块。启动时读取固定的
@@ -233,8 +290,11 @@ ToolRun 保存执行时的：
 
 LLMCall 审计保存实际 provider/model、安全 Catalog 引用与 Hash 或固定 Tool 上下文、受控
 Structured Output 摘要、Prompt digest，以及带 schema version 的有效 generation 参数。领域层
-仍可读取旧 DeepSeek 审计参数形状，因此该改造不需要数据库迁移。它不保存完整 Prompt、
-Provider 原始响应或推理内容。
+仍可读取旧版 `candidate_input` 摘要；新调用保存 `candidate_input_delta` 与可选局部历史引用。
+nullable `context_snapshot` 使用严格的 ContextSnapshot v1 应用层 schema，记录策略、模型、预算、
+token 统计、选中来源、局部引用映射和 digest，但不保存完整 Prompt。Snapshot 的 canonical JSON
+超过 128 KiB 时只聚合审计元数据，保留首尾来源、类型计数和完整有序来源集合 digest；该聚合
+不会改变已选择的历史、实际 Prompt 或 Provider 请求。它不保存 Provider 原始响应或推理内容。
 
 审计数据用于复现“当时根据什么受控事实做出决定”，不授予后续执行权限。重试与补参始终以
 当前 Registry 再授权。
@@ -273,6 +333,9 @@ Runtime token 每次本地启动生成，只在内存中注入 Backend 与 Runti
 
 当前设计不包含 Redis、后台 Worker、SSE、WebSocket、登录、多用户隔离、真实 SEM 上传、
 EBSD 输入、ML Training、Planner、多 Agent、动态插件上传或生产部署。
+
+Conversation 记忆当前也不包含跨 Conversation 共享、滚动摘要、用户级记忆控制或额外模型
+判断；历史引用只在单次 Context Window 内使用局部引用，不属于公共 API。
 
 以下变化不是局部实现细节，必须先确认产品/架构范围：
 

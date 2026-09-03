@@ -28,6 +28,10 @@ def _role(provider: str, role: str, **overrides: object) -> ConfiguredRole:
             "text" if role == "tool_result_explanation" else "json_object"
         ),
         "streaming": False,
+        "context_window_tokens": 1_000_000,
+        "prompt_limit_tokens": 16_384,
+        "history_token_budget": 8_192,
+        "safety_margin_tokens": 1_024,
     }
     values.update(overrides)
     return ConfiguredRole(**values)  # type: ignore[arg-type]

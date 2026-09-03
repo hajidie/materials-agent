@@ -91,6 +91,7 @@ def _create_explanation_failure(
 ) -> dict[str, object]:
     conversation_id = client.post(
         "/api/v1/conversations",
+        headers={"Idempotency-Key": "explanation-retry-conversation"},
         json={},
     ).json()["data"]["conversation_id"]
     response = client.post(

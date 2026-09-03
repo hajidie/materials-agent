@@ -498,6 +498,7 @@ def test_timeline_projects_full_selected_chain_without_external_calls(
     ) as client:
         conversation_id = client.post(
             "/api/v1/conversations",
+            headers={"Idempotency-Key": "timeline-conversation"},
             json={},
         ).json()["data"]["conversation_id"]
         submitted = _submit(client, conversation_id)

@@ -6,6 +6,7 @@ import type {
   MutationStatus,
   PendingMutationV1,
 } from "../composables/useIdempotentRequest";
+import type { FirstTurnDescriptorV1 } from "../composables/useFirstTurnOperation";
 
 defineOptions({ name: "GlobalErrorNotice" });
 
@@ -18,7 +19,9 @@ const props = defineProps<{
   errors?: readonly VisibleError[];
   pendingMutation:
     | PendingMutationV1
+    | FirstTurnDescriptorV1
     | DeepReadonly<PendingMutationV1>
+    | DeepReadonly<FirstTurnDescriptorV1>
     | null;
   mutationStatus: MutationStatus;
 }>();
@@ -46,6 +49,10 @@ const visibleErrors = computed<VisibleError[]>(() => {
     return true;
   });
 });
+
+const isFirstTurn = computed(
+  () => props.pendingMutation?.operation === "FIRST_TURN",
+);
 
 defineEmits<{
   "retry-pending": [];
@@ -84,9 +91,15 @@ defineEmits<{
       class="global-notice global-notice--uncertain"
       role="alert"
     >
-      <strong>未能确认上一次操作结果。</strong>
+      <strong>
+        {{ isFirstTurn ? "首条消息尚未完整确认。" : "未能确认上一次操作结果。" }}
+      </strong>
       <p>
-        可以使用原请求重试；放弃恢复记录不会取消服务器端可能已经完成的操作。
+        {{
+          isFirstTurn
+            ? "请使用相同的 Conversation 与 Message 幂等键继续原请求。"
+            : "可以使用原请求重试；放弃恢复记录不会取消服务器端可能已经完成的操作。"
+        }}
       </p>
       <div class="global-notice__actions">
         <button
@@ -103,6 +116,7 @@ defineEmits<{
           }}
         </button>
         <button
+          v-if="!isFirstTurn"
           type="button"
           class="button button--secondary"
           data-action="discard-pending"

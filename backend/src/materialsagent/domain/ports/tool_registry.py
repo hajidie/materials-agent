@@ -32,6 +32,7 @@ class ToolAction(StrEnum):
 
 JsonObject: TypeAlias = Mapping[str, object]
 ToolNormalizer: TypeAlias = Callable[[JsonObject, JsonObject | None], "ToolNormalization"]
+ToolContextProjector: TypeAlias = Callable[[JsonObject], JsonObject]
 MAX_SAFE_JSON_INTEGER = 9_007_199_254_740_991
 MAX_NORMALIZED_INPUT_BYTES = 4096
 MAX_SCHEMA_BYTES = 16_384
@@ -170,7 +171,38 @@ class NeedsInputNormalization:
         object.__setattr__(self, "follow_up_suggestion", follow_up)
 
 
-ToolNormalization: TypeAlias = ReadyNormalization | NeedsInputNormalization
+@dataclass(frozen=True, slots=True)
+class InvalidNormalization:
+    normalized_input: JsonObject
+    validation_errors: tuple[JsonObject, ...]
+
+    def __post_init__(self) -> None:
+        normalized = _controlled_json_object(
+            self.normalized_input,
+            "normalized_input",
+            max_bytes=MAX_NORMALIZED_INPUT_BYTES,
+            require_non_empty=True,
+        )
+        if not isinstance(self.validation_errors, tuple) or not self.validation_errors:
+            raise ValueError("validation_errors must be a non-empty tuple.")
+        if len(self.validation_errors) > 32:
+            raise ValueError("validation_errors exceeds the safe item limit.")
+        controlled = tuple(
+            _controlled_json_object(
+                error,
+                "validation_errors item",
+                max_bytes=1024,
+                require_non_empty=True,
+            )
+            for error in self.validation_errors
+        )
+        object.__setattr__(self, "normalized_input", normalized)
+        object.__setattr__(self, "validation_errors", controlled)
+
+
+ToolNormalization: TypeAlias = (
+    ReadyNormalization | NeedsInputNormalization | InvalidNormalization
+)
 
 
 def _plain_standard_json(
@@ -371,6 +403,8 @@ class ToolDefinition:
     normalizer: ToolNormalizer | None = None
     schema_hash: str = field(default="", compare=True)
     candidate_input_schema: JsonObject | None = None
+    context_projector: ToolContextProjector | None = None
+    context_projection_version: str = "metadata-only-v1"
 
     def __post_init__(self) -> None:
         input_schema = _freeze_json(self.input_schema)
@@ -381,6 +415,15 @@ class ToolDefinition:
         )
         object.__setattr__(self, "input_schema", input_schema)
         object.__setattr__(self, "candidate_input_schema", candidate_schema)
+        if self.context_projector is not None and not callable(
+            self.context_projector
+        ):
+            raise ValueError("context_projector must be callable.")
+        if (
+            not isinstance(self.context_projection_version, str)
+            or not self.context_projection_version.strip()
+        ):
+            raise ValueError("context_projection_version must be non-blank text.")
 
     @property
     def metadata(self) -> ToolMetadata:

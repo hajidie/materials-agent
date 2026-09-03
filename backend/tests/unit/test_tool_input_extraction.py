@@ -34,6 +34,7 @@ def test_extraction_input_exposes_only_fixed_tool_context_and_user_delta() -> No
         "candidate_input_schema",
         "missing_fields",
         "ambiguous_fields",
+        "context_window",
     }
     assert not hasattr(command, "task_id")
     assert not hasattr(command, "conversation_id")

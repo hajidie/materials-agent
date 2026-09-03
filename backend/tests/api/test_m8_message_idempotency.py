@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event, Lock
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select
@@ -109,7 +110,7 @@ class _CorruptNeedsInputFinalizeUnitOfWork(SQLAlchemyUnitOfWork):
     def commit(self) -> None:
         self._controller.commits += 1
         super().commit()
-        if self._controller.commits != 4:
+        if self._controller.commits != 5:
             return
         with self._controller.session_factory() as session:
             assistant = session.scalar(
@@ -175,7 +176,11 @@ class _BlockFirstAfterPrepareService:
 
 
 def _conversation(client) -> str:
-    response = client.post("/api/v1/conversations", json={})
+    response = client.post(
+        "/api/v1/conversations",
+        headers={"Idempotency-Key": f"message-idem-conversation-{uuid4().hex}"},
+        json={},
+    )
     assert response.status_code == 201
     return response.json()["data"]["conversation_id"]
 
@@ -275,7 +280,7 @@ def test_task_create_replay_conflict_and_missing_key_are_exact(
         assert connection.scalar(select(func.count()).select_from(MessageRow)) == 2
         assert connection.scalar(
             select(func.count()).select_from(IdempotencyRecordRow)
-        ) == 1
+        ) == 2
 
 
 def test_twenty_concurrent_task_create_requests_have_one_chain(
@@ -313,7 +318,7 @@ def test_twenty_concurrent_task_create_requests_have_one_chain(
         assert connection.scalar(select(func.count()).select_from(MessageRow)) == 2
         assert connection.scalar(
             select(func.count()).select_from(IdempotencyRecordRow)
-        ) == 1
+        ) == 2
 
 
 def test_twenty_concurrent_full_tool_task_creates_execute_one_chain(
@@ -399,7 +404,7 @@ def test_twenty_concurrent_full_tool_task_creates_execute_one_chain(
         ) == 1
         assert connection.scalar(
             select(func.count()).select_from(IdempotencyRecordRow)
-        ) == 1
+        ) == 2
 
 
 def test_supplement_replay_creates_one_message_and_next_full_revision(
@@ -445,7 +450,7 @@ def test_supplement_replay_creates_one_message_and_next_full_revision(
     assert first.json()["data"]["idempotency_replayed"] is False
     assert replay.json()["data"]["idempotency_replayed"] is True
     assert conflict.status_code == 409
-    assert responder.calls == 2
+    assert responder.calls == 1
     with api_harness.engine.connect() as connection:
         revisions = list(
             connection.execute(
@@ -462,7 +467,7 @@ def test_supplement_replay_creates_one_message_and_next_full_revision(
         assert connection.scalar(select(func.count()).select_from(MessageRow)) == 4
         assert connection.scalar(
             select(func.count()).select_from(IdempotencyRecordRow)
-        ) == 2
+        ) == 3
 
 
 def test_twenty_concurrent_supplements_create_one_second_revision(
@@ -508,14 +513,14 @@ def test_twenty_concurrent_supplements_create_one_second_revision(
         not response.json()["data"]["idempotency_replayed"]
         for response in responses
     ) == 1
-    assert responder.calls == 2
+    assert responder.calls == 1
     with api_harness.engine.connect() as connection:
         assert connection.scalar(
             select(func.count()).select_from(TaskInputRevisionRow)
         ) == 2
         assert connection.scalar(
             select(func.count()).select_from(IdempotencyRecordRow)
-        ) == 2
+        ) == 3
 
 
 def test_different_supplement_keys_conflict_before_second_chain(
@@ -550,12 +555,12 @@ def test_different_supplement_keys_conflict_before_second_chain(
                 IdempotencyRecordRow.operation == "TASK_INPUT_SUPPLEMENT"
             )
         )
-        chat_calls_before = connection.scalar(
+        supplement_calls_before = connection.scalar(
             select(func.count())
             .select_from(LLMCallRow)
             .where(
                 LLMCallRow.task_id == task_id,
-                LLMCallRow.purpose == "CHAT_ORCHESTRATION",
+                    LLMCallRow.purpose == "TOOL_INPUT_EXTRACTION",
             )
         )
     service = _BlockFirstAfterPrepareService(
@@ -595,7 +600,7 @@ def test_different_supplement_keys_conflict_before_second_chain(
     assert first.status_code == 200, first.json()
     assert second.status_code == 409, second.json()
     assert second.json()["error"]["code"] == "TARGET_TASK_NOT_RECOVERABLE"
-    assert responder.calls == 2
+    assert responder.calls == 1
     with api_harness.engine.connect() as connection:
         assert connection.scalar(
             select(func.count())
@@ -614,9 +619,9 @@ def test_different_supplement_keys_conflict_before_second_chain(
             .select_from(LLMCallRow)
             .where(
                 LLMCallRow.task_id == task_id,
-                LLMCallRow.purpose == "CHAT_ORCHESTRATION",
-            )
-        ) == chat_calls_before + 1
+                    LLMCallRow.purpose == "TOOL_INPUT_EXTRACTION",
+                )
+            ) == supplement_calls_before + 1
         assert connection.scalar(
             select(func.count())
             .select_from(LLMCallRow)
@@ -717,7 +722,7 @@ def test_supplement_own_reservation_commit_uncertainty_continues_chain(
     assert first.json()["data"]["idempotency_replayed"] is False
     assert replay.json()["data"]["idempotency_replayed"] is True
     assert first.json()["data"]["task"]["status"] == "NEEDS_INPUT"
-    assert responder.calls == 2
+    assert responder.calls == 1
     with api_harness.engine.connect() as connection:
         assert connection.scalar(
             select(func.count())
@@ -1158,7 +1163,10 @@ def test_failure_after_binding_before_provider_is_replayable_without_provider(
     api_harness.persist_actor(actor_id)
     responder = _CountingResponder()
     service = _RaiseAfterPrepareService(
-        MessageSubmissionService(api_harness.unit_of_work_factory)
+        MessageSubmissionService(
+            api_harness.unit_of_work_factory,
+            clock=lambda: BASE_TIME.replace(hour=1),
+        )
     )
     with api_harness.create_client(
         actor_id,
@@ -1185,8 +1193,8 @@ def test_failure_after_binding_before_provider_is_replayable_without_provider(
     assert failed.json()["error"]["code"] == "INTERNAL_ERROR"
     assert replay.status_code == 200
     assert replay.json()["data"]["idempotency_replayed"] is True
-    assert replay.json()["data"]["task"]["status"] == "PENDING"
-    assert responder.calls == 0
+    assert replay.json()["data"]["task"]["status"] == "SUCCEEDED"
+    assert responder.calls == 1
 
 
 def test_successful_supplement_revalidates_full_input_and_replay_skips_tool(
@@ -1223,7 +1231,7 @@ def test_successful_supplement_revalidates_full_input_and_replay_skips_tool(
         body = {
             "submission_mode": "SUPPLEMENT_TASK",
             "target_task_id": task_id,
-            "content_text": "完整合法 Tool 请求",
+            "content_text": "时效温度 730 °C",
         }
         first = client.post(
             f"/api/v1/conversations/{conversation_id}/messages",
@@ -1299,4 +1307,4 @@ def test_supplement_revalidates_conversation_and_actor_ownership(
         ) == 1
         assert connection.scalar(
             select(func.count()).select_from(IdempotencyRecordRow)
-        ) == 1
+        ) == 3

@@ -4,6 +4,7 @@ default_model = "deepseek_default"
 [models.deepseek_default]
 provider = "deepseek"
 name = "deepseek-v4-flash"
+context_window_tokens = 1000000
 
 [models.deepseek_default.capabilities]
 supported_parameters = ["temperature", "top_p", "max_tokens"]
@@ -17,6 +18,7 @@ requires_streaming_for_reasoning = false
 [models.qwen_default]
 provider = "qwen"
 name = "qwen3.8-flash"
+context_window_tokens = 1000000
 
 [models.qwen_default.capabilities]
 supported_parameters = ["temperature", "top_p", "top_k", "max_tokens"]
@@ -34,13 +36,22 @@ timeout_seconds = 60
 temperature = 0.0
 max_tokens = 1024
 reasoning_mode = "disabled"
+prompt_limit_tokens = 16384
+history_token_budget = 8192
+safety_margin_tokens = 1024
 
 [roles.tool_input_extraction]
 temperature = 0.0
 max_tokens = 1024
 reasoning_mode = "disabled"
+prompt_limit_tokens = 8192
+history_token_budget = 4096
+safety_margin_tokens = 1024
 
 [roles.tool_result_explanation]
 temperature = 0.0
 max_tokens = 768
 reasoning_mode = "disabled"
+prompt_limit_tokens = 8192
+history_token_budget = 0
+safety_margin_tokens = 1024

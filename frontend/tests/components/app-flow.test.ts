@@ -8,7 +8,7 @@ import type {
   TimelineToolTaskItem,
   TimelineUserMessageItem,
 } from "../../src/api/types";
-import type { UserVisibleError } from "../../src/api/errors";
+import { ApiResponseError, type UserVisibleError } from "../../src/api/errors";
 import type {
   MutationStatus,
   PendingMutationV1,
@@ -29,16 +29,6 @@ vi.mock("../../src/composables/useMaterialsAgent", () => ({
 import App from "../../src/App.vue";
 
 const timestamp = "2026-07-24T12:00:00Z";
-
-function deferred<T>() {
-  let resolve!: (value: T | PromiseLike<T>) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  return { promise, resolve, reject };
-}
 
 function userItem(content = "用户问题"): TimelineUserMessageItem {
   return {
@@ -189,6 +179,7 @@ interface MutableAgentRefs {
   pendingMutation: ReturnType<typeof ref<PendingMutationV1 | null>>;
   mutationStatus: ReturnType<typeof ref<MutationStatus>>;
   conversationCreationUncertain: ReturnType<typeof ref<boolean>>;
+  firstTurnDraft: ReturnType<typeof ref<string>>;
   globalError: ReturnType<typeof ref<UserVisibleError | null>>;
   globalErrors: ReturnType<typeof ref<UserVisibleError[]>>;
   lastRequestId: ReturnType<typeof ref<string | null>>;
@@ -219,6 +210,7 @@ function buildAgent(): MaterialsAgentState {
     pendingMutation: ref(null),
     mutationStatus: ref("IDLE"),
     conversationCreationUncertain: ref(false),
+    firstTurnDraft: ref(""),
     globalError: ref(null),
     globalErrors: ref([]),
     lastRequestId: ref(null),
@@ -236,6 +228,11 @@ function buildAgent(): MaterialsAgentState {
     refs.mutationStatus.value = "IDLE";
     return { discarded };
   });
+  const showBlankWorkspace = vi.fn(() => {
+    refs.selectedConversationId.value = null;
+    refs.timeline.value = [];
+    refs.supplementTarget.value = null;
+  });
 
   return {
     ...refs,
@@ -251,6 +248,8 @@ function buildAgent(): MaterialsAgentState {
         updated_at: timestamp,
       }),
     ),
+    showBlankWorkspace,
+    deleteConversation: vi.fn(() => Promise.resolve()),
     selectConversation: vi.fn((conversationId: string) => {
       refs.selectedConversationId.value = conversationId;
       return Promise.resolve();
@@ -306,7 +305,7 @@ describe("App flow", () => {
     expect(agent.startPolling).toHaveBeenCalledTimes(1);
   });
 
-  it("maps Conversation create, select, and load-more events", async () => {
+  it("maps blank workspace, select, and load-more events", async () => {
     const wrapper = mount(App);
     await flushPromises();
 
@@ -315,7 +314,8 @@ describe("App flow", () => {
 
     await wrapper.get("[data-action=create-conversation]").trigger("click");
     await flushPromises();
-    expect(agent.createConversation).toHaveBeenCalledTimes(1);
+    expect(agent.showBlankWorkspace).toHaveBeenCalledTimes(1);
+    expect(agent.createConversation).not.toHaveBeenCalled();
 
     await wrapper.get("[data-conversation-id]").trigger("click");
     await flushPromises();
@@ -404,7 +404,7 @@ describe("App flow", () => {
     refs.globalErrors.value = [
       {
         message:
-          "无法确认 Conversation 是否已创建，请先刷新 Conversation 列表，避免重复创建。",
+          "无法确认 Conversation 是否已创建；请使用原幂等键重试，避免重复创建。",
       },
       {
         message: "任务状态已变化",
@@ -428,7 +428,7 @@ describe("App flow", () => {
     );
     expect(notices).toHaveLength(3);
     expect(wrapper.text()).toContain(
-      "无法确认 Conversation 是否已创建，请先刷新 Conversation 列表，避免重复创建。",
+      "无法确认 Conversation 是否已创建；请使用原幂等键重试，避免重复创建。",
     );
     expect(wrapper.text()).toContain("任务状态已变化");
     expect(wrapper.text()).toContain("读取失败，请检查网络后重试。");
@@ -466,14 +466,14 @@ describe("App flow", () => {
     expect(agent.discardPendingMutation).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps list refresh available while Conversation creation uncertainty disables only create", async () => {
+  it("keeps blank workspace and list refresh available after legacy creation uncertainty", async () => {
     refs.conversationCreationUncertain.value = true;
     const wrapper = mount(App);
     await flushPromises();
 
     expect(
       wrapper.get("[data-action=create-conversation]").attributes(),
-    ).toHaveProperty("disabled");
+    ).not.toHaveProperty("disabled");
     expect(
       wrapper.get("[data-action=refresh-conversations]").attributes(),
     ).not.toHaveProperty("disabled");
@@ -552,22 +552,14 @@ describe("App flow", () => {
     expect(agent.submitSupplement).not.toHaveBeenCalled();
   });
 
-  it("disables every write entry while Conversation creation POST is pending", async () => {
+  it("disables every write entry while a first-turn operation is pending", async () => {
     refs.timeline.value = [
       toolItem("NEEDS_INPUT", "task-needs-input"),
       toolItem("PARTIALLY_SUCCEEDED", "task-retry"),
     ];
-    const pendingCreate = deferred<
-      Awaited<ReturnType<MaterialsAgentState["createConversation"]>>
-    >();
-    vi.mocked(agent.createConversation).mockReturnValueOnce(
-      pendingCreate.promise,
-    );
+    refs.mutationStatus.value = "SENDING";
     const wrapper = mount(App);
     await flushPromises();
-
-    await wrapper.get("[data-action=create-conversation]").trigger("click");
-    await nextTick();
 
     expect(wrapper.get("textarea").attributes()).toHaveProperty("disabled");
     expect(
@@ -588,7 +580,6 @@ describe("App flow", () => {
     expect(
       wrapper.get("[data-conversation-id]").attributes(),
     ).not.toHaveProperty("disabled");
-    await wrapper.get("[data-action=create-conversation]").trigger("click");
     await wrapper.get("form").trigger("submit");
     await wrapper.get("[data-action=supplement]").trigger("click");
     await wrapper.get("[data-action=retry-tool]").trigger("click");
@@ -597,15 +588,61 @@ describe("App flow", () => {
     expect(agent.setSupplementTarget).not.toHaveBeenCalled();
     expect(agent.retryTool).not.toHaveBeenCalled();
     expect(agent.retryExplanation).not.toHaveBeenCalled();
-    expect(agent.createConversation).toHaveBeenCalledTimes(1);
+    expect(agent.showBlankWorkspace).not.toHaveBeenCalled();
+    expect(agent.createConversation).not.toHaveBeenCalled();
+  });
 
-    pendingCreate.resolve({
-      conversation_id: "conversation-created",
-      title: null,
-      created_at: timestamp,
-      updated_at: timestamp,
-    });
+  it("confirms permanent deletion in an alert dialog", async () => {
+    const wrapper = mount(App, { attachTo: document.body });
     await flushPromises();
+
+    await wrapper.get("[data-action=delete-conversation]").trigger("click");
+    await nextTick();
+
+    const dialog = wrapper.get("[role=alertdialog]");
+    expect(dialog.text()).toContain("永久删除");
+    expect(dialog.text()).toContain("且无法恢复");
+    expect(document.activeElement?.textContent?.trim()).toBe("取消");
+
+    await wrapper
+      .get("[data-action=confirm-delete-conversation]")
+      .trigger("click");
+    await flushPromises();
+
+    expect(agent.deleteConversation).toHaveBeenCalledWith("conversation-1");
+    expect(wrapper.find("[role=alertdialog]").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("keeps the deletion dialog open with a busy error", async () => {
+    vi.mocked(agent.deleteConversation).mockRejectedValueOnce(
+      new ApiResponseError(
+        409,
+        "request-delete-busy",
+        "CONVERSATION_BUSY",
+        "对话仍有执行中的任务，请稍后重试。",
+        [],
+        {
+          conversation_id: "conversation-1",
+          task_id: null,
+          tool_run_id: null,
+          result_id: null,
+        },
+      ),
+    );
+    const wrapper = mount(App);
+    await flushPromises();
+
+    await wrapper.get("[data-action=delete-conversation]").trigger("click");
+    await wrapper
+      .get("[data-action=confirm-delete-conversation]")
+      .trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get("[role=alertdialog]").text()).toContain(
+      "对话仍有执行中的任务，请稍后重试。",
+    );
+    expect(wrapper.get("[role=alert]").text()).toContain("稍后重试");
   });
 
   it.each<MutationStatus>(["SENDING", "UNCERTAIN"])(

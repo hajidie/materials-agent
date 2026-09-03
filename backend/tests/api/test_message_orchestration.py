@@ -21,6 +21,7 @@ from materialsagent.api.routes.conversations import (
 from materialsagent.domain.models.message import Message
 from materialsagent.domain.models.task import Task
 from materialsagent.domain.models.task_input_revision import TaskInputRevision
+from materialsagent.domain.ports.conversation_context import ContextBudget
 from materialsagent.infrastructure.db.conversation_task import (
     MessageRow,
     TaskInputRevisionRow,
@@ -120,6 +121,20 @@ class _DirectOrchestrationService:
         self.projection = projection
 
     def orchestrate_submission(
+        self,
+        *_args,
+        **_kwargs,
+    ) -> ChatOrchestrationProjection:
+        return self.projection
+
+    def resume_or_load_submission(
+        self,
+        *_args,
+        **_kwargs,
+    ) -> ChatOrchestrationProjection:
+        return self.projection
+
+    def load_current_submission(
         self,
         *_args,
         **_kwargs,
@@ -239,7 +254,11 @@ def test_ready_route_rejects_missing_revision(
 
 
 def _create_conversation(client) -> str:
-    response = client.post("/api/v1/conversations", json={})
+    response = client.post(
+        "/api/v1/conversations",
+        headers={"Idempotency-Key": f"orchestration-conversation-{uuid4().hex}"},
+        json={},
+    )
     assert response.status_code == 201
     return response.json()["data"]["conversation_id"]
 
@@ -420,7 +439,7 @@ def test_bound_missing_input_is_supplemented_without_first_route_rebinding(
     }
 
 
-def test_hard_invalid_message_returns_agent_internal_without_binding(
+def test_hard_invalid_message_returns_persisted_validation_failure(
     api_harness,
 ) -> None:
     actor_id = "actor_local"
@@ -430,19 +449,20 @@ def test_hard_invalid_message_returns_agent_internal_without_binding(
         conversation_id = _create_conversation(client)
         response = _submit(client, conversation_id, "越界温度")
 
-    assert response.status_code == 500
+    assert response.status_code == 422
     body = response.json()
-    assert body["error"]["code"] == "AGENT_INTERNAL_ERROR"
+    assert body["error"]["code"] == "VALIDATION_FAILED"
     assert body["resource"]["conversation_id"] == conversation_id
     assert body["resource"]["task_id"]
     messages, tasks, revisions, calls = _rows(api_harness)
     assert len(messages) == 1
-    assert len(revisions) == 0
-    assert calls[0].status == "FAILED"
-    assert calls[0].error_code == "LLM_SCHEMA_MISMATCH"
+    assert len(revisions) == 1
+    assert revisions[0].validation_errors[0]["code"] == "PROCESS_PARAMETERS_OUT_OF_RANGE"
+    assert calls[0].status == "SUCCEEDED"
+    assert calls[0].error_code is None
     assert tasks[0].current_status == "FAILED"
-    assert tasks[0].error_code == "AGENT_INTERNAL_ERROR"
-    assert tasks[0].tool_id is None
+    assert tasks[0].error_code == "VALIDATION_FAILED"
+    assert tasks[0].tool_id == "zta35g_sem_virtual_lab"
 
 
 def test_complete_valid_tool_message_returns_bound_ready_without_fake_result(
@@ -666,3 +686,43 @@ def test_api_can_inject_a_controlled_chat_port_without_calling_it_at_app_creatio
     assert response.status_code == 200
     assert response.json()["data"]["assistant_message"]["content_text"] == "注入回答。"
     assert calls == 1
+
+
+def test_zero_history_base_prompt_over_budget_returns_422_without_provider_call(
+    api_harness,
+) -> None:
+    actor_id = "actor_local"
+    api_harness.persist_actor(actor_id)
+    provider_calls = 0
+
+    def responder(_input: object) -> dict[str, object]:
+        nonlocal provider_calls
+        provider_calls += 1
+        return {"route": "KNOWLEDGE_ANSWER", "answer_text": "must not run"}
+
+    port = MockChatOrchestrationAdapter(responder)
+    port.context_budget = ContextBudget(
+        prompt_limit_tokens=1,
+        history_token_budget=0,
+        safety_margin_tokens=0,
+        context_window_tokens=100,
+        max_output_tokens=10,
+    )
+    with api_harness.create_client(
+        actor_id,
+        chat_orchestration_port=port,
+    ) as client:
+        conversation_id = _create_conversation(client)
+        response = _submit(client, conversation_id, "short message")
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "CONTEXT_BUDGET_EXCEEDED"
+    assert provider_calls == 0
+    _, tasks, revisions, calls = _rows(api_harness)
+    assert revisions == []
+    assert tasks[0].current_status == "FAILED"
+    assert tasks[0].error_code == "CONTEXT_BUDGET_EXCEEDED"
+    assert calls[0].status == "FAILED"
+    assert calls[0].error_code == "CONTEXT_BUDGET_EXCEEDED"
+    assert calls[0].context_snapshot is not None
+    assert calls[0].context_snapshot["selected_turn_count"] == 0

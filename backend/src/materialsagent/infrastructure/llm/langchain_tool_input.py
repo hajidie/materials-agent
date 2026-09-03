@@ -22,6 +22,7 @@ from materialsagent.domain.ports.tool_input_extraction import (
     ToolInputExtractionRequestMetadata,
     ToolInputExtractionTimeoutError,
 )
+from materialsagent.domain.ports.conversation_context import ContextBudget
 from materialsagent.infrastructure.llm.common import (
     PromptRenderCache,
     SAFE_MESSAGES,
@@ -32,6 +33,7 @@ from materialsagent.infrastructure.llm.common import (
 )
 from materialsagent.infrastructure.llm.configuration import ConfiguredRole
 from materialsagent.infrastructure.llm.factory import create_chat_model
+from materialsagent.infrastructure.llm.token_counter import Cl100kTokenCounter
 from materialsagent.infrastructure.llm.prompts import (
     TOOL_INPUT_EXTRACTION_PROMPT_ID,
     TOOL_INPUT_EXTRACTION_PROMPT_VERSION,
@@ -74,8 +76,16 @@ class LangChainToolInputExtractionAdapter:
             )
         self._config = config
         self._prompt_cache = PromptRenderCache()
+        self._token_counter = Cl100kTokenCounter()
         self.provider = config.provider
         self.model_name = config.model_name
+        self.context_budget = ContextBudget(
+            prompt_limit_tokens=config.prompt_limit_tokens,
+            history_token_budget=config.history_token_budget,
+            safety_margin_tokens=config.safety_margin_tokens,
+            context_window_tokens=config.context_window_tokens,
+            max_output_tokens=config.max_tokens or 1024,
+        )
         if structured_runnable is None:
             model = chat_model or create_chat_model(config)
             structured_runnable = model.with_structured_output(  # type: ignore[attr-defined]
@@ -84,6 +94,16 @@ class LangChainToolInputExtractionAdapter:
                 include_raw=True,
             )
         self._structured_runnable = structured_runnable
+
+    def count_prompt_tokens(
+        self,
+        command: ToolInputExtractionInput,
+    ) -> int:
+        return self._token_counter.count_messages(
+            render_tool_input_extraction_prompt(command)
+        ) + self._token_counter.count_schema(
+            ProviderToolInputExtractionResponse.model_json_schema()
+        )
 
     def request_metadata(
         self,
