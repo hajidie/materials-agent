@@ -1,12 +1,18 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 import json
-from typing import Any, Final
+from typing import Any
 
 from langchain_core.exceptions import OutputParserException
-from langchain_deepseek import ChatDeepSeek
-from pydantic import BaseModel, ConfigDict, JsonValue, StrictStr, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    JsonValue,
+    StrictStr,
+    ValidationError,
+    model_validator,
+)
 
 from materialsagent.domain.ports.tool_input_extraction import (
     ToolInputExtractionInput,
@@ -16,26 +22,21 @@ from materialsagent.domain.ports.tool_input_extraction import (
     ToolInputExtractionRequestMetadata,
     ToolInputExtractionTimeoutError,
 )
-from materialsagent.infrastructure.config import DeepSeekConfig
-from materialsagent.infrastructure.llm.deepseek_common import (
+from materialsagent.infrastructure.llm.common import (
+    PromptRenderCache,
     SAFE_MESSAGES,
     canonical_prompt_digest,
     classify_provider_exception,
     controlled_usage,
-    deepseek_client_kwargs,
     success_provider_request_id,
 )
-
-
-PROMPT_TEMPLATE_ID: Final = "tool-input-extraction"
-PROMPT_TEMPLATE_VERSION: Final = "1"
-GENERATION_PARAMETERS: Final = {
-    "temperature": 0,
-    "max_tokens": 1024,
-    "thinking_mode": "disabled",
-    "response_format": "json_object",
-    "streaming": False,
-}
+from materialsagent.infrastructure.llm.configuration import ConfiguredRole
+from materialsagent.infrastructure.llm.factory import create_chat_model
+from materialsagent.infrastructure.llm.prompts import (
+    TOOL_INPUT_EXTRACTION_PROMPT_ID,
+    TOOL_INPUT_EXTRACTION_PROMPT_VERSION,
+    render_tool_input_extraction_prompt,
+)
 
 
 class ProviderToolInputExtractionResponse(BaseModel):
@@ -56,93 +57,66 @@ class ProviderToolInputExtractionResponse(BaseModel):
         return self
 
 
-def _plain_json(value: object) -> object:
-    if isinstance(value, Mapping):
-        return {key: _plain_json(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_plain_json(item) for item in value]
-    return value
-
-
-def _render_messages(value: ToolInputExtractionInput) -> list[dict[str, str]]:
-    context = json.dumps(
-        {
-            "tool_context_ref": {
-                "tool_id": value.tool_context_ref.tool_id,
-                "version": value.tool_context_ref.version,
-                "schema_hash": value.tool_context_ref.schema_hash,
-            },
-            "candidate_input_schema": _plain_json(
-                value.candidate_input_schema
-            ),
-            "missing_fields": list(value.missing_fields),
-            "ambiguous_fields": list(value.ambiguous_fields),
-        },
-        ensure_ascii=False,
-        allow_nan=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-    return [
-        {
-            "role": "system",
-            "content": (
-                "Extract only newly supplied values for this already-bound Tool. "
-                "Use only the supplied Tool context and candidate input schema. "
-                "Return exactly one JSON object shaped as "
-                "{\"candidate_input_delta\":{}} and no other text. Do not return "
-                "a Tool ID, route, task status, execution permission, version, or "
-                f"schema hash. Bound Tool context: {context}"
-            ),
-        },
-        {"role": "user", "content": value.content_text},
-    ]
-
-
-def _metadata(value: ToolInputExtractionInput) -> ToolInputExtractionRequestMetadata:
-    messages = _render_messages(value)
-    return ToolInputExtractionRequestMetadata(
-        provider="deepseek",
-        model_name="deepseek-v4-flash",
-        prompt_template_id=PROMPT_TEMPLATE_ID,
-        prompt_template_version=PROMPT_TEMPLATE_VERSION,
-        prompt_digest=canonical_prompt_digest(
-            template_id=PROMPT_TEMPLATE_ID,
-            template_version=PROMPT_TEMPLATE_VERSION,
-            messages=messages,
-        ),
-        generation_parameters=GENERATION_PARAMETERS,
-    )
-
-
-class DeepSeekToolInputExtractionAdapter:
-    provider = "deepseek"
-    model_name = "deepseek-v4-flash"
+class LangChainToolInputExtractionAdapter:
+    prompt_template_id = TOOL_INPUT_EXTRACTION_PROMPT_ID
+    prompt_template_version = TOOL_INPUT_EXTRACTION_PROMPT_VERSION
 
     def __init__(
         self,
-        config: DeepSeekConfig,
+        config: ConfiguredRole,
         *,
+        chat_model: object | None = None,
         structured_runnable: object | None = None,
-        model_factory: Callable[..., object] | None = None,
     ) -> None:
-        if structured_runnable is None:
-            factory = model_factory or ChatDeepSeek
-            model = factory(
-                **deepseek_client_kwargs(config, max_tokens=1024)
+        if config.role != "tool_input_extraction":
+            raise ValueError(
+                "Tool input adapter requires tool_input_extraction config."
             )
-            structured_runnable = model.with_structured_output(
+        self._config = config
+        self._prompt_cache = PromptRenderCache()
+        self.provider = config.provider
+        self.model_name = config.model_name
+        if structured_runnable is None:
+            model = chat_model or create_chat_model(config)
+            structured_runnable = model.with_structured_output(  # type: ignore[attr-defined]
                 ProviderToolInputExtractionResponse,
                 method="json_mode",
                 include_raw=True,
             )
         self._structured_runnable = structured_runnable
 
+    def request_metadata(
+        self,
+        command: ToolInputExtractionInput,
+    ) -> ToolInputExtractionRequestMetadata:
+        messages = render_tool_input_extraction_prompt(command)
+        self._prompt_cache.store(command, messages)
+        return self._metadata_from_messages(messages)
+
+    def _metadata_from_messages(
+        self,
+        messages: list[dict[str, str]],
+    ) -> ToolInputExtractionRequestMetadata:
+        return ToolInputExtractionRequestMetadata(
+            provider=self.provider,
+            model_name=self.model_name,
+            prompt_template_id=self.prompt_template_id,
+            prompt_template_version=self.prompt_template_version,
+            prompt_digest=canonical_prompt_digest(
+                template_id=self.prompt_template_id,
+                template_version=self.prompt_template_version,
+                messages=messages,
+            ),
+            generation_parameters=self._config.generation_parameters,
+        )
+
     def extract(
         self,
         command: ToolInputExtractionInput,
     ) -> ToolInputExtractionOutcome:
-        messages = _render_messages(command)
+        messages = self._prompt_cache.take(command)
+        if messages is None:
+            messages = render_tool_input_extraction_prompt(command)
         try:
             envelope = self._structured_runnable.invoke(messages)  # type: ignore[attr-defined]
         except json.JSONDecodeError:
@@ -179,7 +153,7 @@ class DeepSeekToolInputExtractionAdapter:
             )
             return ToolInputExtractionOutcome(
                 candidate_input_delta=parsed.candidate_input_delta,
-                request_metadata=_metadata(command),
+                request_metadata=self._metadata_from_messages(messages),
                 usage=controlled_usage(raw),
                 provider_request_id=success_provider_request_id(raw),
             )

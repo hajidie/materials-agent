@@ -67,8 +67,8 @@ def _service(
 
 
 class _ProviderMetadataExplanationAdapter(MockExplanationAdapter):
-    provider = "deepseek"
-    model_name = "deepseek-v4-flash"
+    provider = "qwen"
+    model_name = "qwen-test"
     prompt_template_version = "2"
 
     def request_metadata(self, value) -> ExplanationRequestMetadata:
@@ -80,9 +80,10 @@ class _ProviderMetadataExplanationAdapter(MockExplanationAdapter):
             prompt_template_version=self.prompt_template_version,
             prompt_digest=legacy.prompt_digest,
             generation_parameters={
+                "schema_version": 1,
                 "temperature": 0,
                 "max_tokens": 768,
-                "thinking_mode": "disabled",
+                "reasoning_mode": "disabled",
                 "response_format": "text",
                 "streaming": False,
             },
@@ -147,8 +148,8 @@ def test_provider_metadata_usage_and_request_id_are_persisted(
             )
         )
     assert row is not None
-    assert row.provider == "deepseek"
-    assert row.model_name == "deepseek-v4-flash"
+    assert row.provider == "qwen"
+    assert row.model_name == "qwen-test"
     assert row.prompt_template_version == "2"
     assert row.generation_parameters["max_tokens"] == 768
     assert row.usage == {"input_tokens": 21, "output_tokens": 4}

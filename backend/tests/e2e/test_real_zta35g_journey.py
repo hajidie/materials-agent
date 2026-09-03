@@ -2786,7 +2786,7 @@ def test_secret_leak_priority_survives_stage_b_cleanup_failures(
     assert "P1B2_GATE4_CLEANUP_INCOMPLETE" not in str(exc.value)
 
 
-def test_mock_subprocess_environment_overrides_deepseek_canary_and_authorizations(
+def test_mock_subprocess_environment_overrides_provider_canaries_and_authorizations(
     runner,
     tmp_path,
 ) -> None:
@@ -2794,8 +2794,9 @@ def test_mock_subprocess_environment_overrides_deepseek_canary_and_authorization
 
     fake_dotenv = tmp_path / ".env"
     fake_dotenv.write_text(
-        "LLM_ADAPTER=deepseek\n"
-        "DEEPSEEK_API_KEY=offline-provider-canary\n",
+        "LLM_ADAPTER=provider\n"
+        "DEEPSEEK_API_KEY=offline-provider-canary\n"
+        "DASHSCOPE_API_KEY=offline-qwen-canary\n",
         encoding="utf-8",
     )
     inherited = runner.parse_dotenv_text(
@@ -2817,6 +2818,7 @@ def test_mock_subprocess_environment_overrides_deepseek_canary_and_authorization
 
     assert environment["LLM_ADAPTER"] == "mock"
     assert environment["DEEPSEEK_API_KEY"] == ""
+    assert environment["DASHSCOPE_API_KEY"] == ""
     assert environment["PYTHONUTF8"] == "1"
     assert "offline-provider-canary" not in environment.values()
     assert environment["PYTHONPATH"] == "offline-backend-src"
@@ -2828,7 +2830,7 @@ def test_mock_subprocess_environment_overrides_deepseek_canary_and_authorization
         assert name not in environment
 
 
-def test_mock_provider_preflight_constructs_no_deepseek_adapter_or_delegate(
+def test_mock_provider_preflight_constructs_no_provider_adapter_or_delegate(
     runner,
 ) -> None:
     """Changing the preflight to construct or call a real port must fail."""
@@ -2838,26 +2840,26 @@ def test_mock_provider_preflight_constructs_no_deepseek_adapter_or_delegate(
     class Settings:
         llm_adapter = "mock"
         deepseek_api_key = None
+        dashscope_api_key = None
 
     result = runner.mock_provider_preflight(
         {
             "LLM_ADAPTER": "mock",
             "DEEPSEEK_API_KEY": "",
+            "DASHSCOPE_API_KEY": "",
         },
         settings_loader=lambda environment: (
             events.append(f"settings:{environment['LLM_ADAPTER']}") or Settings()
         ),
         app_probe=lambda _settings: events.append("mock-app") or {
-            "deepseek_chat_adapter_constructions": 0,
-            "deepseek_explanation_adapter_constructions": 0,
+            "provider_adapter_constructions": 0,
             "provider_delegate_calls": 0,
         },
     )
 
     assert result == {
         "llm_adapter": "mock",
-        "deepseek_chat_adapter_constructions": 0,
-        "deepseek_explanation_adapter_constructions": 0,
+        "provider_adapter_constructions": 0,
         "provider_delegate_calls": 0,
     }
     assert events == ["settings:mock", "mock-app"]
@@ -2866,9 +2868,22 @@ def test_mock_provider_preflight_constructs_no_deepseek_adapter_or_delegate(
 @pytest.mark.parametrize(
     "environment",
     [
-        {"DEEPSEEK_API_KEY": ""},
-        {"LLM_ADAPTER": "deepseek", "DEEPSEEK_API_KEY": ""},
-        {"LLM_ADAPTER": "mock", "DEEPSEEK_API_KEY": "canary"},
+        {"DEEPSEEK_API_KEY": "", "DASHSCOPE_API_KEY": ""},
+        {
+            "LLM_ADAPTER": "provider",
+            "DEEPSEEK_API_KEY": "",
+            "DASHSCOPE_API_KEY": "",
+        },
+        {
+            "LLM_ADAPTER": "mock",
+            "DEEPSEEK_API_KEY": "canary",
+            "DASHSCOPE_API_KEY": "",
+        },
+        {
+            "LLM_ADAPTER": "mock",
+            "DEEPSEEK_API_KEY": "",
+            "DASHSCOPE_API_KEY": "canary",
+        },
     ],
 )
 def test_mock_provider_preflight_rejects_before_test_collection(
@@ -2880,8 +2895,9 @@ def test_mock_provider_preflight_rejects_before_test_collection(
     collected: list[str] = []
 
     class Settings:
-        llm_adapter = environment.get("LLM_ADAPTER", "deepseek")
+        llm_adapter = environment.get("LLM_ADAPTER", "provider")
         deepseek_api_key = environment.get("DEEPSEEK_API_KEY")
+        dashscope_api_key = environment.get("DASHSCOPE_API_KEY")
 
     with pytest.raises(
         runner.Gate4Error,
@@ -2904,8 +2920,9 @@ def test_controlled_mock_command_runs_preflight_in_exact_child_environment(
     events: list[object] = []
     inherited = {
         "PATH": "offline-path",
-        "LLM_ADAPTER": "deepseek",
+        "LLM_ADAPTER": "provider",
         "DEEPSEEK_API_KEY": "offline-provider-canary",
+        "DASHSCOPE_API_KEY": "offline-qwen-canary",
     }
 
     exit_code = runner.run_controlled_mock_command(
@@ -2925,6 +2942,7 @@ def test_controlled_mock_command_runs_preflight_in_exact_child_environment(
     assert events[0][1] == events[1][2]
     assert events[1][2]["LLM_ADAPTER"] == "mock"
     assert events[1][2]["DEEPSEEK_API_KEY"] == ""
+    assert events[1][2]["DASHSCOPE_API_KEY"] == ""
     assert "offline-provider-canary" not in events[1][2].values()
 
 
@@ -2954,7 +2972,7 @@ def test_mock_full_regression_owns_cleanup_before_stack_start_returns() -> None:
 
     source = RUNNER_PATH.read_text(encoding="utf-8")
     start = source.index('failure_stage = "MOCK_STACK_START"')
-    end = source.index("deepseek_before =", start)
+    end = source.index("provider_before =", start)
     start_block = source[start:end]
 
     assert "stack_attempted = True" in start_block
@@ -2988,7 +3006,8 @@ def test_mock_snapshot_dotenv_whitelists_infrastructure_without_provider_key(
         "ZTA35G_RUNTIME_URL=http://127.0.0.1:8100\n"
         "ZTA35G_RUNTIME_TOKEN=offline-runtime-secret\n"
         "TIMELINE_CURSOR_SIGNING_KEY=offline-signing-key-at-least-32-bytes\n"
-        "DEEPSEEK_API_KEY=provider-canary-must-not-be-read\n",
+        "DEEPSEEK_API_KEY=provider-canary-must-not-be-read\n"
+        "DASHSCOPE_API_KEY=qwen-canary-must-not-be-read\n",
         encoding="utf-8",
     )
     destination = tmp_path / "snapshot.env"
@@ -2998,11 +3017,15 @@ def test_mock_snapshot_dotenv_whitelists_infrastructure_without_provider_key(
     rendered = destination.read_text(encoding="utf-8")
 
     assert "DEEPSEEK_API_KEY" not in values
+    assert "DASHSCOPE_API_KEY" not in values
     assert "provider-canary-must-not-be-read" not in values.values()
     assert "provider-canary-must-not-be-read" not in rendered
+    assert "qwen-canary-must-not-be-read" not in values.values()
+    assert "qwen-canary-must-not-be-read" not in rendered
     for line in (
         "LLM_ADAPTER=mock",
         "DEEPSEEK_API_KEY=",
+        "DASHSCOPE_API_KEY=",
         "M12B_REAL_CALLS_AUTHORIZED=",
         "P1B2_GATE4_AUTHORIZED=",
         "P1B2_GATE4_REAL_PROVIDER_AUTHORIZED=",
@@ -3024,12 +3047,14 @@ def test_phase1a_parent_environment_excludes_infrastructure_configuration(
             "POSTGRES_DB": "must-not-enter-tests",
             "MINIO_SECRET_KEY": "must-not-enter-tests",
             "DEEPSEEK_API_KEY": "provider-canary",
+            "DASHSCOPE_API_KEY": "qwen-canary",
             "P1B2_GATE4_AUTHORIZED": "YES",
         }
     )
 
     assert environment["LLM_ADAPTER"] == "mock"
     assert environment["DEEPSEEK_API_KEY"] == ""
+    assert environment["DASHSCOPE_API_KEY"] == ""
     assert environment["PYTHONUTF8"] == "1"
     assert "POSTGRES_DB" not in environment
     assert "MINIO_SECRET_KEY" not in environment

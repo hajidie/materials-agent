@@ -5,7 +5,7 @@ param(
     [string]$Action = 'Start',
     [ValidateSet('Mock', 'Real')]
     [string]$Runtime = 'Mock',
-    [ValidateSet('Mock', 'DeepSeek')]
+    [ValidateSet('Mock', 'Provider')]
     [string]$Llm = 'Mock',
     [string]$BackendPython,
     [string]$RuntimePython,
@@ -35,6 +35,7 @@ $ExpectedRoles = @{
 }
 $ForbiddenStateNames = @(
     'DEEPSEEK_API_KEY',
+    'DASHSCOPE_API_KEY',
     'ZTA35G_RUNTIME_TOKEN',
     'POSTGRES_PASSWORD',
     'MINIO_SECRET_KEY',
@@ -240,7 +241,7 @@ function New-LaunchProfile {
         [ValidateSet('Mock', 'Real')]
         [string]$Runtime,
         [Parameter(Mandatory = $true)]
-        [ValidateSet('Mock', 'DeepSeek')]
+        [ValidateSet('Mock', 'Provider')]
         [string]$Llm,
         [Parameter(Mandatory = $true)]
         [string]$RuntimeToken,
@@ -264,11 +265,13 @@ function New-LaunchProfile {
     }
     if ($Llm -eq 'Mock') {
         $backendEnvironment['DEEPSEEK_API_KEY'] = ''
+        $backendEnvironment['DASHSCOPE_API_KEY'] = ''
         $backendEnvironment['M12B_REAL_CALLS_AUTHORIZED'] = ''
         $backendEnvironment['P1B2_GATE4_AUTHORIZED'] = ''
     }
     else {
         $backendEnvironment['DEEPSEEK_API_KEY'] = $null
+        $backendEnvironment['DASHSCOPE_API_KEY'] = $null
     }
 
     $runtimeModule = if ($Runtime -eq 'Real') {
@@ -293,6 +296,7 @@ function New-LaunchProfile {
         ZTA35G_RUNTIME_TOKEN = $RuntimeToken
         ZTA35G_MODEL_ROOT = $(if ($Runtime -eq 'Real') { [IO.Path]::GetFullPath($modelRoot) } else { $null })
         DEEPSEEK_API_KEY = $null
+        DASHSCOPE_API_KEY = $null
         POSTGRES_PASSWORD = $null
         MINIO_ACCESS_KEY = $null
         MINIO_SECRET_KEY = $null
@@ -329,6 +333,7 @@ function New-LaunchProfile {
         frontend_environment = @{
             MATERIALSAGENT_BACKEND_ORIGIN = 'http://127.0.0.1:8000'
             DEEPSEEK_API_KEY = $null
+            DASHSCOPE_API_KEY = $null
             ZTA35G_RUNTIME_TOKEN = $null
             ZTA35G_MODEL_ROOT = $null
             POSTGRES_PASSWORD = $null
@@ -341,6 +346,7 @@ function New-LaunchProfile {
             MINIO_API_PORT = '9000'
             MINIO_CONSOLE_PORT = '9001'
             DEEPSEEK_API_KEY = $null
+            DASHSCOPE_API_KEY = $null
             ZTA35G_RUNTIME_TOKEN = $null
             ZTA35G_MODEL_ROOT = $null
             TIMELINE_CURSOR_SIGNING_KEY = $null
@@ -420,7 +426,7 @@ function Invoke-ComposeStartSafely {
     }
 }
 
-function Assert-DeepSeekRootConfiguration {
+function Assert-ProviderRootConfiguration {
     param(
         [Parameter(Mandatory = $true)]
         [string]$BackendPython,
@@ -431,23 +437,28 @@ function Assert-DeepSeekRootConfiguration {
         $Probe = {
             param($python)
             $probeCode = @'
-from materialsagent.infrastructure.config import ConfigurationError, load_settings, parse_deepseek_config
+from materialsagent.infrastructure.config import ConfigurationError, load_settings
+from materialsagent.infrastructure.llm.configuration import load_llm_configuration
 try:
     settings = load_settings()
 except ConfigurationError:
     raise SystemExit(2)
 try:
-    config = parse_deepseek_config(settings)
-except ConfigurationError:
-    raise SystemExit(3)
-if config is None:
-    raise SystemExit(3)
+    load_llm_configuration(settings)
+except ConfigurationError as error:
+    message = str(error)
+    if message == "Missing provider credential 'DEEPSEEK_API_KEY'.":
+        raise SystemExit(3)
+    if message == "Missing provider credential 'DASHSCOPE_API_KEY'.":
+        raise SystemExit(4)
+    raise SystemExit(2)
 '@
             return Invoke-WithProcessEnvironment `
                 -Values @{
                     PYTHONPATH = (Join-Path $RepoRoot 'backend\src')
-                    LLM_ADAPTER = 'deepseek'
+                    LLM_ADAPTER = 'provider'
                     DEEPSEEK_API_KEY = $null
+                    DASHSCOPE_API_KEY = $null
                 } `
                 -Operation {
                     & $python -c $probeCode *> $null
@@ -460,12 +471,15 @@ if config is None:
         return
     }
     if ($exitCode -eq 2) {
-        throw 'LOCAL_DEV_CONFIGURATION_INVALID source=root_dotenv mode=deepseek'
+        throw 'LOCAL_DEV_CONFIGURATION_INVALID source=root_dotenv mode=provider'
     }
     if ($exitCode -eq 3) {
         throw 'LOCAL_DEV_CONFIGURATION_MISSING name=DEEPSEEK_API_KEY source=root_dotenv'
     }
-    throw 'LOCAL_DEV_CONFIGURATION_PROBE_FAILED mode=deepseek'
+    if ($exitCode -eq 4) {
+        throw 'LOCAL_DEV_CONFIGURATION_MISSING name=DASHSCOPE_API_KEY source=root_dotenv'
+    }
+    throw 'LOCAL_DEV_CONFIGURATION_PROBE_FAILED mode=provider'
 }
 
 function Test-SafeIdentityValue {
@@ -557,7 +571,7 @@ function New-LocalDevState {
         [ValidateSet('Mock', 'Real')]
         [string]$Runtime,
         [Parameter(Mandatory = $true)]
-        [ValidateSet('Mock', 'DeepSeek')]
+        [ValidateSet('Mock', 'Provider')]
         [string]$Llm,
         [Parameter(Mandatory = $true)]
         [string]$DockerContext,
@@ -634,7 +648,7 @@ function Test-LocalDevState {
             ) -or
             [string]$State.phase -notin @('starting', 'running', 'cleanup_required') -or
             [string]$State.runtime -notin @('mock', 'real') -or
-            [string]$State.llm -notin @('mock', 'deepseek') -or
+            [string]$State.llm -notin @('mock', 'provider') -or
             -not (Test-SafeIdentityValue -Value ([string]$State.docker_context)) -or
             -not (Test-SafeIdentityValue -Value ([string]$State.docker_engine_id))
         ) {
@@ -1441,8 +1455,8 @@ function Invoke-LocalDevStart {
             -Python $runtimePythonPath `
             -ExpectedMajorMinor $(if ($Runtime -eq 'Real') { '3.8' } else { '3.11' })
         $currentStage = 'configuration_preflight'
-        if ($Llm -eq 'DeepSeek') {
-            Assert-DeepSeekRootConfiguration -BackendPython $backendPythonPath
+        if ($Llm -eq 'Provider') {
+            Assert-ProviderRootConfiguration -BackendPython $backendPythonPath
         }
         $npm = Get-Command 'npm.cmd' -CommandType Application -ErrorAction SilentlyContinue |
             Select-Object -First 1

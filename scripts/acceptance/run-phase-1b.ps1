@@ -270,6 +270,7 @@ function New-MockChildEnvironment {
     $child["APP_ENV"] = "local"
     $child["LLM_ADAPTER"] = "mock"
     $child["DEEPSEEK_API_KEY"] = ""
+    $child["DASHSCOPE_API_KEY"] = ""
     $child["PYTHONUTF8"] = "1"
     foreach ($name in @(
         "M12B_REAL_CALLS_AUTHORIZED",
@@ -549,8 +550,9 @@ function Invoke-MockExecutor {
             $base[$name] = $value
         }
     }
-    $base["LLM_ADAPTER"] = "deepseek"
+    $base["LLM_ADAPTER"] = "provider"
     $base["DEEPSEEK_API_KEY"] = "must-not-enter-mock-child"
+    $base["DASHSCOPE_API_KEY"] = "must-not-enter-mock-child-qwen"
     $environment = New-MockChildEnvironment -BaseEnvironment $base
 
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
@@ -947,7 +949,8 @@ function Invoke-OfflineSelfTest {
     $baseEnvironment = @{
         PATH = "selftest-path"
         DEEPSEEK_API_KEY = "must-not-be-copied"
-        LLM_ADAPTER = "deepseek"
+        DASHSCOPE_API_KEY = "must-not-be-copied-qwen"
+        LLM_ADAPTER = "provider"
         M12B_REAL_CALLS_AUTHORIZED = "YES"
         P1B2_GATE4_AUTHORIZED = "YES"
     }
@@ -955,6 +958,7 @@ function Invoke-OfflineSelfTest {
         -BaseEnvironment $baseEnvironment
     Assert-SelfTest -Condition ($mockEnvironment["LLM_ADAPTER"] -eq "mock")
     Assert-SelfTest -Condition ($mockEnvironment["DEEPSEEK_API_KEY"] -eq "")
+    Assert-SelfTest -Condition ($mockEnvironment["DASHSCOPE_API_KEY"] -eq "")
     Assert-SelfTest -Condition (
         -not $mockEnvironment.ContainsKey("M12B_REAL_CALLS_AUTHORIZED")
     )
@@ -971,21 +975,25 @@ function Invoke-OfflineSelfTest {
         $runtimeEnvironment["ZTA35G_RUNTIME_TOKEN"] -eq $controlled["runtime_token"]
     )
     Assert-SelfTest -Condition (-not $runtimeEnvironment.ContainsKey("DEEPSEEK_API_KEY"))
+    Assert-SelfTest -Condition (-not $runtimeEnvironment.ContainsKey("DASHSCOPE_API_KEY"))
 
     foreach ($providerFreeRole in @("frontend", "compose", "log")) {
         $roleEnvironment = New-RoleEnvironment `
             -Role $providerFreeRole -BaseEnvironment $baseEnvironment -Controlled $controlled
         Assert-SelfTest -Condition ($roleEnvironment.Count -eq 1)
         Assert-SelfTest -Condition (-not $roleEnvironment.ContainsKey("DEEPSEEK_API_KEY"))
+        Assert-SelfTest -Condition (-not $roleEnvironment.ContainsKey("DASHSCOPE_API_KEY"))
     }
     $databaseEnvironment = New-RoleEnvironment `
         -Role "database" -BaseEnvironment $baseEnvironment -Controlled $controlled
     Assert-SelfTest -Condition ($databaseEnvironment.Count -eq 2)
     Assert-SelfTest -Condition (-not $databaseEnvironment.ContainsKey("DEEPSEEK_API_KEY"))
+    Assert-SelfTest -Condition (-not $databaseEnvironment.ContainsKey("DASHSCOPE_API_KEY"))
     $minioEnvironment = New-RoleEnvironment `
         -Role "minio" -BaseEnvironment $baseEnvironment -Controlled $controlled
     Assert-SelfTest -Condition ($minioEnvironment.Count -eq 2)
     Assert-SelfTest -Condition (-not $minioEnvironment.ContainsKey("DEEPSEEK_API_KEY"))
+    Assert-SelfTest -Condition (-not $minioEnvironment.ContainsKey("DASHSCOPE_API_KEY"))
 
     $backendReal = New-RoleEnvironment `
         -Role "backend-real" -BaseEnvironment $baseEnvironment -Controlled $controlled
@@ -996,6 +1004,7 @@ function Invoke-OfflineSelfTest {
         $backendInvalid["DEEPSEEK_API_KEY"] -eq $controlled["invalid_provider_key"]
     )
     Assert-SelfTest -Condition ($baseEnvironment["DEEPSEEK_API_KEY"] -eq "must-not-be-copied")
+    Assert-SelfTest -Condition ($baseEnvironment["DASHSCOPE_API_KEY"] -eq "must-not-be-copied-qwen")
 
     $safeArguments = @("-m", "offline_executor", "--mode", "selftest")
     Assert-NoSecretsInArguments -Arguments $safeArguments -SecretValues $secretValues

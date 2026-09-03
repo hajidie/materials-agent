@@ -134,6 +134,7 @@ def _require_exact_keys(
 def _controlled_generation_parameters(
     value: Mapping[str, object],
     purpose: str,
+    provider: str,
 ) -> Mapping[str, object]:
     if not isinstance(value, Mapping):
         raise ValueError("generation_parameters must be a JSON object.")
@@ -145,45 +146,148 @@ def _controlled_generation_parameters(
         "response_format",
         "streaming",
     }
-    if set(value) not in {frozenset(legacy_keys), frozenset(deepseek_keys)}:
+    versioned_required = {
+        "schema_version",
+        "response_format",
+        "streaming",
+    }
+    versioned_optional = {
+        "temperature",
+        "top_p",
+        "top_k",
+        "max_tokens",
+        "reasoning_mode",
+        "reasoning_effort",
+        "thinking_budget",
+    }
+    keys = set(value)
+    is_legacy = keys == legacy_keys
+    is_deepseek_legacy = keys == deepseek_keys
+    is_versioned = versioned_required.issubset(keys) and keys.issubset(
+        versioned_required | versioned_optional
+    )
+    if not (is_legacy or is_deepseek_legacy or is_versioned):
         raise ValueError(
             "generation_parameters does not match its controlled schema."
         )
-    temperature = value["temperature"]
-    if (
-        type(temperature) not in (int, float)
-        or not math.isfinite(float(temperature))
-        or temperature < 0
-    ):
-        raise ValueError(
-            "generation_parameters.temperature must be a finite "
-            "nonnegative number."
-        )
-    max_tokens = value["max_tokens"]
-    if (
-        type(max_tokens) is not int
-        or max_tokens <= 0
-    ):
-        raise ValueError(
-            "generation_parameters.max_tokens must be a positive integer."
-        )
-    if set(value) == deepseek_keys:
-        response_format = value["response_format"]
+    if "temperature" in value:
+        temperature = value["temperature"]
+        if (
+            type(temperature) not in (int, float)
+            or not math.isfinite(float(temperature))
+            or not 0 <= temperature <= 2
+        ):
+            raise ValueError(
+                "generation_parameters.temperature must be a finite number "
+                "between 0 and 2."
+            )
+    if "top_p" in value:
+        top_p = value["top_p"]
+        if (
+            type(top_p) not in (int, float)
+            or not math.isfinite(float(top_p))
+            or not 0 < top_p <= 1
+        ):
+            raise ValueError(
+                "generation_parameters.top_p must be greater than 0 and at most 1."
+            )
+    for field_name in ("top_k", "max_tokens", "thinking_budget"):
+        if field_name in value:
+            limit = value[field_name]
+            if type(limit) is not int or not 1 <= limit <= 131072:
+                raise ValueError(
+                    f"generation_parameters.{field_name} must be a positive integer."
+                )
+    if is_deepseek_legacy:
         expected_response_format, expected_max_tokens = {
             CHAT_ORCHESTRATION: ("json_object", 1024),
             TOOL_RESULT_EXPLANATION: ("text", 768),
             TOOL_INPUT_EXTRACTION: ("json_object", 1024),
         }[purpose]
         if (
-            temperature != 0
+            value["temperature"] != 0
             or value["thinking_mode"] != "disabled"
             or type(value["streaming"]) is not bool
             or value["streaming"] is not False
-            or response_format != expected_response_format
-            or max_tokens != expected_max_tokens
+            or value["response_format"] != expected_response_format
+            or value["max_tokens"] != expected_max_tokens
         ):
             raise ValueError(
                 "generation_parameters does not match its controlled schema."
+            )
+    if is_versioned:
+        if type(value["schema_version"]) is not int or value["schema_version"] != 1:
+            raise ValueError(
+                "generation_parameters.schema_version is not supported."
+            )
+        expected_response_format = {
+            CHAT_ORCHESTRATION: "json_object",
+            TOOL_RESULT_EXPLANATION: "text",
+            TOOL_INPUT_EXTRACTION: "json_object",
+        }[purpose]
+        if value["response_format"] != expected_response_format:
+            raise ValueError(
+                "generation_parameters.response_format does not match its purpose."
+            )
+        if type(value["streaming"]) is not bool:
+            raise ValueError(
+                "generation_parameters.streaming must be boolean."
+            )
+        reasoning_mode = value.get("reasoning_mode")
+        if reasoning_mode is not None and reasoning_mode not in {
+            "disabled",
+            "enabled",
+        }:
+            raise ValueError(
+                "generation_parameters.reasoning_mode is invalid."
+            )
+        if "reasoning_effort" in value:
+            if (
+                reasoning_mode != "enabled"
+                or value["reasoning_effort"]
+                not in {"low", "medium", "high", "xhigh", "max"}
+            ):
+                raise ValueError(
+                    "generation_parameters.reasoning_effort is invalid."
+                )
+        if "thinking_budget" in value and reasoning_mode != "enabled":
+            raise ValueError(
+                "generation_parameters.thinking_budget requires enabled reasoning."
+            )
+        if provider not in {"deepseek", "qwen"}:
+            raise ValueError(
+                "versioned generation_parameters require a supported provider."
+            )
+        if provider == "deepseek":
+            if "top_k" in value or "thinking_budget" in value:
+                raise ValueError(
+                    "generation_parameters exceed the DeepSeek provider boundary."
+                )
+            if value.get("reasoning_effort") in {"medium", "xhigh"}:
+                raise ValueError(
+                    "generation_parameters.reasoning_effort is unsupported by DeepSeek."
+                )
+            if reasoning_mode == "enabled" and any(
+                name in value for name in ("temperature", "top_p", "top_k")
+            ):
+                raise ValueError(
+                    "generation_parameters sampling fields are ineffective with "
+                    "DeepSeek reasoning."
+                )
+        elif purpose in {CHAT_ORCHESTRATION, TOOL_INPUT_EXTRACTION} and (
+            reasoning_mode != "disabled"
+        ):
+            raise ValueError(
+                "generation_parameters.reasoning_mode must be disabled for "
+                "Qwen structured output."
+            )
+        if (
+            provider == "qwen"
+            and reasoning_mode == "enabled"
+            and value["streaming"] is not True
+        ):
+            raise ValueError(
+                "generation_parameters.streaming is required for Qwen reasoning."
             )
     return _bounded_frozen_object(value, "generation_parameters")
 
@@ -533,6 +637,7 @@ class LLMCall:
             _controlled_generation_parameters(
                 self.generation_parameters,
                 self.purpose,
+                self.provider,
             ),
         )
         object.__setattr__(

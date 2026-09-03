@@ -24,7 +24,7 @@
 
 - Vue 3 + Vite 的本地聊天界面；
 - 对话、消息、任务、输入 Revision、ToolRun、ToolResult、资产和解释结果持久化；
-- Mock 或 DeepSeek 聊天编排；当前使用 LangChain，不使用 LangGraph；
+- Mock 或受控 DeepSeek/Qwen Provider 聊天编排；当前使用 LangChain，不使用 LangGraph；
 - LLM 候选提议、Registry 解析与授权、固定 Tool 补参组成的自然语言单 Tool 链路；
 - 与 Backend 合同一致的 Mock Runtime；
 - Python 3.8 隔离环境中的真实 ZTA35G Runtime；
@@ -102,8 +102,15 @@ Runtime 环境，不得安装到 Backend 环境。
 ## 本地配置
 
 把 `.env.example` 复制为被 Git 忽略的根 `.env`，并为本机填写数据库、MinIO 和签名配置。
-使用 DeepSeek 时还要设置 `DEEPSEEK_API_KEY`。不要提交真实 `.env`，也不要在终端、日志或
-问题报告中打印 Secret。
+使用 Provider 模式时，根据 `backend/config/llm.toml` 中三个角色实际选择的模型设置
+`DEEPSEEK_API_KEY` 和/或 `DASHSCOPE_API_KEY`。LLM 配置在 `.env` 中只保存 Secret；Provider、
+模型名、temperature、top-p、top-k、Reasoning 和 token 上限都在该 TOML 中配置，修改后重启
+Backend 生效。不要提交真实 `.env`，也不要在终端、日志或问题报告中打印 Secret。
+
+`backend/config/llm.toml` 包含受控模型目录、全局默认模型、模型能力声明，以及
+`chat_orchestration`、`tool_input_extraction`、`tool_result_explanation` 三个角色的独立覆盖。
+DeepSeek 固定走官方 endpoint；Qwen 固定走阿里云百炼国内 OpenAI-compatible endpoint。
+未知 Provider、模型引用、角色或参数会使 Backend 启动失败，不会自动切换或重试其他 Provider。
 
 固定推理参数不是配置项：
 
@@ -127,13 +134,13 @@ powershell -NoProfile -ExecutionPolicy Bypass `
   -Action Start
 ```
 
-真实 Runtime + DeepSeek：
+真实 Runtime + 配置文件选定的 Provider：
 
 ```powershell
-.\scripts\dev\local-dev.ps1 Start -Runtime Real -Llm DeepSeek
+.\scripts\dev\local-dev.ps1 Start -Runtime Real -Llm Provider
 ```
 
-也可以独立组合 `-Runtime Mock|Real` 与 `-Llm Mock|DeepSeek`。真实 Runtime 首次加载较慢时，
+也可以独立组合 `-Runtime Mock|Real` 与 `-Llm Mock|Provider`。真实 Runtime 首次加载较慢时，
 可把 ready 等待上限从默认 300 秒调整到 10–900 秒：
 
 ```powershell
@@ -259,6 +266,8 @@ ML Training、Planner、多 Agent、动态插件上传或生产部署能力。ZT
 
 - `LOCAL_DEV_CONFIGURATION_MISSING name=DEEPSEEK_API_KEY`：在根 `.env` 配置 Key，不要把值
   贴入命令或日志。
+- `LOCAL_DEV_CONFIGURATION_MISSING name=DASHSCOPE_API_KEY`：当前角色选择了 Qwen；在根
+  `.env` 配置百炼 Key，不要把值贴入命令或日志。
 - `LOCAL_DEV_PORT_CONFLICT`：确认固定端口占用者；脚本不会替你终止未知服务。
 - `LOCAL_DEV_READY_TIMEOUT`：查看本轮 `tmp/local-dev/<run_id>/` 日志；真实 Runtime 重点检查
   环境、只读模型根和 GPU。

@@ -1,42 +1,31 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-import json
-from typing import Final
 import unicodedata
-
-from langchain_deepseek import ChatDeepSeek
 
 from materialsagent.domain.ports.explanation import (
     ExplanationInput,
     ExplanationOutcome,
     ExplanationRequestMetadata,
 )
-from materialsagent.infrastructure.config import DeepSeekConfig
-from materialsagent.infrastructure.llm.deepseek_common import (
+from materialsagent.infrastructure.llm.common import (
+    PromptRenderCache,
     SAFE_MESSAGES,
     canonical_prompt_digest,
     classify_provider_exception,
     controlled_usage,
-    deepseek_client_kwargs,
     success_provider_request_id,
+)
+from materialsagent.infrastructure.llm.configuration import ConfiguredRole
+from materialsagent.infrastructure.llm.factory import create_chat_model
+from materialsagent.infrastructure.llm.prompts import (
+    TOOL_RESULT_EXPLANATION_PROMPT_ID,
+    TOOL_RESULT_EXPLANATION_PROMPT_VERSION,
+    render_tool_result_explanation_prompt,
 )
 
 
-PROMPT_TEMPLATE_ID: Final = "tool-result-explanation"
-PROMPT_TEMPLATE_VERSION: Final = "2"
-GENERATION_PARAMETERS: Final = {
-    "temperature": 0,
-    "max_tokens": 768,
-    "thinking_mode": "disabled",
-    "response_format": "text",
-    "streaming": False,
-}
-PUBLIC_FAILURES: Final = {
-    "LLM_TIMEOUT": (
-        "EXPLANATION_TIMEOUT",
-        "Explanation generation timed out.",
-    ),
+PUBLIC_FAILURES = {
+    "LLM_TIMEOUT": ("EXPLANATION_TIMEOUT", "Explanation generation timed out."),
     "LLM_AUTHENTICATION_FAILED": (
         "EXPLANATION_PROVIDER_UNAVAILABLE",
         "Explanation provider is unavailable.",
@@ -66,65 +55,7 @@ PUBLIC_FAILURES: Final = {
         "Explanation provider returned an invalid response.",
     ),
 }
-UNKNOWN_PUBLIC_FAILURE: Final = (
-    "EXPLANATION_FAILED",
-    "Explanation generation failed.",
-)
-
-
-def _plain_json(value: object) -> object:
-    if isinstance(value, Mapping):
-        return {str(key): _plain_json(item) for key, item in value.items()}
-    if isinstance(value, tuple):
-        return [_plain_json(item) for item in value]
-    return value
-
-
-def _projection(value: ExplanationInput) -> dict[str, object]:
-    return {
-        "result_id": value.result_id,
-        "status": value.status,
-        "requested_outputs": list(value.requested_outputs),
-        "completed_outputs": list(value.completed_outputs),
-        "failed_outputs": list(value.failed_outputs),
-        "data": _plain_json(value.data),
-        "artifacts": [
-            {
-                "asset_id": item.asset_id,
-                "role": item.role,
-                "asset_type": item.asset_type,
-            }
-            for item in value.artifacts
-        ],
-        "warnings": _plain_json(value.warnings),
-        "error": _plain_json(value.error),
-        "process_parameters": _plain_json(value.process_parameters),
-        "tool_id": value.tool_id,
-        "tool_version": value.tool_version,
-        "schema_hash": value.schema_hash,
-    }
-
-
-def _render_messages(value: ExplanationInput) -> list[dict[str, str]]:
-    return [
-        {
-            "role": "system",
-            "content": (
-                "Explain only the supplied ToolResult facts in concise plain "
-                "text. Do not invent values or expose internal reasoning."
-            ),
-        },
-        {
-            "role": "user",
-            "content": json.dumps(
-                _projection(value),
-                sort_keys=True,
-                ensure_ascii=False,
-                allow_nan=False,
-                separators=(",", ":"),
-            ),
-        },
-    ]
+UNKNOWN_PUBLIC_FAILURE = ("EXPLANATION_FAILED", "Explanation generation failed.")
 
 
 def _failed_outcome(
@@ -163,57 +94,54 @@ def _normalize_text(content: str) -> str | None:
     ):
         return None
     normalized = " ".join(normalized.split())
-    if (
-        not normalized
-        or len(normalized) > 4096
-        or not normalized.isprintable()
-    ):
+    if not normalized or len(normalized) > 4096 or not normalized.isprintable():
         return None
     return normalized
 
 
-class DeepSeekExplanationAdapter:
-    provider = "deepseek"
-    model_name = "deepseek-v4-flash"
-    prompt_template_id = PROMPT_TEMPLATE_ID
-    prompt_template_version = PROMPT_TEMPLATE_VERSION
+class LangChainExplanationAdapter:
+    prompt_template_id = TOOL_RESULT_EXPLANATION_PROMPT_ID
+    prompt_template_version = TOOL_RESULT_EXPLANATION_PROMPT_VERSION
 
     def __init__(
         self,
-        config: DeepSeekConfig,
+        config: ConfiguredRole,
         *,
         chat_model: object | None = None,
-        model_factory: Callable[..., object] | None = None,
     ) -> None:
-        factory = model_factory or ChatDeepSeek
-        self._chat_model = (
-            chat_model
-            if chat_model is not None
-            else factory(
-                **deepseek_client_kwargs(config, max_tokens=768)
+        if config.role != "tool_result_explanation":
+            raise ValueError(
+                "Explanation adapter requires tool_result_explanation config."
             )
-        )
+        self._config = config
+        self._prompt_cache = PromptRenderCache()
+        self.provider = config.provider
+        self.model_name = config.model_name
+        self._chat_model = chat_model or create_chat_model(config)
 
     def request_metadata(
         self,
         value: ExplanationInput,
     ) -> ExplanationRequestMetadata:
-        messages = _render_messages(value)
+        messages = render_tool_result_explanation_prompt(value)
+        self._prompt_cache.store(value, messages)
         return ExplanationRequestMetadata(
             provider=self.provider,
             model_name=self.model_name,
-            prompt_template_id=PROMPT_TEMPLATE_ID,
-            prompt_template_version=PROMPT_TEMPLATE_VERSION,
+            prompt_template_id=self.prompt_template_id,
+            prompt_template_version=self.prompt_template_version,
             prompt_digest=canonical_prompt_digest(
-                template_id=PROMPT_TEMPLATE_ID,
-                template_version=PROMPT_TEMPLATE_VERSION,
+                template_id=self.prompt_template_id,
+                template_version=self.prompt_template_version,
                 messages=messages,
             ),
-            generation_parameters=GENERATION_PARAMETERS,
+            generation_parameters=self._config.generation_parameters,
         )
 
     def explain(self, value: ExplanationInput) -> ExplanationOutcome:
-        messages = _render_messages(value)
+        messages = self._prompt_cache.take(value)
+        if messages is None:
+            messages = render_tool_result_explanation_prompt(value)
         try:
             raw = self._chat_model.invoke(messages)  # type: ignore[attr-defined]
         except Exception as error:

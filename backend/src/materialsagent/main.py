@@ -84,7 +84,6 @@ from materialsagent.infrastructure.config import (
     AppSettings,
     ConfigurationError,
     load_settings,
-    parse_deepseek_config,
     parse_minio_config,
     parse_zta35g_runtime_config,
 )
@@ -424,32 +423,35 @@ def create_app(
             if needs_default_explanation_port:
                 resolved_explanation_port = MockExplanationAdapter()
         else:
-            deepseek_config = parse_deepseek_config(resolved_settings)
-            if deepseek_config is None:
-                raise ConfigurationError("Invalid DeepSeek configuration.")
-            if needs_default_chat_port:
-                from materialsagent.infrastructure.llm.deepseek_chat import (
-                    DeepSeekChatAdapter,
-                )
+            from materialsagent.infrastructure.llm.configuration import (
+                load_llm_configuration,
+            )
+            from materialsagent.infrastructure.llm.langchain_chat import (
+                LangChainChatOrchestrationAdapter,
+            )
+            from materialsagent.infrastructure.llm.langchain_explanation import (
+                LangChainExplanationAdapter,
+            )
+            from materialsagent.infrastructure.llm.langchain_tool_input import (
+                LangChainToolInputExtractionAdapter,
+            )
 
-                resolved_chat_orchestration_port = DeepSeekChatAdapter(
-                    deepseek_config
+            llm_configuration = load_llm_configuration(resolved_settings)
+            if needs_default_chat_port:
+                resolved_chat_orchestration_port = (
+                    LangChainChatOrchestrationAdapter(
+                        llm_configuration.for_role("chat_orchestration")
+                    )
                 )
             if needs_default_tool_input_extraction_port:
-                from materialsagent.infrastructure.llm.deepseek_tool_input import (
-                    DeepSeekToolInputExtractionAdapter,
-                )
-
                 resolved_tool_input_extraction_port = (
-                    DeepSeekToolInputExtractionAdapter(deepseek_config)
+                    LangChainToolInputExtractionAdapter(
+                        llm_configuration.for_role("tool_input_extraction")
+                    )
                 )
             if needs_default_explanation_port:
-                from materialsagent.infrastructure.llm.deepseek_explanation import (
-                    DeepSeekExplanationAdapter,
-                )
-
-                resolved_explanation_port = DeepSeekExplanationAdapter(
-                    deepseek_config
+                resolved_explanation_port = LangChainExplanationAdapter(
+                    llm_configuration.for_role("tool_result_explanation")
                 )
     tool_chain_requested = (
         m7_tool_chain_enabled is True

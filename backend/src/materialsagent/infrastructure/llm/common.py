@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass
 from hashlib import sha256
 import json
@@ -12,7 +13,6 @@ import openai
 from materialsagent.domain.ports.chat_orchestration import (
     PROVIDER_REQUEST_ID_PATTERN,
 )
-from materialsagent.infrastructure.config import DeepSeekConfig
 
 
 SAFE_MESSAGES: Final = {
@@ -37,23 +37,27 @@ class ControlledProviderFailure:
     provider_request_id: str | None = None
 
 
-def deepseek_client_kwargs(
-    config: DeepSeekConfig,
-    *,
-    max_tokens: int,
-) -> dict[str, object]:
-    return {
-        "model": config.model_name,
-        "api_key": config.api_key,
-        "base_url": config.base_url,
-        "timeout": config.timeout_seconds,
-        "max_retries": 0,
-        "temperature": 0,
-        "max_tokens": max_tokens,
-        "streaming": False,
-        "include_response_headers": True,
-        "extra_body": {"thinking": {"type": "disabled"}},
-    }
+class PromptRenderCache:
+    """Pass one rendered prompt from metadata creation to its invocation."""
+
+    def __init__(self) -> None:
+        self._pending: ContextVar[
+            tuple[object, list[dict[str, str]]] | None
+        ] = ContextVar(f"llm_prompt_{id(self)}", default=None)
+
+    def store(
+        self,
+        value: object,
+        messages: list[dict[str, str]],
+    ) -> None:
+        self._pending.set((value, messages))
+
+    def take(self, value: object) -> list[dict[str, str]] | None:
+        pending = self._pending.get()
+        self._pending.set(None)
+        if pending is None or pending[0] is not value:
+            return None
+        return pending[1]
 
 
 def canonical_prompt_digest(
@@ -78,10 +82,20 @@ def canonical_prompt_digest(
 
 def controlled_usage(raw: object) -> dict[str, int] | None:
     usage = getattr(raw, "usage_metadata", None)
-    if not isinstance(usage, Mapping):
-        return None
-    input_tokens = usage.get("input_tokens")
-    output_tokens = usage.get("output_tokens")
+    if isinstance(usage, Mapping):
+        input_tokens = usage.get("input_tokens")
+        output_tokens = usage.get("output_tokens")
+    else:
+        response_metadata = getattr(raw, "response_metadata", None)
+        token_usage = (
+            response_metadata.get("token_usage")
+            if isinstance(response_metadata, Mapping)
+            else None
+        )
+        if not isinstance(token_usage, Mapping):
+            return None
+        input_tokens = token_usage.get("prompt_tokens")
+        output_tokens = token_usage.get("completion_tokens")
     if (
         type(input_tokens) is not int
         or input_tokens < 0
@@ -89,10 +103,7 @@ def controlled_usage(raw: object) -> dict[str, int] | None:
         or output_tokens < 0
     ):
         return None
-    return {
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-    }
+    return {"input_tokens": input_tokens, "output_tokens": output_tokens}
 
 
 def _controlled_request_id(value: object) -> str | None:
@@ -106,15 +117,21 @@ def _controlled_request_id(value: object) -> str | None:
 
 def success_provider_request_id(raw: object) -> str | None:
     response_metadata = getattr(raw, "response_metadata", None)
-    if not isinstance(response_metadata, Mapping):
-        return None
-    headers = response_metadata.get("headers")
-    if not isinstance(headers, Mapping):
-        return None
-    for key, value in headers.items():
-        if isinstance(key, str) and key.casefold() == "x-request-id":
-            return _controlled_request_id(value)
-    return None
+    if isinstance(response_metadata, Mapping):
+        direct = _controlled_request_id(response_metadata.get("request_id"))
+        if direct is not None:
+            return direct
+        headers = response_metadata.get("headers")
+        if isinstance(headers, Mapping):
+            for key, value in headers.items():
+                if isinstance(key, str) and key.casefold() in {
+                    "x-request-id",
+                    "request-id",
+                }:
+                    controlled = _controlled_request_id(value)
+                    if controlled is not None:
+                        return controlled
+    return _controlled_request_id(getattr(raw, "id", None))
 
 
 def failure_provider_request_id(error: BaseException) -> str | None:
@@ -144,15 +161,18 @@ def classify_provider_exception(
             "LLM_PROVIDER_UNAVAILABLE",
             provider_request_id=request_id,
         )
-
     status_code = getattr(error, "status_code", None)
     error_code = {
         400: "LLM_REQUEST_REJECTED",
         401: "LLM_AUTHENTICATION_FAILED",
         402: "LLM_BALANCE_EXHAUSTED",
+        403: "LLM_AUTHENTICATION_FAILED",
+        408: "LLM_TIMEOUT",
         422: "LLM_REQUEST_REJECTED",
         429: "LLM_RATE_LIMITED",
         500: "LLM_PROVIDER_UNAVAILABLE",
+        502: "LLM_PROVIDER_UNAVAILABLE",
         503: "LLM_PROVIDER_UNAVAILABLE",
+        504: "LLM_TIMEOUT",
     }.get(status_code, "LLM_PROVIDER_UNAVAILABLE")
     return static_failure(error_code, provider_request_id=request_id)

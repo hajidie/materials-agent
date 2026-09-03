@@ -614,7 +614,7 @@ def build_real_role_environment(
                     safe_values, "bucket"
                 ),
                 "MINIO_SECURE": "false",
-                "LLM_ADAPTER": "deepseek",
+                "LLM_ADAPTER": "provider",
                 "DEEPSEEK_API_KEY": _controlled_value(
                     controlled, key_name
                 ),
@@ -752,6 +752,7 @@ def build_mock_subprocess_environment(
             # An explicit blank wins over any repository dotenv value when
             # load_settings receives the exact child mapping.
             "DEEPSEEK_API_KEY": "",
+            "DASHSCOPE_API_KEY": "",
             # Captured pytest failures can include the non-ASCII workspace
             # path.  Force one deterministic encoding at both ends.
             "PYTHONUTF8": "1",
@@ -871,6 +872,7 @@ def write_mock_snapshot_dotenv(
         (
             "LLM_ADAPTER=mock",
             "DEEPSEEK_API_KEY=",
+            "DASHSCOPE_API_KEY=",
             "M12B_REAL_CALLS_AUTHORIZED=",
             "P1B2_GATE4_AUTHORIZED=",
             "P1B2_GATE4_REAL_PROVIDER_AUTHORIZED=",
@@ -909,11 +911,13 @@ def _load_mock_settings(environment: Mapping[str, str]) -> object:
 
 
 def _probe_mock_application(settings: object) -> dict[str, int]:
-    deepseek_modules = {
-        "materialsagent.infrastructure.llm.deepseek_chat",
-        "materialsagent.infrastructure.llm.deepseek_explanation",
+    provider_modules = {
+        "materialsagent.infrastructure.llm.factory",
+        "materialsagent.infrastructure.llm.langchain_chat",
+        "materialsagent.infrastructure.llm.langchain_tool_input",
+        "materialsagent.infrastructure.llm.langchain_explanation",
     }
-    if any(name in sys.modules for name in deepseek_modules):
+    if any(name in sys.modules for name in provider_modules):
         raise Gate4Error(MOCK_PROVIDER_ISOLATION_FAILED)
     try:
         from materialsagent.main import create_app
@@ -921,11 +925,10 @@ def _probe_mock_application(settings: object) -> dict[str, int]:
         create_app(settings=settings)
     except Exception as exc:
         raise Gate4Error(MOCK_PROVIDER_ISOLATION_FAILED) from exc
-    if any(name in sys.modules for name in deepseek_modules):
+    if any(name in sys.modules for name in provider_modules):
         raise Gate4Error(MOCK_PROVIDER_ISOLATION_FAILED)
     return {
-        "deepseek_chat_adapter_constructions": 0,
-        "deepseek_explanation_adapter_constructions": 0,
+        "provider_adapter_constructions": 0,
         "provider_delegate_calls": 0,
     }
 
@@ -941,6 +944,7 @@ def mock_provider_preflight(
     if (
         environment.get("LLM_ADAPTER") != "mock"
         or environment.get("DEEPSEEK_API_KEY") != ""
+        or environment.get("DASHSCOPE_API_KEY") != ""
         or any(name in environment for name in _MOCK_FORBIDDEN_AUTHORIZATION_NAMES)
     ):
         raise Gate4Error(MOCK_PROVIDER_ISOLATION_FAILED)
@@ -951,6 +955,7 @@ def mock_provider_preflight(
         if (
             getattr(settings, "llm_adapter", None) != "mock"
             or getattr(settings, "deepseek_api_key", None) is not None
+            or getattr(settings, "dashscope_api_key", None) is not None
         ):
             raise Gate4Error(MOCK_PROVIDER_ISOLATION_FAILED)
         facts = dict(probe(settings))
@@ -959,8 +964,7 @@ def mock_provider_preflight(
     except Exception as exc:
         raise Gate4Error(MOCK_PROVIDER_ISOLATION_FAILED) from exc
     expected = {
-        "deepseek_chat_adapter_constructions": 0,
-        "deepseek_explanation_adapter_constructions": 0,
+        "provider_adapter_constructions": 0,
         "provider_delegate_calls": 0,
     }
     if facts != expected:
@@ -1006,8 +1010,7 @@ def _run_controlled_mock_helper_tests(repo_root: Path) -> None:
         result = mock_provider_preflight(environment)
         return result == {
             "llm_adapter": "mock",
-            "deepseek_chat_adapter_constructions": 0,
-            "deepseek_explanation_adapter_constructions": 0,
+            "provider_adapter_constructions": 0,
             "provider_delegate_calls": 0,
         }
 
@@ -1277,6 +1280,7 @@ def _mock_full_environment(
             "APP_ENV": "local",
             "LLM_ADAPTER": "mock",
             "DEEPSEEK_API_KEY": "",
+            "DASHSCOPE_API_KEY": "",
             "PYTHONUTF8": "1",
             "PYTHONPATH": os.fspath(backend_source),
         }
@@ -1296,6 +1300,7 @@ def _mock_phase1a_environment(
         {
             "LLM_ADAPTER": "mock",
             "DEEPSEEK_API_KEY": "",
+            "DASHSCOPE_API_KEY": "",
             "PYTHONUTF8": "1",
         }
     )
@@ -1304,7 +1309,7 @@ def _mock_phase1a_environment(
     return environment
 
 
-def _deepseek_llm_call_count(
+def _provider_llm_call_count(
     *,
     repo_root: Path,
     environment: Mapping[str, str],
@@ -1318,7 +1323,8 @@ def _deepseek_llm_call_count(
         "user=os.environ['POSTGRES_USER'],"
         "password=os.environ['POSTGRES_PASSWORD']);"
         "q=c.cursor();"
-        "q.execute(\"SELECT count(*) FROM llm_call WHERE provider='deepseek'\");"
+        "q.execute(\"SELECT count(*) FROM llm_call "
+        "WHERE provider IN ('deepseek','qwen')\");"
         "print(q.fetchone()[0]);"
         "c.close()"
     )
@@ -1444,7 +1450,7 @@ def _scan_snapshot_outputs(
             if any(secret in data for secret in encoded):
                 raise Gate4Error(SECRET_LEAK_MARKER)
             if re.search(
-                rb"DEEPSEEK_API_KEY\s*=\s*[^\s\r\n]",
+                rb"(?:DEEPSEEK_API_KEY|DASHSCOPE_API_KEY)\s*=\s*[^\s\r\n]",
                 data,
             ):
                 raise Gate4Error(SECRET_LEAK_MARKER)
@@ -1503,8 +1509,7 @@ def _run_controlled_mock_full_regression(repo_root: Path) -> None:
         preflight = mock_provider_preflight(environment)
         if preflight != {
             "llm_adapter": "mock",
-            "deepseek_chat_adapter_constructions": 0,
-            "deepseek_explanation_adapter_constructions": 0,
+            "provider_adapter_constructions": 0,
             "provider_delegate_calls": 0,
         }:
             raise Gate4Error(MOCK_PROVIDER_ISOLATION_FAILED)
@@ -1543,7 +1548,7 @@ def _run_controlled_mock_full_regression(repo_root: Path) -> None:
         captured.extend((stdout, stderr))
         if code != 0 or "MOCK_STACK_STARTED" not in stdout:
             raise Gate4Error(MOCK_PROVIDER_ISOLATION_FAILED)
-        deepseek_before = _deepseek_llm_call_count(
+        provider_before = _provider_llm_call_count(
             repo_root=snapshot_root,
             environment=environment,
         )
@@ -1668,11 +1673,11 @@ def _run_controlled_mock_full_regression(repo_root: Path) -> None:
         run_relative = (
             f"tmp/phase-1a-acceptance/{run_match.group(1)}"
         )
-        deepseek_after = _deepseek_llm_call_count(
+        provider_after = _provider_llm_call_count(
             repo_root=snapshot_root,
             environment=environment,
         )
-        if deepseek_after != deepseek_before:
+        if provider_after != provider_before:
             raise Gate4Error(MOCK_PROVIDER_ISOLATION_FAILED)
         evidence = {"run_id": run_match.group(1)}
         failure_stage = "PARSE_BACKEND_E2E"
@@ -1701,7 +1706,7 @@ def _run_controlled_mock_full_regression(repo_root: Path) -> None:
             snapshot_root,
             f"{run_relative}/logs/15-frontend-test.log",
         )
-        evidence["deepseek_delta"] = deepseek_after - deepseek_before
+        evidence["provider_delta"] = provider_after - provider_before
         evidence["frontend"] = _frontend_passed_count(
             str(evidence["frontend"])
         )
@@ -1824,8 +1829,8 @@ def _run_controlled_mock_full_regression(repo_root: Path) -> None:
     print("P1B2_GATE4_COMPILEALL_PASSED=1")
     print("P1B2_GATE4_FRONTEND_TYPECHECK_PASSED=1")
     print("P1B2_GATE4_FRONTEND_BUILD_PASSED=1")
-    print("P1B2_GATE4_DEEPSEEK_LLM_CALL_DELTA=0")
-    print("P1B2_GATE4_DEEPSEEK_ADAPTER_CONSTRUCTIONS=0")
+    print("P1B2_GATE4_PROVIDER_LLM_CALL_DELTA=0")
+    print("P1B2_GATE4_PROVIDER_ADAPTER_CONSTRUCTIONS=0")
     print("P1B2_GATE4_SECRET_SCAN_PASSED=1")
     print("P1B2_GATE4_MOCK_FULL_CLEANUP_PASSED=1")
     print(MOCK_FULL_REGRESSION_MARKER)
@@ -2449,6 +2454,7 @@ def build_budgeted_backend_application(
     settings: object,
     chat_adapter: object,
     explanation_adapter: object,
+    tool_input_adapter: object | None = None,
     ledger: ProviderDelegateLedger,
     fact_reader: Callable[[], Mapping[str, int]],
     app_factory: Callable[..., Any],
@@ -2456,18 +2462,23 @@ def build_budgeted_backend_application(
     """Inject both budget wrappers through the existing application factory."""
 
     try:
-        return app_factory(
-            settings=settings,
-            chat_orchestration_port=BudgetedChatOrchestrationPort(
+        options: dict[str, object] = {
+            "settings": settings,
+            "chat_orchestration_port": BudgetedChatOrchestrationPort(
                 chat_adapter,
                 ledger,
                 fact_reader,
             ),
-            explanation_port=BudgetedExplanationPort(
+            "explanation_port": BudgetedExplanationPort(
                 explanation_adapter,
                 ledger,
                 fact_reader,
             ),
+        }
+        if tool_input_adapter is not None:
+            options["tool_input_extraction_port"] = tool_input_adapter
+        return app_factory(
+            **options,
         )
     except TypeError as exc:
         raise Gate4Error(PROVIDER_LEDGER_INJECTION_BLOCKED) from exc
@@ -2515,7 +2526,7 @@ def _build_provider_database_fact_reader(
                         """
                         SELECT purpose, COUNT(*)
                         FROM llm_call
-                        WHERE provider = 'deepseek'
+                        WHERE provider IN ('deepseek', 'qwen')
                         GROUP BY purpose
                         """
                     )
@@ -2541,24 +2552,25 @@ def build_real_budgeted_backend_from_environment(
     ):
         raise Gate4Error(NEW_STAGE_C_NOT_AUTHORIZED)
     try:
-        from materialsagent.infrastructure.config import (
-            load_settings,
-            parse_deepseek_config,
+        from materialsagent.infrastructure.config import load_settings
+        from materialsagent.infrastructure.llm.configuration import (
+            load_llm_configuration,
         )
-        from materialsagent.infrastructure.llm.deepseek_chat import (
-            DeepSeekChatAdapter,
+        from materialsagent.infrastructure.llm.langchain_chat import (
+            LangChainChatOrchestrationAdapter,
         )
-        from materialsagent.infrastructure.llm.deepseek_explanation import (
-            DeepSeekExplanationAdapter,
+        from materialsagent.infrastructure.llm.langchain_explanation import (
+            LangChainExplanationAdapter,
+        )
+        from materialsagent.infrastructure.llm.langchain_tool_input import (
+            LangChainToolInputExtractionAdapter,
         )
         from materialsagent.main import create_app
 
         settings = load_settings(dict(environment))
-        if settings.llm_adapter != "deepseek":
+        if settings.llm_adapter != "provider":
             raise Gate4Error(PROVIDER_LEDGER_INJECTION_BLOCKED)
-        config = parse_deepseek_config(settings)
-        if config is None:
-            raise Gate4Error(PROVIDER_LEDGER_INJECTION_BLOCKED)
+        configuration = load_llm_configuration(settings)
         run_id = environment["P1B2_GATE4_PROVIDER_LEDGER_RUN_ID"]
         ledger_path = Path(
             environment["P1B2_GATE4_PROVIDER_LEDGER_PATH"]
@@ -2576,8 +2588,15 @@ def build_real_budgeted_backend_from_environment(
         )
         app = build_budgeted_backend_application(
             settings=settings,
-            chat_adapter=DeepSeekChatAdapter(config),
-            explanation_adapter=DeepSeekExplanationAdapter(config),
+            chat_adapter=LangChainChatOrchestrationAdapter(
+                configuration.for_role("chat_orchestration")
+            ),
+            explanation_adapter=LangChainExplanationAdapter(
+                configuration.for_role("tool_result_explanation")
+            ),
+            tool_input_adapter=LangChainToolInputExtractionAdapter(
+                configuration.for_role("tool_input_extraction")
+            ),
             ledger=ledger,
             fact_reader=fact_reader,
             app_factory=create_app,

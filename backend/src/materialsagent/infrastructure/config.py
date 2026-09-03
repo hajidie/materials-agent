@@ -32,14 +32,6 @@ class ZTA35GRuntimeConfig:
     timeout_seconds: float
 
 
-@dataclass(frozen=True, slots=True)
-class DeepSeekConfig:
-    api_key: SecretStr
-    model_name: Literal["deepseek-v4-flash"]
-    base_url: Literal["https://api.deepseek.com"]
-    timeout_seconds: float
-
-
 class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(
         case_sensitive=False,
@@ -64,13 +56,9 @@ class AppSettings(BaseSettings):
     minio_bucket: str | None = None
     minio_secure: bool | None = None
 
-    llm_adapter: Literal["mock", "deepseek"] = "mock"
+    llm_adapter: Literal["mock", "provider"] = "mock"
     deepseek_api_key: SecretStr | None = None
-    deepseek_model: Literal["deepseek-v4-flash"] = "deepseek-v4-flash"
-    deepseek_base_url: Literal[
-        "https://api.deepseek.com"
-    ] = "https://api.deepseek.com"
-    deepseek_timeout_seconds: float = Field(default=60.0, gt=0, le=300)
+    dashscope_api_key: SecretStr | None = None
 
     zta35g_runtime_url: str | None = None
     zta35g_runtime_token: SecretStr | None = None
@@ -78,18 +66,26 @@ class AppSettings(BaseSettings):
     m5_dev_routes_enabled: bool = False
     timeline_cursor_signing_key: SecretStr | None = None
 
-    @field_validator("deepseek_api_key", mode="before")
+    @field_validator(
+        "deepseek_api_key",
+        "dashscope_api_key",
+        mode="before",
+    )
     @classmethod
-    def normalize_blank_deepseek_api_key(
+    def normalize_blank_provider_api_key(
         cls,
         value: object,
     ) -> object:
         if isinstance(value, str):
             if not value.strip():
                 return None
-            if value != value.strip():
+            if value != value.strip() or any(
+                character.isspace()
+                or unicodedata.category(character).startswith("C")
+                for character in value
+            ):
                 raise ValueError(
-                    "deepseek_api_key cannot contain surrounding whitespace."
+                    "Provider API keys must be controlled non-whitespace text."
                 )
         return value
 
@@ -131,9 +127,7 @@ ENVIRONMENT_FIELDS = {
     "MINIO_SECURE": "minio_secure",
     "LLM_ADAPTER": "llm_adapter",
     "DEEPSEEK_API_KEY": "deepseek_api_key",
-    "DEEPSEEK_MODEL": "deepseek_model",
-    "DEEPSEEK_BASE_URL": "deepseek_base_url",
-    "DEEPSEEK_TIMEOUT_SECONDS": "deepseek_timeout_seconds",
+    "DASHSCOPE_API_KEY": "dashscope_api_key",
     "ZTA35G_RUNTIME_URL": "zta35g_runtime_url",
     "ZTA35G_RUNTIME_TOKEN": "zta35g_runtime_token",
     "ZTA35G_RUNTIME_TIMEOUT_SECONDS": "zta35g_runtime_timeout_seconds",
@@ -247,26 +241,4 @@ def parse_zta35g_runtime_config(
         base_url=base_url.rstrip("/"),
         token=token,
         timeout_seconds=settings.zta35g_runtime_timeout_seconds,
-    )
-
-
-def parse_deepseek_config(
-    settings: AppSettings,
-) -> DeepSeekConfig | None:
-    if settings.llm_adapter == "mock":
-        return None
-    api_key = settings.deepseek_api_key
-    secret = None if api_key is None else api_key.get_secret_value()
-    if (
-        api_key is None
-        or secret is None
-        or not secret
-        or secret != secret.strip()
-    ):
-        raise ConfigurationError("Invalid DeepSeek configuration.")
-    return DeepSeekConfig(
-        api_key=api_key,
-        model_name=settings.deepseek_model,
-        base_url=settings.deepseek_base_url,
-        timeout_seconds=settings.deepseek_timeout_seconds,
     )

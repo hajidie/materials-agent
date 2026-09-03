@@ -27,7 +27,7 @@ Frontend
   -> Backend API / application services
        -> PostgreSQL (structured facts)
        -> MinIO (generated image objects)
-       -> LLM adapter (Mock or DeepSeek)
+       -> LLM adapter (Mock or controlled DeepSeek/Qwen Provider)
        -> explicit in-process Tool Registry
             -> local Runtime client
                  -> Mock Runtime or real ZTA35G Runtime
@@ -53,7 +53,7 @@ Backend 是模块化单体，主要分层如下：
 | `api/` | HTTP 路由、公共请求/响应 schema、依赖和错误投影 |
 | `application/` | 对话与消息编排、Tool 路由/授权、执行、结果、资产和解释用例 |
 | `domain/` | Task、ToolRun、ToolResult、LLMCall 等领域状态与端口合同 |
-| `infrastructure/` | SQLAlchemy/PostgreSQL、MinIO、DeepSeek/Mock LLM、Runtime client |
+| `infrastructure/` | SQLAlchemy/PostgreSQL、MinIO、LangChain Provider/Mock LLM、Runtime client |
 | `alembic/versions/` | 持久化 schema 的递增迁移 |
 
 跨层修改必须保持公共 API、领域不变量、迁移、Repository 映射和测试一致。数据库 schema 不是
@@ -205,6 +205,22 @@ PENDING -> RUNNING -> SUCCEEDED
 每个 ToolRun 只消费并产出自己的执行快照、图片、性能结果和诊断。结果提交必须核对 Task、
 ToolRun、输入 Revision、资产所有者和来源一致性，不能跨 actor、跨 Task 或跨 ToolRun 拼接。
 
+## LLM Provider 与角色配置
+
+Backend 只在 `LLM_ADAPTER=provider` 时惰性导入 LangChain Provider 模块。启动时读取固定的
+`backend/config/llm.toml`，分别为首次聊天路由、已绑定 Tool 补参和 ToolResult 解释构造独立
+ChatModel。DeepSeek 使用 `ChatDeepSeek`；Qwen 使用 `ChatOpenAI` 连接固定的阿里云百炼国内
+OpenAI-compatible endpoint。两者均关闭 SDK 自动重试，也不做 Provider fallback。
+
+TOML 中的模型能力声明是开发期约束，不是动态发现结果。它可以收紧模型允许的参数、推理模式
+和结构化输出组合，但不能放宽代码中的 Provider 硬边界。三个角色继承全局默认模型，也可分别
+覆盖模型和 generation 参数；省略的可选参数不发送给 Provider。配置仅在 Backend 重启时重载，
+不提供请求级切换、管理 API 或前端配置页。
+
+三类 Prompt 由版本化 `ChatPromptTemplate` 统一渲染。一次调用使用的同一份消息同时参与
+Prompt digest，避免审计摘要和实际请求分叉。Provider 返回的 `reasoning_content`、完整原始
+响应和完整 Prompt 不进入日志、数据库或公共响应。
+
 ## 执行快照与审计
 
 ToolRun 保存执行时的：
@@ -215,8 +231,10 @@ ToolRun 保存执行时的：
 - 输入 Revision、attempt、requested outputs 和 seed；
 - Runtime 返回的受控参数、输出摘要、诊断和模型 bundle 标识。
 
-LLMCall 审计保存 provider/model、安全 Catalog 引用与 Hash 或固定 Tool 上下文、受控 Structured
-Output 摘要和可选 Prompt digest。它不保存完整 Prompt 或 Provider 原始响应。
+LLMCall 审计保存实际 provider/model、安全 Catalog 引用与 Hash 或固定 Tool 上下文、受控
+Structured Output 摘要、Prompt digest，以及带 schema version 的有效 generation 参数。领域层
+仍可读取旧 DeepSeek 审计参数形状，因此该改造不需要数据库迁移。它不保存完整 Prompt、
+Provider 原始响应或推理内容。
 
 审计数据用于复现“当时根据什么受控事实做出决定”，不授予后续执行权限。重试与补参始终以
 当前 Registry 再授权。

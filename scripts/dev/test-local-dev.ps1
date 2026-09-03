@@ -77,6 +77,7 @@ Invoke-Test 'profiles keep secrets out of arguments and state metadata' {
         -RuntimePython 'C:\tools\backend-python.exe'
     Assert-Equal $mock.backend_environment['LLM_ADAPTER'] 'mock' 'Mock LLM adapter'
     Assert-Equal $mock.backend_environment['DEEPSEEK_API_KEY'] '' 'Mock key override'
+    Assert-Equal $mock.backend_environment['DASHSCOPE_API_KEY'] '' 'Mock Qwen key override'
     Assert-Equal $mock.backend_environment['ZTA35G_RUNTIME_TOKEN'] $runtimeToken 'Backend Runtime token'
     Assert-Equal $mock.runtime_environment['ZTA35G_RUNTIME_TOKEN'] $runtimeToken 'Runtime token'
     Assert-Equal $mock.runtime_role 'mock' 'Mock Runtime role'
@@ -84,40 +85,40 @@ Invoke-Test 'profiles keep secrets out of arguments and state metadata' {
         (-not (($mock.runtime_arguments -join ' ') -match $runtimeToken)) `
         'Runtime arguments contain a secret canary.'
 
-    $real = New-LaunchProfile `
-        -Runtime Real `
-        -Llm DeepSeek `
+    $provider = New-LaunchProfile `
+        -Runtime Mock `
+        -Llm Provider `
         -RuntimeToken $runtimeToken `
         -BackendPython 'C:\tools\backend-python.exe' `
-        -RuntimePython 'C:\tools\runtime-python.exe'
-    Assert-Equal $real.backend_environment['LLM_ADAPTER'] 'deepseek' 'DeepSeek adapter'
+        -RuntimePython 'C:\tools\backend-python.exe'
+    Assert-Equal $provider.backend_environment['LLM_ADAPTER'] 'provider' 'Provider adapter'
     Assert-True `
-        ($real.backend_environment.ContainsKey('DEEPSEEK_API_KEY')) `
+        ($provider.backend_environment.ContainsKey('DEEPSEEK_API_KEY')) `
         'DeepSeek key isolation is missing.'
     Assert-True `
-        ($null -eq $real.backend_environment['DEEPSEEK_API_KEY']) `
+        ($null -eq $provider.backend_environment['DEEPSEEK_API_KEY']) `
         'DeepSeek key must come from the Backend root dotenv loader.'
-    Assert-Equal $real.backend_environment['ZTA35G_RUNTIME_TOKEN'] $runtimeToken 'Real Backend token'
-    Assert-Equal $real.runtime_environment['ZTA35G_RUNTIME_TOKEN'] $runtimeToken 'Real Runtime token'
-    Assert-Equal `
-        $real.runtime_environment['ZTA35G_MODEL_ROOT'] `
-        ([IO.Path]::GetFullPath((Join-Path $repoRoot 'SEM\ZTA35G_lab'))) `
-        'Real Runtime model root'
-    Assert-Equal $real.runtime_role 'real' 'Real Runtime role'
     Assert-True `
-        (($real.runtime_arguments -join ' ') -match 'materialsagent_zta35g_runtime.main') `
-        'Real Runtime entry point is missing.'
+        ($null -eq $provider.backend_environment['DASHSCOPE_API_KEY']) `
+        'Qwen key must come from the Backend root dotenv loader.'
+    Assert-Equal $provider.backend_environment['ZTA35G_RUNTIME_TOKEN'] $runtimeToken 'Provider Backend token'
+    Assert-Equal $provider.runtime_environment['ZTA35G_RUNTIME_TOKEN'] $runtimeToken 'Mock Runtime token'
+    Assert-Equal $provider.runtime_role 'mock' 'Mock Runtime role'
+    Assert-True `
+        (($provider.runtime_arguments -join ' ') -match 'materialsagent_mock_runtime.main') `
+        'Mock Runtime entry point is missing.'
 }
 
 Invoke-Test 'non-Backend children remove unrelated caller secrets' {
     $profile = New-LaunchProfile `
-        -Runtime Real `
-        -Llm DeepSeek `
+        -Runtime Mock `
+        -Llm Provider `
         -RuntimeToken 'offline-runtime-token-canary' `
         -BackendPython 'C:\tools\backend-python.exe' `
-        -RuntimePython 'C:\tools\runtime-python.exe'
+        -RuntimePython 'C:\tools\backend-python.exe'
     foreach ($name in @(
         'DEEPSEEK_API_KEY',
+        'DASHSCOPE_API_KEY',
         'POSTGRES_PASSWORD',
         'MINIO_ACCESS_KEY',
         'MINIO_SECRET_KEY',
@@ -138,6 +139,7 @@ Invoke-Test 'non-Backend children remove unrelated caller secrets' {
     }
     foreach ($name in @(
         'DEEPSEEK_API_KEY',
+        'DASHSCOPE_API_KEY',
         'ZTA35G_RUNTIME_TOKEN',
         'ZTA35G_MODEL_ROOT',
         'TIMELINE_CURSOR_SIGNING_KEY'
@@ -159,16 +161,16 @@ Invoke-Test 'ephemeral Runtime tokens are strong nonblank per-run values' {
     Assert-True ($first -cne $second) 'Two Runtime starts reused one token.'
 }
 
-Invoke-Test 'DeepSeek root dotenv preflight accepts a valid silent probe' {
-    Assert-DeepSeekRootConfiguration `
+Invoke-Test 'Provider root dotenv preflight accepts a valid silent probe' {
+    Assert-ProviderRootConfiguration `
         -BackendPython 'C:\tools\backend-python.exe' `
         -Probe { param($python) return 0 }
 }
 
-Invoke-Test 'DeepSeek root dotenv preflight reports a missing key without values' {
+Invoke-Test 'Provider root dotenv preflight reports a missing DeepSeek key safely' {
     $message = $null
     try {
-        Assert-DeepSeekRootConfiguration `
+        Assert-ProviderRootConfiguration `
             -BackendPython 'C:\tools\backend-python.exe' `
             -Probe { param($python) return 3 }
     }
@@ -181,10 +183,26 @@ Invoke-Test 'DeepSeek root dotenv preflight reports a missing key without values
         'Missing root dotenv key result'
 }
 
-Invoke-Test 'DeepSeek root dotenv preflight reports invalid configuration safely' {
+Invoke-Test 'Provider root dotenv preflight reports a missing Qwen key safely' {
     $message = $null
     try {
-        Assert-DeepSeekRootConfiguration `
+        Assert-ProviderRootConfiguration `
+            -BackendPython 'C:\tools\backend-python.exe' `
+            -Probe { param($python) return 4 }
+    }
+    catch {
+        $message = $_.Exception.Message
+    }
+    Assert-Equal `
+        $message `
+        'LOCAL_DEV_CONFIGURATION_MISSING name=DASHSCOPE_API_KEY source=root_dotenv' `
+        'Missing Qwen root dotenv key result'
+}
+
+Invoke-Test 'Provider root dotenv preflight reports invalid configuration safely' {
+    $message = $null
+    try {
+        Assert-ProviderRootConfiguration `
             -BackendPython 'C:\tools\backend-python.exe' `
             -Probe { param($python) return 2 }
     }
@@ -193,7 +211,7 @@ Invoke-Test 'DeepSeek root dotenv preflight reports invalid configuration safely
     }
     Assert-Equal `
         $message `
-        'LOCAL_DEV_CONFIGURATION_INVALID source=root_dotenv mode=deepseek' `
+        'LOCAL_DEV_CONFIGURATION_INVALID source=root_dotenv mode=provider' `
         'Invalid root dotenv result'
 }
 
@@ -297,6 +315,7 @@ Invoke-Test 'state serialization contains ownership metadata but no secrets' {
     Assert-True (Test-LocalDevState -State $state) 'Valid state was rejected.'
     foreach ($forbidden in @(
         'DEEPSEEK_API_KEY',
+        'DASHSCOPE_API_KEY',
         'ZTA35G_RUNTIME_TOKEN',
         'POSTGRES_PASSWORD',
         'MINIO_SECRET_KEY',

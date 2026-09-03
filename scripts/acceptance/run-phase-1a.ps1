@@ -525,7 +525,7 @@ function Test-AcceptanceArtifacts {
         }
         if (
             $content -match (
-                '(?i)\b(?:DEEPSEEK_API_KEY|reasoning_content|' +
+                '(?i)\b(?:DEEPSEEK_API_KEY|DASHSCOPE_API_KEY|reasoning_content|' +
                 'Authorization|Bearer)\b'
             )
         ) {
@@ -733,12 +733,15 @@ if ($env:MATERIALSAGENT_PHASE1A_SCAN_COVERAGE_PROBE -eq '1') {
 
 $llmAdapterExisted = Test-Path -LiteralPath 'Env:LLM_ADAPTER'
 $deepSeekKeyExisted = Test-Path -LiteralPath 'Env:DEEPSEEK_API_KEY'
+$dashScopeKeyExisted = Test-Path -LiteralPath 'Env:DASHSCOPE_API_KEY'
 $originalLlmAdapter = $env:LLM_ADAPTER
 $originalDeepSeekKey = $env:DEEPSEEK_API_KEY
+$originalDashScopeKey = $env:DASHSCOPE_API_KEY
 
 try {
     $env:LLM_ADAPTER = 'mock'
     $env:DEEPSEEK_API_KEY = ''
+    $env:DASHSCOPE_API_KEY = ''
     try {
     $coverageValidation = Invoke-RecordedAction `
         -Name 'acceptance_scan_coverage_validation' `
@@ -1484,5 +1487,11 @@ finally {
     }
     else {
         Remove-Item -LiteralPath 'Env:DEEPSEEK_API_KEY' -ErrorAction SilentlyContinue
+    }
+    if ($dashScopeKeyExisted) {
+        $env:DASHSCOPE_API_KEY = $originalDashScopeKey
+    }
+    else {
+        Remove-Item -LiteralPath 'Env:DASHSCOPE_API_KEY' -ErrorAction SilentlyContinue
     }
 }

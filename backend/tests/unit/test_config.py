@@ -253,13 +253,12 @@ def test_runtime_configuration_is_loopback_only_and_secret_safe() -> None:
     assert secret not in repr(config)
 
 
-def test_runtime_timeout_defaults_remain_independent_from_deepseek() -> None:
+def test_runtime_timeout_default_is_independent_from_llm_toml() -> None:
     from materialsagent.infrastructure.config import load_settings
 
     settings = load_settings({})
 
     assert settings.zta35g_runtime_timeout_seconds == 10.0
-    assert settings.deepseek_timeout_seconds == 60.0
 
 
 def test_runtime_timeout_accepts_gate4_upper_boundary() -> None:
@@ -281,7 +280,6 @@ def test_runtime_timeout_accepts_gate4_upper_boundary() -> None:
     assert parsed is not None
     assert settings.zta35g_runtime_timeout_seconds == 900.0
     assert parsed.timeout_seconds == 900.0
-    assert settings.deepseek_timeout_seconds == 60.0
 
 
 @pytest.mark.parametrize(
@@ -402,80 +400,358 @@ def test_timeline_cursor_signing_key_length_is_measured_in_utf8_bytes() -> None:
     assert settings.timeline_cursor_signing_key.get_secret_value() == value
 
 
-def test_llm_defaults_keep_mock_enabled_without_provider_secret() -> None:
-    from materialsagent.infrastructure.config import (
-        load_settings,
-        parse_deepseek_config,
-    )
+def test_llm_defaults_keep_mock_enabled_without_provider_secrets() -> None:
+    from materialsagent.infrastructure.config import load_settings
 
     settings = load_settings({})
 
     assert settings.llm_adapter == "mock"
     assert settings.deepseek_api_key is None
-    assert settings.deepseek_model == "deepseek-v4-flash"
-    assert settings.deepseek_base_url == "https://api.deepseek.com"
-    assert settings.deepseek_timeout_seconds == 60.0
-    assert parse_deepseek_config(settings) is None
+    assert settings.dashscope_api_key is None
 
 
-def test_blank_deepseek_secret_is_normalized_to_none_in_mock_mode() -> None:
+def test_blank_provider_secrets_are_normalized_to_none_in_mock_mode() -> None:
     from materialsagent.infrastructure.config import load_settings
 
     settings = load_settings(
         {
             "LLM_ADAPTER": "mock",
             "DEEPSEEK_API_KEY": "   ",
+            "DASHSCOPE_API_KEY": "",
         }
     )
 
     assert settings.deepseek_api_key is None
+    assert settings.dashscope_api_key is None
 
 
-def test_complete_deepseek_configuration_is_exact_and_secret_safe() -> None:
-    from pydantic import SecretStr
-
-    from materialsagent.infrastructure.config import (
-        load_settings,
-        parse_deepseek_config,
+def test_committed_llm_toml_resolves_default_roles_and_keeps_secret_safe() -> None:
+    from materialsagent.infrastructure.config import load_settings
+    from materialsagent.infrastructure.llm.configuration import (
+        load_llm_configuration,
     )
 
     secret = "test-only-deepseek-secret"
-    settings = load_settings(
-        {
-            "LLM_ADAPTER": "deepseek",
-            "DEEPSEEK_API_KEY": secret,
-            "DEEPSEEK_MODEL": "deepseek-v4-flash",
-            "DEEPSEEK_BASE_URL": "https://api.deepseek.com",
-            "DEEPSEEK_TIMEOUT_SECONDS": "60",
-        }
+    configured = load_llm_configuration(
+        load_settings(
+            {
+                "LLM_ADAPTER": "provider",
+                "DEEPSEEK_API_KEY": secret,
+            }
+        )
     )
 
-    parsed = parse_deepseek_config(settings)
+    chat = configured.for_role("chat_orchestration")
+    explanation = configured.for_role("tool_result_explanation")
+    assert chat.provider == explanation.provider == "deepseek"
+    assert chat.model_name == "deepseek-v4-flash"
+    assert chat.max_tokens == 1024
+    assert explanation.max_tokens == 768
+    assert chat.endpoint == "https://api.deepseek.com"
+    assert chat.api_key.get_secret_value() == secret
+    assert secret not in repr(configured)
 
-    assert parsed is not None
-    assert parsed.model_name == "deepseek-v4-flash"
-    assert parsed.base_url == "https://api.deepseek.com"
-    assert parsed.timeout_seconds == 60.0
-    assert isinstance(parsed.api_key, SecretStr)
-    assert parsed.api_key.get_secret_value() == secret
-    assert secret not in repr(settings)
-    assert secret not in repr(parsed)
 
-
-def test_deepseek_mode_without_nonblank_secret_fails_closed() -> None:
-    from materialsagent.infrastructure.config import (
-        ConfigurationError,
-        load_settings,
-        parse_deepseek_config,
+def test_qwen_default_and_role_override_select_only_required_keys(tmp_path) -> None:
+    from materialsagent.infrastructure.config import load_settings
+    from materialsagent.infrastructure.llm.configuration import (
+        LLM_CONFIG_FILE,
+        load_llm_configuration,
     )
 
-    settings = load_settings({"LLM_ADAPTER": "deepseek"})
+    text = LLM_CONFIG_FILE.read_text(encoding="utf-8")
+    qwen_only = tmp_path / "qwen.toml"
+    qwen_only.write_text(
+        text.replace(
+            'default_model = "deepseek_default"',
+            'default_model = "qwen_default"',
+        ),
+        encoding="utf-8",
+    )
+    configured = load_llm_configuration(
+        load_settings(
+            {
+                "LLM_ADAPTER": "provider",
+                "DASHSCOPE_API_KEY": "test-qwen-key",
+            }
+        ),
+        qwen_only,
+    )
+    assert {
+        role.provider for role in configured.roles.values()
+    } == {"qwen"}
+
+    mixed = tmp_path / "mixed.toml"
+    mixed.write_text(
+        text.replace(
+            "[roles.tool_result_explanation]\n",
+            '[roles.tool_result_explanation]\nmodel = "qwen_default"\n',
+        ),
+        encoding="utf-8",
+    )
+    mixed_configuration = load_llm_configuration(
+        load_settings(
+            {
+                "LLM_ADAPTER": "provider",
+                "DEEPSEEK_API_KEY": "test-deepseek-key",
+                "DASHSCOPE_API_KEY": "test-qwen-key",
+            }
+        ),
+        mixed,
+    )
+    assert mixed_configuration.for_role("chat_orchestration").provider == "deepseek"
+    assert mixed_configuration.for_role("tool_result_explanation").provider == "qwen"
+
+
+def test_qwen_explanation_role_resolves_independent_reasoning_parameters(
+    tmp_path,
+) -> None:
+    from materialsagent.infrastructure.config import load_settings
+    from materialsagent.infrastructure.llm.configuration import (
+        LLM_CONFIG_FILE,
+        load_llm_configuration,
+    )
+
+    candidate = tmp_path / "qwen-explanation.toml"
+    source = LLM_CONFIG_FILE.read_text(encoding="utf-8")
+    old_block = (
+        "[roles.tool_result_explanation]\n"
+        "temperature = 0.0\n"
+        "max_tokens = 768\n"
+        'reasoning_mode = "disabled"'
+    )
+    new_block = (
+        "[roles.tool_result_explanation]\n"
+        'model = "qwen_default"\n'
+        "top_p = 0.9\n"
+        "top_k = 20\n"
+        "max_tokens = 768\n"
+        'reasoning_mode = "enabled"\n'
+        'reasoning_effort = "high"\n'
+        "thinking_budget = 4096"
+    )
+    candidate.write_text(source.replace(old_block, new_block), encoding="utf-8")
+
+    configured = load_llm_configuration(
+        load_settings(
+            {
+                "LLM_ADAPTER": "provider",
+                "DEEPSEEK_API_KEY": "test-deepseek-key",
+                "DASHSCOPE_API_KEY": "test-qwen-key",
+            }
+        ),
+        candidate,
+    )
+    role = configured.for_role("tool_result_explanation")
+
+    assert role.provider == "qwen"
+    assert role.top_p == 0.9
+    assert role.top_k == 20
+    assert role.reasoning_effort == "high"
+    assert role.thinking_budget == 4096
+    assert role.streaming is True
+    assert dict(role.generation_parameters) == {
+        "schema_version": 1,
+        "top_p": 0.9,
+        "top_k": 20,
+        "max_tokens": 768,
+        "reasoning_mode": "enabled",
+        "reasoning_effort": "high",
+        "thinking_budget": 4096,
+        "response_format": "text",
+        "streaming": True,
+    }
+
+
+@pytest.mark.parametrize(
+    ("replacement", "expected_field"),
+    [
+        (
+            "temperature = 0.0\ntop_k = 10",
+            "top_k",
+        ),
+        (
+            'temperature = 0.0\nreasoning_mode = "enabled"',
+            "temperature",
+        ),
+    ],
+)
+def test_deepseek_hard_conflicts_fail_at_startup(
+    tmp_path,
+    replacement: str,
+    expected_field: str,
+) -> None:
+    from materialsagent.infrastructure.config import ConfigurationError, load_settings
+    from materialsagent.infrastructure.llm.configuration import (
+        LLM_CONFIG_FILE,
+        load_llm_configuration,
+    )
+
+    candidate = tmp_path / "invalid.toml"
+    source = LLM_CONFIG_FILE.read_text(encoding="utf-8")
+    if expected_field == "temperature":
+        source = source.replace(
+            'reasoning_mode = "disabled"',
+            'reasoning_mode = "enabled"',
+            1,
+        )
+    else:
+        source = source.replace("temperature = 0.0", replacement, 1)
+    candidate.write_text(
+        source,
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigurationError) as captured:
+        load_llm_configuration(
+            load_settings(
+                {
+                    "LLM_ADAPTER": "provider",
+                    "DEEPSEEK_API_KEY": "secret-must-not-leak",
+                }
+            ),
+            candidate,
+        )
+    assert "chat_orchestration" in str(captured.value)
+    assert expected_field in str(captured.value)
+    assert "secret-must-not-leak" not in str(captured.value)
+
+
+def test_qwen_structured_reasoning_is_rejected(tmp_path) -> None:
+    from materialsagent.infrastructure.config import ConfigurationError, load_settings
+    from materialsagent.infrastructure.llm.configuration import (
+        LLM_CONFIG_FILE,
+        load_llm_configuration,
+    )
+
+    candidate = tmp_path / "qwen-reasoning.toml"
+    candidate.write_text(
+        LLM_CONFIG_FILE.read_text(encoding="utf-8")
+        .replace(
+            'default_model = "deepseek_default"',
+            'default_model = "qwen_default"',
+        )
+        .replace(
+            'reasoning_mode = "disabled"',
+            'reasoning_mode = "enabled"',
+            1,
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigurationError, match="chat_orchestration.*reasoning_mode"):
+        load_llm_configuration(
+            load_settings(
+                {
+                    "LLM_ADAPTER": "provider",
+                    "DASHSCOPE_API_KEY": "test-qwen-key",
+                }
+            ),
+            candidate,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda text: text.replace(
+            'reasoning_efforts = ["low", "high", "max"]',
+            'reasoning_efforts = ["low", "medium", "high", "max"]',
+        ),
+        lambda text: text.replace(
+            'structured_output_reasoning_modes = ["disabled"]',
+            'structured_output_reasoning_modes = ["disabled", "enabled"]',
+        ),
+        lambda text: text.replace(
+            "requires_streaming_for_reasoning = true",
+            "requires_streaming_for_reasoning = false",
+        ),
+    ],
+    ids=(
+        "deepseek-effort-ceiling",
+        "qwen-structured-reasoning-ceiling",
+        "qwen-streaming-requirement",
+    ),
+)
+def test_capability_declarations_cannot_relax_provider_hard_boundaries(
+    tmp_path,
+    mutation,
+) -> None:
+    from materialsagent.infrastructure.config import ConfigurationError, load_settings
+    from materialsagent.infrastructure.llm.configuration import (
+        LLM_CONFIG_FILE,
+        load_llm_configuration,
+    )
+
+    candidate = tmp_path / "invalid-capability.toml"
+    candidate.write_text(
+        mutation(LLM_CONFIG_FILE.read_text(encoding="utf-8")),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="Invalid LLM configuration"):
+        load_llm_configuration(
+            load_settings(
+                {
+                    "LLM_ADAPTER": "provider",
+                    "DEEPSEEK_API_KEY": "test-deepseek-key",
+                    "DASHSCOPE_API_KEY": "test-qwen-key",
+                }
+            ),
+            candidate,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda text: text.replace("schema_version = 1", "schema_version = 2"),
+        lambda text: text.replace(
+            'provider = "deepseek"',
+            'provider = "unknown"',
+            1,
+        ),
+        lambda text: text.replace(
+            "[defaults]\n",
+            "[defaults]\nunknown_field = true\n",
+        ),
+        lambda text: text.replace("temperature = 0.0", "temperature = 3.0", 1),
+    ],
+)
+def test_llm_toml_unknown_fields_and_invalid_values_are_strictly_rejected(
+    tmp_path,
+    mutation,
+) -> None:
+    from materialsagent.infrastructure.config import ConfigurationError, load_settings
+    from materialsagent.infrastructure.llm.configuration import (
+        LLM_CONFIG_FILE,
+        load_llm_configuration,
+    )
+
+    candidate = tmp_path / "invalid.toml"
+    candidate.write_text(
+        mutation(LLM_CONFIG_FILE.read_text(encoding="utf-8")),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigurationError, match="Invalid LLM configuration"):
+        load_llm_configuration(
+            load_settings(
+                {
+                    "LLM_ADAPTER": "provider",
+                    "DEEPSEEK_API_KEY": "test-key",
+                }
+            ),
+            candidate,
+        )
+
+
+def test_provider_mode_requires_only_the_selected_provider_secret() -> None:
+    from materialsagent.infrastructure.config import ConfigurationError, load_settings
+    from materialsagent.infrastructure.llm.configuration import load_llm_configuration
 
     with pytest.raises(
         ConfigurationError,
-        match=r"^Invalid DeepSeek configuration\.$",
+        match="DEEPSEEK_API_KEY",
     ):
-        parse_deepseek_config(settings)
+        load_llm_configuration(load_settings({"LLM_ADAPTER": "provider"}))
 
 
 @pytest.mark.parametrize(
@@ -483,69 +759,27 @@ def test_deepseek_mode_without_nonblank_secret_fails_closed() -> None:
     [
         {"LLM_ADAPTER": "unknown"},
         {
-            "LLM_ADAPTER": "deepseek",
+            "LLM_ADAPTER": "provider",
             "DEEPSEEK_API_KEY": " test-only-secret",
         },
         {
-            "LLM_ADAPTER": "deepseek",
-            "DEEPSEEK_API_KEY": "test-only-secret ",
+            "LLM_ADAPTER": "provider",
+            "DASHSCOPE_API_KEY": "test-only-secret ",
         },
         {
-            "LLM_ADAPTER": "deepseek",
-            "DEEPSEEK_API_KEY": "test-only-secret",
-            "DEEPSEEK_MODEL": "deepseek-chat",
-        },
-        {
-            "LLM_ADAPTER": "deepseek",
-            "DEEPSEEK_API_KEY": "test-only-secret",
-            "DEEPSEEK_BASE_URL": "https://api.deepseek.com/v1",
-        },
-        {
-            "LLM_ADAPTER": "deepseek",
-            "DEEPSEEK_API_KEY": "test-only-secret",
-            "DEEPSEEK_BASE_URL": "http://api.deepseek.com",
-        },
-        {
-            "LLM_ADAPTER": "deepseek",
-            "DEEPSEEK_API_KEY": "test-only-secret",
-            "DEEPSEEK_BASE_URL": "https://user:password@api.deepseek.com",
-        },
-        {
-            "LLM_ADAPTER": "deepseek",
-            "DEEPSEEK_API_KEY": "test-only-secret",
-            "DEEPSEEK_BASE_URL": "https://api.deepseek.com?query=value",
-        },
-        {
-            "LLM_ADAPTER": "deepseek",
-            "DEEPSEEK_API_KEY": "test-only-secret",
-            "DEEPSEEK_BASE_URL": "https://api.deepseek.com#fragment",
-        },
-        {
-            "LLM_ADAPTER": "deepseek",
-            "DEEPSEEK_API_KEY": "test-only-secret",
-            "DEEPSEEK_TIMEOUT_SECONDS": "0",
-        },
-        {
-            "LLM_ADAPTER": "deepseek",
-            "DEEPSEEK_API_KEY": "test-only-secret",
-            "DEEPSEEK_TIMEOUT_SECONDS": "-1",
+            "LLM_ADAPTER": "provider",
+            "DEEPSEEK_API_KEY": "test-only\nsecret",
         },
     ],
 )
-def test_invalid_deepseek_configuration_is_sanitized(
+def test_invalid_provider_environment_configuration_is_sanitized(
     values: dict[str, str],
 ) -> None:
-    from materialsagent.infrastructure.config import (
-        ConfigurationError,
-        load_settings,
-    )
+    from materialsagent.infrastructure.config import ConfigurationError, load_settings
 
     with pytest.raises(
         ConfigurationError,
         match=r"^Invalid application configuration\.$",
-    ) as exc_info:
+    ) as captured:
         load_settings(values)
-
-    message = str(exc_info.value)
-    assert "test-only-secret" not in message
-    assert all(actual not in message for actual in values.values())
+    assert "test-only-secret" not in str(captured.value)

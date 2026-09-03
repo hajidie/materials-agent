@@ -227,8 +227,8 @@ def test_provider_metadata_usage_and_request_id_persist_without_raw_payload(
     factory = _Factory(migrated_database_engine)
 
     class ProviderPort:
-        provider = "deepseek"
-        model_name = "deepseek-v4-flash"
+        provider = "qwen"
+        model_name = "qwen-test"
 
         def request_metadata(
             self,
@@ -242,9 +242,11 @@ def test_provider_metadata_usage_and_request_id_persist_without_raw_payload(
                 prompt_template_version="2",
                 prompt_digest=sha256(content.encode("utf-8")).hexdigest(),
                 generation_parameters={
-                    "temperature": 0,
+                    "schema_version": 1,
+                    "top_p": 0.9,
+                    "top_k": 20,
                     "max_tokens": 1024,
-                    "thinking_mode": "disabled",
+                    "reasoning_mode": "disabled",
                     "response_format": "json_object",
                     "streaming": False,
                 },
@@ -281,9 +283,10 @@ def test_provider_metadata_usage_and_request_id_persist_without_raw_payload(
                 LLMCallRow.structured_output_summary,
             )
         ).one()
-        assert row.provider == "deepseek"
+        assert row.provider == "qwen"
         assert row.prompt_template_version == "2"
-        assert row.generation_parameters["thinking_mode"] == "disabled"
+        assert row.generation_parameters["schema_version"] == 1
+        assert row.generation_parameters["top_k"] == 20
         assert row.usage == {"input_tokens": 17, "output_tokens": 5}
         assert row.provider_request_id == "provider-request-db-1"
         assert row.structured_output_summary["route"] == "KNOWLEDGE_ANSWER"

@@ -1,0 +1,46 @@
+schema_version = 1
+default_model = "deepseek_default"
+
+[models.deepseek_default]
+provider = "deepseek"
+name = "deepseek-v4-flash"
+
+[models.deepseek_default.capabilities]
+supported_parameters = ["temperature", "top_p", "max_tokens"]
+reasoning_modes = ["disabled", "enabled"]
+reasoning_efforts = ["low", "high", "max"]
+supports_thinking_budget = false
+structured_output_reasoning_modes = ["disabled", "enabled"]
+supports_sampling_with_reasoning = false
+requires_streaming_for_reasoning = false
+
+[models.qwen_default]
+provider = "qwen"
+name = "qwen3.8-flash"
+
+[models.qwen_default.capabilities]
+supported_parameters = ["temperature", "top_p", "top_k", "max_tokens"]
+reasoning_modes = ["disabled", "enabled"]
+reasoning_efforts = ["low", "medium", "high", "xhigh", "max"]
+supports_thinking_budget = true
+structured_output_reasoning_modes = ["disabled"]
+supports_sampling_with_reasoning = true
+requires_streaming_for_reasoning = true
+
+[defaults]
+timeout_seconds = 60
+
+[roles.chat_orchestration]
+temperature = 0.0
+max_tokens = 1024
+reasoning_mode = "disabled"
+
+[roles.tool_input_extraction]
+temperature = 0.0
+max_tokens = 1024
+reasoning_mode = "disabled"
+
+[roles.tool_result_explanation]
+temperature = 0.0
+max_tokens = 768
+reasoning_mode = "disabled"

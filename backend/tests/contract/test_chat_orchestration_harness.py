@@ -15,7 +15,7 @@ from materialsagent.domain.ports.tool_registry import (
     NeedsInputNormalization,
     ReadyNormalization,
 )
-from materialsagent.infrastructure.config import DeepSeekConfig
+from materialsagent.infrastructure.llm.configuration import ConfiguredRole
 
 
 _COMPLETE_PARAMETERS = {
@@ -26,12 +26,23 @@ _COMPLETE_PARAMETERS = {
 }
 
 
-def _config() -> DeepSeekConfig:
-    return DeepSeekConfig(
+def _config() -> ConfiguredRole:
+    return ConfiguredRole(
+        role="chat_orchestration",
+        provider="deepseek",
         api_key=SecretStr("offline-placeholder-never-sent"),
         model_name="deepseek-v4-flash",
-        base_url="https://api.deepseek.com",
+        endpoint="https://api.deepseek.com",
         timeout_seconds=60.0,
+        temperature=0,
+        top_p=None,
+        top_k=None,
+        max_tokens=1024,
+        reasoning_mode="disabled",
+        reasoning_effort=None,
+        thinking_budget=None,
+        response_format="json_object",
+        streaming=False,
     )
 
 
@@ -51,7 +62,7 @@ def _registry() -> ToolRegistry:
 
 class _FixtureReplayRunnable:
     def __init__(self, user_text: str, payload: dict[str, object]) -> None:
-        from materialsagent.infrastructure.llm.deepseek_chat import (
+        from materialsagent.infrastructure.llm.langchain_chat import (
             ProviderChatResponse,
         )
 
@@ -77,11 +88,13 @@ class _FixtureReplayRunnable:
 
 
 def test_provider_visible_messages_define_output_and_missing_material_semantics() -> None:
-    from materialsagent.infrastructure.llm.deepseek_chat import (
-        _render_messages,
+    from materialsagent.infrastructure.llm.prompts import (
+        render_chat_orchestration_prompt,
     )
 
-    messages = _render_messages(_chat_input("自然语言样例输入"))
+    messages = render_chat_orchestration_prompt(
+        _chat_input("自然语言样例输入")
+    )
 
     assert [message["role"] for message in messages] == ["system", "user"]
     system = messages[0]["content"]
@@ -190,8 +203,8 @@ def test_offline_adapter_contract_maps_fixture_payload_once(
     parameters: dict[str, object],
     missing_fields: tuple[str, ...],
 ) -> None:
-    from materialsagent.infrastructure.llm.deepseek_chat import (
-        DeepSeekChatAdapter,
+    from materialsagent.infrastructure.llm.langchain_chat import (
+        LangChainChatOrchestrationAdapter,
     )
 
     payload: dict[str, object] = {
@@ -209,7 +222,7 @@ def test_offline_adapter_contract_maps_fixture_payload_once(
     }
     runnable = _FixtureReplayRunnable(user_text, payload)
 
-    outcome = DeepSeekChatAdapter(
+    outcome = LangChainChatOrchestrationAdapter(
         _config(),
         structured_runnable=runnable,
     ).orchestrate(_chat_input(user_text))
@@ -236,7 +249,9 @@ def test_offline_adapter_contract_maps_fixture_payload_once(
 
 
 def test_legacy_nested_candidate_parameters_cannot_pass_real_tool_normalizer() -> None:
-    from materialsagent.infrastructure.llm.deepseek_chat import DeepSeekChatAdapter
+    from materialsagent.infrastructure.llm.langchain_chat import (
+        LangChainChatOrchestrationAdapter,
+    )
 
     payload = {
         "route": "TOOL_CANDIDATES",
@@ -251,7 +266,7 @@ def test_legacy_nested_candidate_parameters_cannot_pass_real_tool_normalizer() -
             }
         ],
     }
-    outcome = DeepSeekChatAdapter(
+    outcome = LangChainChatOrchestrationAdapter(
         _config(),
         structured_runnable=_FixtureReplayRunnable("legacy", payload),
     ).orchestrate(_chat_input("legacy"))

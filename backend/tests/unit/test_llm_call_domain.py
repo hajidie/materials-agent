@@ -467,6 +467,145 @@ def test_deepseek_generation_parameter_shapes_are_accepted_and_frozen(
         call.generation_parameters["max_tokens"] = 1
 
 
+def test_versioned_provider_generation_parameters_are_generic_and_frozen() -> None:
+    parameters = {
+        "schema_version": 1,
+        "top_p": 0.9,
+        "top_k": 20,
+        "max_tokens": 768,
+        "reasoning_mode": "enabled",
+        "reasoning_effort": "high",
+        "thinking_budget": 4096,
+        "response_format": "text",
+        "streaming": True,
+    }
+
+    call = _call(
+        purpose="TOOL_RESULT_EXPLANATION",
+        input_result_id="result_domain",
+        structured_output_summary=None,
+        provider="qwen",
+        model_name="qwen-test",
+        generation_parameters=parameters,
+    )
+
+    assert call.generation_parameters == parameters
+    with pytest.raises(TypeError):
+        call.generation_parameters["top_k"] = 10
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        {
+            "schema_version": 2,
+            "response_format": "json_object",
+            "streaming": False,
+        },
+        {
+            "schema_version": 1,
+            "top_p": 0,
+            "response_format": "json_object",
+            "streaming": False,
+        },
+        {
+            "schema_version": 1,
+            "reasoning_mode": "disabled",
+            "reasoning_effort": "high",
+            "response_format": "json_object",
+            "streaming": False,
+        },
+        {
+            "schema_version": 1,
+            "response_format": "text",
+            "streaming": False,
+        },
+        {
+            "schema_version": 1,
+            "response_format": "json_object",
+            "streaming": False,
+            "extra_body": {},
+        },
+    ],
+)
+def test_versioned_generation_parameter_schema_rejects_unsafe_shapes(
+    parameters: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError, match="generation_parameters"):
+        _call(generation_parameters=parameters)
+
+
+@pytest.mark.parametrize(
+    ("provider", "purpose", "parameters"),
+    [
+        (
+            "deepseek",
+            "CHAT_ORCHESTRATION",
+            {
+                "schema_version": 1,
+                "temperature": 0,
+                "reasoning_mode": "enabled",
+                "response_format": "json_object",
+                "streaming": False,
+            },
+        ),
+        (
+            "deepseek",
+            "CHAT_ORCHESTRATION",
+            {
+                "schema_version": 1,
+                "reasoning_mode": "enabled",
+                "reasoning_effort": "medium",
+                "response_format": "json_object",
+                "streaming": False,
+            },
+        ),
+        (
+            "qwen",
+            "CHAT_ORCHESTRATION",
+            {
+                "schema_version": 1,
+                "reasoning_mode": "enabled",
+                "response_format": "json_object",
+                "streaming": True,
+            },
+        ),
+        (
+            "qwen",
+            "TOOL_RESULT_EXPLANATION",
+            {
+                "schema_version": 1,
+                "reasoning_mode": "enabled",
+                "response_format": "text",
+                "streaming": False,
+            },
+        ),
+    ],
+)
+def test_versioned_generation_audit_cannot_bypass_provider_boundaries(
+    provider: str,
+    purpose: str,
+    parameters: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError, match="generation_parameters"):
+        _call(
+            provider=provider,
+            model_name="provider-test",
+            purpose=purpose,
+            input_result_id=(
+                "result_domain"
+                if purpose == "TOOL_RESULT_EXPLANATION"
+                else None
+            ),
+            structured_output_summary=(
+                None
+                if purpose == "TOOL_RESULT_EXPLANATION"
+                else {"route": "KNOWLEDGE_ANSWER"}
+            ),
+            generation_parameters=parameters,
+        )
+
+
 @pytest.mark.parametrize(
     (
         "purpose",

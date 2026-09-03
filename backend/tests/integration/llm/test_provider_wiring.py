@@ -10,10 +10,7 @@ import pytest
 
 from materialsagent.application.context import ActorContext
 from materialsagent.application.readiness import ReadinessService
-from materialsagent.infrastructure.config import (
-    ConfigurationError,
-    load_settings,
-)
+from materialsagent.infrastructure.config import ConfigurationError, load_settings
 
 
 def _readiness() -> ReadinessService:
@@ -30,44 +27,28 @@ def _app(**overrides: object):
         "settings": load_settings({}),
         "readiness_service": _readiness(),
         "unit_of_work_factory": lambda: None,
-        "actor_context": ActorContext(
-            actor_id="actor_test",
-            user_id=None,
-        ),
+        "actor_context": ActorContext(actor_id="actor_test", user_id=None),
     }
     options.update(overrides)
     return create_app(**options)
 
 
-def test_mock_wiring_does_not_construct_deepseek(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from materialsagent.infrastructure.llm import (
-        deepseek_chat,
-        deepseek_explanation,
-    )
-    from materialsagent.infrastructure.llm.mock import (
-        MockChatOrchestrationAdapter,
-    )
+def test_mock_wiring_uses_all_three_mock_adapters() -> None:
+    from materialsagent.infrastructure.llm.mock import MockChatOrchestrationAdapter
     from materialsagent.infrastructure.llm.mock_explanation import (
         MockExplanationAdapter,
     )
-
-    def forbidden_model(**_kwargs: object) -> object:
-        raise AssertionError("DeepSeek model must remain lazy in Mock mode.")
-
-    monkeypatch.setattr(deepseek_chat, "ChatDeepSeek", forbidden_model)
-    monkeypatch.setattr(
-        deepseek_explanation,
-        "ChatDeepSeek",
-        forbidden_model,
+    from materialsagent.infrastructure.llm.mock_tool_input import (
+        MockToolInputExtractionAdapter,
     )
 
     app = _app(settings=load_settings({"LLM_ADAPTER": "mock"}))
 
+    service = app.state.chat_orchestration_service
+    assert isinstance(service._orchestration_port, MockChatOrchestrationAdapter)
     assert isinstance(
-        app.state.chat_orchestration_service._orchestration_port,
-        MockChatOrchestrationAdapter,
+        service._tool_input_extraction_port,
+        MockToolInputExtractionAdapter,
     )
     assert isinstance(
         app.state.explanation_retry_service._explanation_service._port,
@@ -75,7 +56,7 @@ def test_mock_wiring_does_not_construct_deepseek(
     )
 
 
-def test_clean_mock_subprocess_does_not_import_deepseek_modules() -> None:
+def test_clean_mock_subprocess_does_not_import_provider_modules() -> None:
     script = textwrap.dedent(
         """
         import sys
@@ -92,15 +73,14 @@ def test_clean_mock_subprocess_does_not_import_deepseek_modules() -> None:
                 object_storage_probe=lambda: True,
             ),
             unit_of_work_factory=lambda: None,
-            actor_context=ActorContext(
-                actor_id="actor_test",
-                user_id=None,
-            ),
+            actor_context=ActorContext(actor_id="actor_test", user_id=None),
         )
 
         forbidden = (
-            "materialsagent.infrastructure.llm.deepseek_chat",
-            "materialsagent.infrastructure.llm.deepseek_explanation",
+            "materialsagent.infrastructure.llm.factory",
+            "materialsagent.infrastructure.llm.langchain_chat",
+            "materialsagent.infrastructure.llm.langchain_tool_input",
+            "materialsagent.infrastructure.llm.langchain_explanation",
         )
         assert all(name not in sys.modules for name in forbidden)
         """
@@ -118,13 +98,10 @@ def test_clean_mock_subprocess_does_not_import_deepseek_modules() -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_deepseek_wiring_constructs_two_independent_models(
+def test_provider_wiring_constructs_three_independent_models(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from materialsagent.infrastructure.llm import (
-        deepseek_chat,
-        deepseek_explanation,
-    )
+    from materialsagent.infrastructure.llm import factory
 
     created: list[SimpleNamespace] = []
 
@@ -132,7 +109,7 @@ def test_deepseek_wiring_constructs_two_independent_models(
         def __init__(self, **kwargs: object) -> None:
             self.kwargs = kwargs
             self.structured_calls = 0
-            created.append(self)
+            created.append(self)  # type: ignore[arg-type]
 
         def with_structured_output(
             self,
@@ -149,45 +126,40 @@ def test_deepseek_wiring_constructs_two_independent_models(
                 response_metadata={},
             )
 
-    monkeypatch.setattr(deepseek_chat, "ChatDeepSeek", FakeModel)
-    monkeypatch.setattr(
-        deepseek_explanation,
-        "ChatDeepSeek",
-        FakeModel,
-    )
-    settings = load_settings(
-        {
-            "LLM_ADAPTER": "deepseek",
-            "DEEPSEEK_API_KEY": "test-placeholder-never-sent",
-        }
+    monkeypatch.setattr(factory, "ChatDeepSeek", FakeModel)
+    app = _app(
+        settings=load_settings(
+            {
+                "LLM_ADAPTER": "provider",
+                "DEEPSEEK_API_KEY": "test-placeholder-never-sent",
+            }
+        )
     )
 
-    app = _app(settings=settings)
-
-    chat_port = app.state.chat_orchestration_service._orchestration_port
+    chat_service = app.state.chat_orchestration_service
+    chat_port = chat_service._orchestration_port
+    tool_input_port = chat_service._tool_input_extraction_port
     explanation_port = (
         app.state.explanation_retry_service._explanation_service._port
     )
-    assert chat_port.provider == explanation_port.provider == "deepseek"
-    assert len(created) == 2
-    assert created[0] is not created[1]
-    assert {item.kwargs["max_tokens"] for item in created} == {1024, 768}
-    assert sum(item.structured_calls for item in created) == 1
+    assert {
+        chat_port.provider,
+        tool_input_port.provider,
+        explanation_port.provider,
+    } == {"deepseek"}
+    assert len(created) == 3
+    assert len({id(item) for item in created}) == 3
+    assert sorted(item.kwargs["max_tokens"] for item in created) == [768, 1024, 1024]
+    assert sum(item.structured_calls for item in created) == 2
 
 
-def test_deepseek_missing_key_fails_closed_without_fallback() -> None:
-    with pytest.raises(
-        ConfigurationError,
-        match=r"^Invalid DeepSeek configuration\.$",
-    ):
-        _app(settings=load_settings({"LLM_ADAPTER": "deepseek"}))
+def test_provider_missing_selected_key_fails_closed_without_fallback() -> None:
+    with pytest.raises(ConfigurationError, match="DEEPSEEK_API_KEY"):
+        _app(settings=load_settings({"LLM_ADAPTER": "provider"}))
 
 
-def test_explicit_ports_take_priority_without_deepseek_key() -> None:
-    explicit_chat = SimpleNamespace(
-        provider="explicit",
-        model_name="explicit-chat",
-    )
+def test_explicit_ports_take_priority_without_provider_key() -> None:
+    explicit_chat = SimpleNamespace(provider="explicit", model_name="explicit-chat")
     explicit_tool_input = SimpleNamespace(
         provider="explicit",
         model_name="explicit-tool-input",
@@ -199,16 +171,13 @@ def test_explicit_ports_take_priority_without_deepseek_key() -> None:
     )
 
     app = _app(
-        settings=load_settings({"LLM_ADAPTER": "deepseek"}),
+        settings=load_settings({"LLM_ADAPTER": "provider"}),
         chat_orchestration_port=explicit_chat,
         tool_input_extraction_port=explicit_tool_input,
         explanation_port=explicit_explanation,
     )
 
-    assert (
-        app.state.chat_orchestration_service._orchestration_port
-        is explicit_chat
-    )
+    assert app.state.chat_orchestration_service._orchestration_port is explicit_chat
     assert (
         app.state.chat_orchestration_service._tool_input_extraction_port
         is explicit_tool_input
