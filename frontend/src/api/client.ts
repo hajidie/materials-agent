@@ -23,6 +23,7 @@ import type {
   ToolResult,
   ToolRetryRequest,
   ToolRetryResponseData,
+  ToolInvocation,
 } from "./types";
 
 const DEFAULT_API_BASE_URL = "/api/v1";
@@ -74,6 +75,12 @@ export interface MaterialsAgentApi {
     body: MessageSubmissionRequest,
     idempotencyKey: string,
   ): Promise<ApiSuccessEnvelope<MessageSubmissionResponseData>>;
+  confirmToolInvocation?(
+    invocationRunId: string,
+  ): Promise<ApiSuccessEnvelope<ToolInvocation>>;
+  rejectToolInvocation?(
+    invocationRunId: string,
+  ): Promise<ApiSuccessEnvelope<ToolInvocation>>;
   retryTool(
     taskId: string,
     body: ToolRetryRequest,
@@ -451,6 +458,20 @@ export function createMaterialsAgentApi(
           idempotencyKey,
           networkFailure: "IDEMPOTENT_WRITE",
         },
+      );
+    },
+    confirmToolInvocation(invocationRunId) {
+      return request(
+        "POST",
+        `/tool-invocations/${encodeId(invocationRunId)}/confirm`,
+        { networkFailure: "IDEMPOTENT_WRITE" },
+      );
+    },
+    rejectToolInvocation(invocationRunId) {
+      return request(
+        "POST",
+        `/tool-invocations/${encodeId(invocationRunId)}/reject`,
+        { networkFailure: "IDEMPOTENT_WRITE" },
       );
     },
     retryTool(taskId, body, idempotencyKey) {

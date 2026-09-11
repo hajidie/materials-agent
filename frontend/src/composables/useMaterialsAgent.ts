@@ -81,6 +81,7 @@ export interface MaterialsAgentState {
     Ref<PendingMutationV1 | FirstTurnDescriptorV1 | null>
   >;
   mutationStatus: Readonly<Ref<MutationStatus>>;
+  invocationMutationBusy: Readonly<Ref<boolean>>;
   conversationCreationUncertain: Readonly<Ref<boolean>>;
   firstTurnDraft: Readonly<Ref<string>>;
   globalError: DeepReadonly<Ref<UserVisibleError | null>>;
@@ -105,6 +106,8 @@ export interface MaterialsAgentState {
     resultId: string,
     language?: string,
   ): Promise<void>;
+  confirmInvocation(invocationRunId: string): Promise<void>;
+  rejectInvocation(invocationRunId: string): Promise<void>;
   retryPendingMutation(): Promise<void>;
   discardPendingMutation(): { discarded: boolean };
   startPolling(): void;
@@ -161,6 +164,7 @@ export function useMaterialsAgent(
   const actionError = ref<UserVisibleError | null>(null);
   const readError = ref<UserVisibleError | null>(null);
   const conversationCreationUncertain = ref(false);
+  const invocationMutationBusy = ref(false);
   const firstTurn = useFirstTurnOperation({
     api,
     ...(options.storage === undefined
@@ -759,7 +763,7 @@ export function useMaterialsAgent(
           candidate.item_type === "TOOL_TASK" &&
           candidate.task.selected_result_id === descriptor.resourceId,
       );
-      if (item !== undefined) {
+      if (item !== undefined && item.item_type === "TOOL_TASK") {
         invalidateTask(item.task_id);
       }
     }
@@ -948,6 +952,44 @@ export function useMaterialsAgent(
     await runMutation("EXPLANATION_RETRY", resultId, body);
   }
 
+  async function mutateInvocation(
+    invocationRunId: string,
+    action: "confirm" | "reject",
+  ): Promise<void> {
+    const operation = action === "confirm"
+      ? api.confirmToolInvocation
+      : api.rejectToolInvocation;
+    if (operation === undefined) {
+      throw new Error("当前 API 未提供 Tool Invocation 操作。");
+    }
+    clearActionError();
+    invocationMutationBusy.value = true;
+    try {
+      const response = await operation.call(api, invocationRunId);
+      if (disposed) {
+        return;
+      }
+      lastRequestId.value = response.request_id;
+      await refreshTimeline();
+      lastRequestId.value = response.request_id;
+    } catch (error) {
+      if (!disposed) {
+        setActionError(error, "MUTATION");
+      }
+      throw error;
+    } finally {
+      invocationMutationBusy.value = false;
+    }
+  }
+
+  async function confirmInvocation(invocationRunId: string): Promise<void> {
+    await mutateInvocation(invocationRunId, "confirm");
+  }
+
+  async function rejectInvocation(invocationRunId: string): Promise<void> {
+    await mutateInvocation(invocationRunId, "reject");
+  }
+
   async function retryPendingMutation(): Promise<void> {
     if (firstTurn.pending.value !== null) {
       clearActionError();
@@ -1026,6 +1068,7 @@ export function useMaterialsAgent(
     supplementTarget: readonly(supplementTarget),
     pendingMutation,
     mutationStatus,
+    invocationMutationBusy: readonly(invocationMutationBusy),
     conversationCreationUncertain: readonly(
       conversationCreationUncertain,
     ),
@@ -1049,6 +1092,8 @@ export function useMaterialsAgent(
     submitSupplement,
     retryTool,
     retryExplanation,
+    confirmInvocation,
+    rejectInvocation,
     retryPendingMutation,
     discardPendingMutation,
     startPolling,

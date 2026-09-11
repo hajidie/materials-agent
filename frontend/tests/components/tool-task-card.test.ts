@@ -162,6 +162,7 @@ function item(taskStatus: TaskStatus = "SUCCEEDED"): TimelineToolTaskItem {
     latest_explanation_failure: null,
     needs_input: null,
     errors: [],
+    invocation: null,
   };
 }
 

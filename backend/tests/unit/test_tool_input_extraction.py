@@ -115,6 +115,7 @@ def test_extraction_audit_applies_4096_byte_limit_to_delta_not_wrapper() -> None
         llm_call_id="llm_large_delta",
         task_id="task_large_delta",
         conversation_id="conversation_large_delta",
+        source_message_id="message_large_delta",
         request_id="request_large_delta",
         purpose="TOOL_INPUT_EXTRACTION",
         input_result_id=None,

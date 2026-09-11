@@ -160,6 +160,7 @@ def _controlled_generation_parameters(
         "reasoning_mode",
         "reasoning_effort",
         "thinking_budget",
+        "tool_calling_mode",
     }
     keys = set(value)
     is_legacy = keys == legacy_keys
@@ -234,6 +235,14 @@ def _controlled_generation_parameters(
             raise ValueError(
                 "generation_parameters.streaming must be boolean."
             )
+        if "tool_calling_mode" in value:
+            if (
+                purpose != CHAT_ORCHESTRATION
+                or value["tool_calling_mode"] not in {"structured", "native"}
+            ):
+                raise ValueError(
+                    "generation_parameters.tool_calling_mode is invalid."
+                )
         reasoning_mode = value.get("reasoning_mode")
         if reasoning_mode is not None and reasoning_mode not in {
             "disabled",
@@ -479,16 +488,20 @@ def _controlled_structured_output_summary(
                     "structured_output_summary.candidates must contain JSON objects."
                 )
             candidate_keys = set(candidate)
-            legacy_shape = {"tool_id", "candidate_input"}
-            current_shapes = (
+            legacy_shapes = (
+                {"tool_id", "candidate_input"},
                 {"tool_id", "candidate_input_delta"},
+                {"tool_id", "candidate_input_delta", "history_reference"},
+            )
+            current_shapes = (
+                {"tool_id", "proposed_arguments"},
                 {
                     "tool_id",
-                    "candidate_input_delta",
+                    "proposed_arguments",
                     "history_reference",
                 },
             )
-            if candidate_keys != legacy_shape and candidate_keys not in current_shapes:
+            if candidate_keys not in legacy_shapes and candidate_keys not in current_shapes:
                 raise ValueError(
                     "structured_output_summary.candidates item does not match "
                     "its controlled schema."
@@ -503,9 +516,13 @@ def _controlled_structured_output_summary(
                     "structured_output_summary.candidates must not repeat a Tool."
                 )
             input_field = (
-                "candidate_input"
-                if candidate_keys == legacy_shape
-                else "candidate_input_delta"
+                "proposed_arguments"
+                if candidate_keys in current_shapes
+                else (
+                    "candidate_input_delta"
+                    if "candidate_input_delta" in candidate_keys
+                    else "candidate_input"
+                )
             )
             if not isinstance(candidate[input_field], Mapping):
                 raise ValueError(
@@ -536,8 +553,9 @@ def _controlled_structured_output_summary(
 @dataclass(frozen=True, slots=True)
 class LLMCall:
     llm_call_id: str
-    task_id: str
+    task_id: str | None
     conversation_id: str
+    source_message_id: str
     request_id: str
     purpose: str
     input_result_id: str | None
@@ -565,13 +583,15 @@ class LLMCall:
     def __post_init__(self) -> None:
         for field_name in (
             "llm_call_id",
-            "task_id",
             "conversation_id",
+            "source_message_id",
             "request_id",
             "provider",
             "model_name",
         ):
             _require_non_blank(getattr(self, field_name), field_name)
+        if self.task_id is not None:
+            _require_non_blank(self.task_id, "task_id")
         for field_name in (
             "input_result_id",
             "prompt_template_id",

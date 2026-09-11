@@ -9,6 +9,7 @@ import unicodedata
 from materialsagent.domain.models.idempotency_record import (
     EXPLANATION_RETRY,
     IDEMPOTENCY_OPERATIONS,
+    MESSAGE_SUBMIT,
     TASK_CREATE,
     TASK_INPUT_SUPPLEMENT,
     TOOL_RETRY,

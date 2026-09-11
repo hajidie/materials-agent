@@ -15,6 +15,7 @@ from backend.tests.api.test_explanation_outcomes import (
 )
 from materialsagent.application.tool_execution import ToolExecutionService
 from materialsagent.application.tools import build_tool_registry
+from materialsagent.infrastructure.db.conversation_task import MessageRow
 from materialsagent.infrastructure.db.explanation import (
     NaturalLanguageExplanationRow,
 )
@@ -127,11 +128,19 @@ def _insert_later_failed_explanation(
     explanation_id = "explanation_legacy_latest_failed"
     session_factory = create_session_factory(api_harness.engine)
     with session_factory() as session:
+        source_message_id = session.scalar(
+            select(MessageRow.message_id)
+            .where(MessageRow.task_id == task_id, MessageRow.role == "USER")
+            .order_by(MessageRow.created_at, MessageRow.message_id)
+            .limit(1)
+        )
+        assert source_message_id is not None
         session.add(
             LLMCallRow(
                 llm_call_id=call_id,
                 task_id=task_id,
                 conversation_id=conversation_id,
+                source_message_id=source_message_id,
                 request_id="req_legacy_latest_failed",
                 purpose="TOOL_RESULT_EXPLANATION",
                 input_result_id=result_id,

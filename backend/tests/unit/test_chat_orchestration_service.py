@@ -444,7 +444,7 @@ def _service(
             "route": "TOOL_CANDIDATES",
             "candidates": [{
                 "tool_id": payload["tool_id"],
-                "candidate_input_delta": candidate_input,
+                "proposed_arguments": candidate_input,
             }],
         }
 
@@ -523,7 +523,15 @@ def _history_reference_case(
         )
 
     registry = ToolRegistry(
-        (replace(original_definition, normalizer=recorded_normalizer),)
+        (
+            replace(
+                original_definition,
+                binding=replace(
+                    original_definition.binding,
+                    normalizer=recorded_normalizer,
+                ),
+            ),
+        )
     )
     definition = registry.resolve("zta35g_sem_virtual_lab")
     prior_time = BASE_TIME - timedelta(minutes=1)
@@ -611,7 +619,7 @@ def test_new_task_without_explicit_history_reference_does_not_inherit_parameters
                 "candidates": [
                     {
                         "tool_id": "zta35g_sem_virtual_lab",
-                        "candidate_input_delta": delta,
+                        "proposed_arguments": delta,
                     }
                 ],
             }
@@ -679,7 +687,7 @@ def test_new_task_explicit_history_reference_merges_then_validates_and_authorize
             "candidates": [
                 {
                     "tool_id": "zta35g_sem_virtual_lab",
-                    "candidate_input_delta": {
+                    "proposed_arguments": {
                         "solution_temperature": {"value": 1050, "unit": "°C"}
                     },
                     "history_reference": {
@@ -1037,7 +1045,7 @@ def test_complete_valid_tool_candidate_stays_running_when_m7_chain_is_enabled() 
                 "route": "TOOL_CANDIDATES",
                 "candidates": [{
                     "tool_id": "zta35g_sem_virtual_lab",
-                    "candidate_input_delta": {
+                    "proposed_arguments": {
                         "material": "ZTA35G",
                         **_valid_tool_payload()["candidate_parameters"],
                         "requested_outputs": ["sem_image", "mechanical_properties"],
@@ -1849,7 +1857,7 @@ def test_unique_complete_candidate_resolves_normalizes_then_binds_ready() -> Non
             "candidates": [
                 {
                     "tool_id": "zta35g_sem_virtual_lab",
-                    "candidate_input_delta": {"value": "zta35g_sem_virtual_lab"},
+                    "proposed_arguments": {"value": "zta35g_sem_virtual_lab"},
                 }
             ],
         },
@@ -1893,7 +1901,7 @@ def test_unique_incomplete_candidate_binds_before_needs_input_persistence() -> N
             "candidates": [
                 {
                     "tool_id": "zta35g_sem_virtual_lab",
-                    "candidate_input_delta": {"value": "zta35g_sem_virtual_lab"},
+                    "proposed_arguments": {"value": "zta35g_sem_virtual_lab"},
                 }
             ],
         },
@@ -1920,8 +1928,8 @@ def test_multiple_valid_candidates_remain_unbound_without_normalization() -> Non
         lambda _: {
             "route": "TOOL_CANDIDATES",
             "candidates": [
-                {"tool_id": "tool_one", "candidate_input_delta": {"value": "tool_one"}},
-                {"tool_id": "tool_two", "candidate_input_delta": {"value": "tool_two"}},
+                {"tool_id": "tool_one", "proposed_arguments": {"value": "tool_one"}},
+                {"tool_id": "tool_two", "proposed_arguments": {"value": "tool_two"}},
             ],
         },
     ).orchestrate_submission(actor, submission)
@@ -1961,10 +1969,10 @@ def test_any_unresolvable_candidate_rejects_the_entire_candidate_set(
         lambda _: {
             "route": "TOOL_CANDIDATES",
             "candidates": [
-                {"tool_id": "tool_one", "candidate_input_delta": {"value": "tool_one"}},
+                {"tool_id": "tool_one", "proposed_arguments": {"value": "tool_one"}},
                 {
                     "tool_id": rejected_tool_id,
-                    "candidate_input_delta": {"value": rejected_tool_id},
+                    "proposed_arguments": {"value": rejected_tool_id},
                 },
             ],
         },
@@ -2011,6 +2019,7 @@ def _disabled_only_ml_registry():
     from materialsagent.application.tool_registry import ToolRegistry
     from materialsagent.domain.ports.tool_registry import (
         ExecutionPolicy,
+        ToolExecutionPolicy,
         ToolStatus,
     )
     from backend.tests.support.heterogeneous_tools import (
@@ -2020,9 +2029,14 @@ def _disabled_only_ml_registry():
     return ToolRegistry(
         (
             replace(
-                build_ml_training_test_definition(),
-                status=ToolStatus.DISABLED,
-                execution_policy=ExecutionPolicy.NONE,
+                (registration := build_ml_training_test_definition()),
+                definition=replace(
+                    registration.definition,
+                    status=ToolStatus.DISABLED,
+                    tool_execution_policy=ToolExecutionPolicy(
+                        lifecycle_policy=ExecutionPolicy.NONE,
+                    ),
+                ),
             ),
         )
     )
@@ -2063,7 +2077,7 @@ def test_tool_candidate_cannot_resolve_from_an_empty_routing_catalog() -> None:
             "candidates": [
                 {
                     "tool_id": "ml_training_test",
-                    "candidate_input_delta": {
+                    "proposed_arguments": {
                         "dataset": "dataset_fixture_1",
                         "task_type": "regression",
                         "split_ratio": 0.8,
@@ -2105,7 +2119,7 @@ def test_unknown_candidate_becomes_agent_internal_error_without_binding() -> Non
         lambda _: {
             "route": "TOOL_CANDIDATES",
             "candidates": [
-                {"tool_id": "unknown_tool", "candidate_input_delta": {"value": "unknown_tool"}}
+                {"tool_id": "unknown_tool", "proposed_arguments": {"value": "unknown_tool"}}
             ],
         },
     )
@@ -2144,7 +2158,7 @@ def test_new_binding_is_normalized_before_current_authorization_denial() -> None
             "candidates": [
                 {
                     "tool_id": "disabled_tool",
-                    "candidate_input_delta": {"value": "disabled_tool"},
+                    "proposed_arguments": {"value": "disabled_tool"},
                 }
             ],
         },
@@ -2178,7 +2192,7 @@ def test_inconsistent_ready_normalization_is_rejected_before_binding() -> None:
         lambda _: {
             "route": "TOOL_CANDIDATES",
             "candidates": [
-                {"tool_id": "tool_one", "candidate_input_delta": {"value": "tool_one"}}
+                {"tool_id": "tool_one", "proposed_arguments": {"value": "tool_one"}}
             ],
         },
     )
@@ -2213,7 +2227,7 @@ def test_ready_normalization_cannot_omit_schema_declared_outputs() -> None:
         lambda _: {
             "route": "TOOL_CANDIDATES",
             "candidates": [
-                {"tool_id": "tool_one", "candidate_input_delta": {"value": "tool_one"}}
+                {"tool_id": "tool_one", "proposed_arguments": {"value": "tool_one"}}
             ],
         },
     )
@@ -2269,7 +2283,7 @@ def test_forged_invalid_needs_input_is_rejected_before_binding(
         lambda _: {
             "route": "TOOL_CANDIDATES",
             "candidates": [
-                {"tool_id": "tool_one", "candidate_input_delta": {"value": "tool_one"}}
+                {"tool_id": "tool_one", "proposed_arguments": {"value": "tool_one"}}
             ],
         },
     )
@@ -2301,7 +2315,7 @@ def test_incomplete_forged_normalization_maps_to_controlled_schema_mismatch() ->
         lambda _: {
             "route": "TOOL_CANDIDATES",
             "candidates": [
-                {"tool_id": "tool_one", "candidate_input_delta": {"value": "tool_one"}}
+                {"tool_id": "tool_one", "proposed_arguments": {"value": "tool_one"}}
             ],
         },
     )
@@ -2421,7 +2435,7 @@ def test_uncertain_finalize_rejects_different_committed_tool_route(mutation: str
         lambda _: {
             "route": "TOOL_CANDIDATES",
             "candidates": [
-                {"tool_id": "tool_one", "candidate_input_delta": {"value": "tool_one"}}
+                {"tool_id": "tool_one", "proposed_arguments": {"value": "tool_one"}}
             ],
         },
     )
@@ -2456,7 +2470,7 @@ def test_uncertain_finalize_recovers_exact_committed_tool_route() -> None:
         lambda _: {
             "route": "TOOL_CANDIDATES",
             "candidates": [
-                {"tool_id": "tool_one", "candidate_input_delta": {"value": "tool_one"}}
+                {"tool_id": "tool_one", "proposed_arguments": {"value": "tool_one"}}
             ],
         },
     ).orchestrate_submission(actor, submission)
@@ -2498,7 +2512,7 @@ def test_uncertain_finalize_recovers_schema_less_fixed_output_tool_route() -> No
             "candidates": [
                 {
                     "tool_id": "ml_training_test",
-                    "candidate_input_delta": candidate_input,
+                    "proposed_arguments": candidate_input,
                 }
             ],
         },
@@ -2538,7 +2552,7 @@ def test_uncertain_bound_needs_input_rejects_extra_assistant_structure() -> None
         lambda _: {
             "route": "TOOL_CANDIDATES",
             "candidates": [
-                {"tool_id": "tool_one", "candidate_input_delta": {"value": "tool_one"}}
+                {"tool_id": "tool_one", "proposed_arguments": {"value": "tool_one"}}
             ],
         },
     )
@@ -2600,7 +2614,7 @@ def test_uncertain_recovery_compares_full_intended_resolved_route(difference: st
         lambda _: {
             "route": "TOOL_CANDIDATES",
             "candidates": [
-                {"tool_id": "tool_one", "candidate_input_delta": {"value": "tool_one"}}
+                {"tool_id": "tool_one", "proposed_arguments": {"value": "tool_one"}}
             ],
         },
     )
@@ -2678,8 +2692,8 @@ def test_uncertain_recovery_compares_ambiguous_refs_and_follow_up(difference: st
         lambda _: {
             "route": "TOOL_CANDIDATES",
             "candidates": [
-                {"tool_id": "tool_one", "candidate_input_delta": {"value": "tool_one"}},
-                {"tool_id": "tool_two", "candidate_input_delta": {"value": "tool_two"}},
+                {"tool_id": "tool_one", "proposed_arguments": {"value": "tool_one"}},
+                {"tool_id": "tool_two", "proposed_arguments": {"value": "tool_two"}},
             ],
         },
     )
@@ -3485,8 +3499,11 @@ def test_service_skips_newer_type_mismatch_for_real_zta_normalizer(
         (
             replace(
                 base_definition,
-                version="2",
-                normalizer=recording_real_normalizer,
+                definition=replace(base_definition.definition, version="2"),
+                binding=replace(
+                    base_definition.binding,
+                    normalizer=recording_real_normalizer,
+                ),
             ),
         )
     )
@@ -4143,8 +4160,11 @@ def test_ml_candidate_binds_once_and_fixed_tool_supplement_becomes_ready() -> No
         pytest.fail("The ML route invoked the ZTA35G normalizer.")
 
     zta = replace(
-        build_zta35g_tool_definition(),
-        normalizer=forbidden_zta_normalizer,
+        (zta_registration := build_zta35g_tool_definition()),
+        binding=replace(
+            zta_registration.binding,
+            normalizer=forbidden_zta_normalizer,
+        ),
     )
     ml = build_ml_training_test_definition(
         normalization_observer=record_normalization,
@@ -4166,7 +4186,7 @@ def test_ml_candidate_binds_once_and_fixed_tool_supplement_becomes_ready() -> No
             "candidates": [
                 {
                     "tool_id": "ml_training_test",
-                    "candidate_input_delta": {
+                    "proposed_arguments": {
                         "dataset": "dataset_fixture_1",
                         "task_type": "regression",
                         "split_ratio": None,

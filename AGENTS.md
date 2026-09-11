@@ -73,9 +73,10 @@
 
 ## 产品范围边界
 
-当前版本是单用户、本地运行的模块化单体 MVP，默认应用组合只注册
-`zta35g_sem_virtual_lab`。进程内 Registry 和 Router 是显式扩展底座，不代表产品已经提供
-多 Tool。
+当前版本是单用户、本地运行的模块化单体 MVP，默认应用组合注册
+`materials_unit_conversion` Standard Tool 与 `zta35g_sem_virtual_lab` Managed Tool。单一
+Tool Registry、LangChain Adapter 和 ExecutorRouter 是显式扩展底座；每条用户消息最多形成
+一个自动执行 Invocation，生产 Catalog 禁止 Side-effect Tool。
 
 当前不包含 Redis、后台 Worker、SSE、WebSocket、登录、多用户隔离、真实 SEM 上传、EBSD
 输入、ML Training、Planner、多 Agent、动态插件上传或生产部署。增加这些能力属于产品或

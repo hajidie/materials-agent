@@ -34,6 +34,14 @@ from materialsagent.application.tool_registry import (
     ToolAuthorizationError,
     UnknownToolError,
 )
+from materialsagent.application.tool_invocations import (
+    InvocationService,
+    PublicInvocation,
+)
+from materialsagent.application.tool_proposals import (
+    ResolvedToolInvocationProposal,
+    resolve_tool_proposal,
+)
 from materialsagent.application.messages import (
     NEW_TASK,
     SUPPLEMENT_TASK,
@@ -66,6 +74,10 @@ from materialsagent.domain.models.task import (
     Task,
 )
 from materialsagent.domain.models.task_input_revision import TaskInputRevision
+from materialsagent.domain.models.tool_invocation import (
+    ProposalOrigin,
+    ToolInvocationProposal,
+)
 from materialsagent.domain.ports.chat_orchestration import (
     ChatOrchestrationProtocolError,
     ChatOrchestrationProviderError,
@@ -93,6 +105,7 @@ from materialsagent.domain.ports.tool_registry import (
     ToolAction,
     ToolNormalization,
     ToolRef,
+    ToolExecutionProfile,
 )
 from materialsagent.domain.ports.tool_input_extraction import (
     ToolInputExtractionInput,
@@ -124,10 +137,11 @@ logger = logging.getLogger("materialsagent.chat_orchestration")
 class ChatOrchestrationProjection:
     conversation_id: str
     user_message: Message
-    task: Task
+    task: Task | None
     llm_call: LLMCall | None
     assistant_message: Message | None
     revision: TaskInputRevision | None
+    invocation: PublicInvocation | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +180,7 @@ class ChatOrchestrationService:
         tool_input_extraction_port: ToolInputExtractionPort | None = None,
         context_builder: ConversationContextBuilder | None = None,
         token_counter: TokenCounter | None = None,
+        invocation_service: InvocationService | None = None,
     ) -> None:
         self._unit_of_work_factory = unit_of_work_factory
         self._orchestration_port = orchestration_port
@@ -194,6 +209,7 @@ class ChatOrchestrationService:
 
             token_counter = Cl100kTokenCounter()
         self._token_counter = token_counter
+        self._invocation_service = invocation_service
 
     def configured_for_tool_chain(
         self,
@@ -212,6 +228,7 @@ class ChatOrchestrationService:
             tool_input_extraction_port=self._tool_input_extraction_port,
             context_builder=self._context_builder,
             token_counter=self._token_counter,
+            invocation_service=self._invocation_service,
         )
 
     def orchestrate_submission(
@@ -221,6 +238,12 @@ class ChatOrchestrationService:
         *,
         resume_call: LLMCall | None = None,
     ) -> ChatOrchestrationProjection:
+        if submission.task is None:
+            return self._orchestrate_unbound_new(
+                actor_context,
+                submission,
+                resume_call=resume_call,
+            )
         if submission.submission_mode == SUPPLEMENT_TASK:
             return self._orchestrate_bound_supplement(
                 actor_context,
@@ -478,6 +501,8 @@ class ChatOrchestrationService:
         actor_context: ActorContext,
         submission: PreparedSubmission,
     ) -> ChatOrchestrationProjection:
+        if submission.task is None:
+            return self._resume_or_load_unbound_new(actor_context, submission)
         if submission.submission_mode == SUPPLEMENT_TASK:
             try:
                 with self._unit_of_work_factory() as unit_of_work:
@@ -603,6 +628,645 @@ class ChatOrchestrationService:
         if task.current_status == TASK_PENDING:
             return self.orchestrate_submission(actor_context, submission)
         return self.load_current_submission(actor_context, submission)
+
+    def _resume_or_load_unbound_new(
+        self,
+        actor_context: ActorContext,
+        submission: PreparedSubmission,
+    ) -> ChatOrchestrationProjection:
+        try:
+            with self._unit_of_work_factory() as unit_of_work:
+                message = unit_of_work.messages.get(submission.user_message.message_id)
+                conversation = unit_of_work.conversations.get_owned(
+                    submission.conversation_id,
+                    actor_context.actor_id,
+                )
+                if (
+                    message is None
+                    or conversation is None
+                    or message.actor_id != actor_context.actor_id
+                    or message.conversation_id != submission.conversation_id
+                    or message.role != "USER"
+                ):
+                    raise ResourceNotFoundError()
+                if message.task_id is not None:
+                    task = unit_of_work.tasks.get_owned(
+                        message.task_id,
+                        actor_context.actor_id,
+                    )
+                    if task is None:
+                        raise ResourceNotFoundError()
+                    bound_submission = PreparedSubmission(
+                        conversation_id=submission.conversation_id,
+                        user_message=message,
+                        task=task,
+                        submission_mode=NEW_TASK,
+                        idempotency_record_id=submission.idempotency_record_id,
+                        idempotency_outcome=submission.idempotency_outcome,
+                    )
+                else:
+                    bound_submission = None
+                calls = [
+                    call
+                    for call in unit_of_work.llm_calls.list_for_source_message(
+                        message.message_id
+                    )
+                    if call.purpose == CHAT_ORCHESTRATION
+                    and not (
+                        call.status == LLM_FAILED
+                        and call.error_code == "PROCESS_INTERRUPTED_BEFORE_START"
+                    )
+                ]
+        except PersistenceError as error:
+            raise from_persistence_error(
+                error,
+                conversation_id=submission.conversation_id,
+            ) from None
+        if bound_submission is not None:
+            return self.load_current_submission(actor_context, bound_submission)
+        if len(calls) > 1:
+            raise self._conflict(submission)
+        if not calls:
+            return self._orchestrate_unbound_new(actor_context, submission)
+        call = calls[0]
+        if call.status == LLM_PENDING:
+            return self._orchestrate_unbound_new(
+                actor_context,
+                submission,
+                resume_call=call,
+            )
+        return self._load_unbound_projection(actor_context, submission, call)
+
+    def _orchestrate_unbound_new(
+        self,
+        actor_context: ActorContext,
+        submission: PreparedSubmission,
+        *,
+        resume_call: LLMCall | None = None,
+    ) -> ChatOrchestrationProjection:
+        catalog = self._tool_registry.routing_snapshot()
+
+        def input_for(window: PromptContextWindow) -> ChatOrchestrationInput:
+            return ChatOrchestrationInput(
+                task_id=None,
+                conversation_id=submission.conversation_id,
+                request_id=submission.user_message.request_id,
+                content_text=submission.user_message.content_text,
+                routing_catalog=catalog,
+                context_window=window,
+            )
+
+        context_result = self._context_builder.build(
+            purpose=CHAT_ORCHESTRATION,
+            actor_id=actor_context.actor_id,
+            conversation_id=submission.conversation_id,
+            current_message=submission.user_message,
+            task_id=None,
+            agent_state={},
+            budget=self._context_budget(
+                self._orchestration_port,
+                purpose=CHAT_ORCHESTRATION,
+            ),
+            prompt_token_counter=lambda window: self._chat_prompt_tokens(input_for(window)),
+        )
+        orchestration_input = input_for(context_result.window)
+        metadata = self._orchestration_port.request_metadata(orchestration_input)
+        if (
+            not isinstance(metadata, ChatOrchestrationRequestMetadata)
+            or metadata.provider != self._provider
+            or metadata.model_name != self._model_name
+        ):
+            raise ChatOrchestrationProtocolError()
+        context_snapshot = build_context_snapshot(
+            context_result,
+            purpose=CHAT_ORCHESTRATION,
+            model_name=metadata.model_name,
+            prompt_digest=metadata.prompt_digest,
+        )
+        call = resume_call or self._prepare_unbound_call(
+            actor_context,
+            submission,
+            metadata=metadata,
+            catalog=catalog,
+            context_snapshot=context_snapshot,
+        )
+        started = self._start_unbound_call(actor_context, submission, call)
+        if not started.invoke_adapter:
+            return self._load_unbound_projection(actor_context, submission, started.call)
+        running_call = started.call
+        if context_result.budget_exceeded:
+            self._finalize_unbound_failure(
+                actor_context,
+                submission,
+                running_call,
+                error_code="CONTEXT_BUDGET_EXCEEDED",
+                safe_error_message=CONTEXT_BUDGET_MESSAGE,
+            )
+            raise self._outcome_error(
+                submission,
+                status_code=422,
+                code="CONTEXT_BUDGET_EXCEEDED",
+                message=CONTEXT_BUDGET_MESSAGE,
+            )
+        try:
+            outcome = self._orchestration_port.orchestrate(orchestration_input)
+            if not isinstance(outcome, ChatOrchestrationOutcome):
+                raise ChatOrchestrationProtocolError()
+        except ChatOrchestrationTimeoutError as error:
+            self._finalize_unbound_failure(
+                actor_context,
+                submission,
+                running_call,
+                error_code=error.error_code,
+                safe_error_message=error.safe_error_message,
+                provider_request_id=error.provider_request_id,
+            )
+            raise self._outcome_error(
+                submission,
+                status_code=504,
+                code="UPSTREAM_TIMEOUT",
+                message=TIMEOUT_MESSAGE,
+            ) from None
+        except ChatOrchestrationProviderError as error:
+            self._finalize_unbound_failure(
+                actor_context,
+                submission,
+                running_call,
+                error_code=error.error_code,
+                safe_error_message=error.safe_error_message,
+                provider_request_id=error.provider_request_id,
+            )
+            raise self._outcome_error(
+                submission,
+                status_code=503,
+                code="CHAT_ORCHESTRATION_FAILED",
+                message=ORCHESTRATION_FAILURE_MESSAGE,
+            ) from None
+        except ChatOrchestrationProtocolError as error:
+            self._finalize_unbound_failure(
+                actor_context,
+                submission,
+                running_call,
+                error_code=error.error_code,
+                safe_error_message=error.safe_error_message,
+                provider_request_id=error.provider_request_id,
+            )
+            raise self._outcome_error(
+                submission,
+                status_code=500,
+                code=(
+                    "MULTIPLE_TOOL_CALLS_UNSUPPORTED"
+                    if error.error_code == "MULTIPLE_TOOL_CALLS_UNSUPPORTED"
+                    else "AGENT_INTERNAL_ERROR"
+                ),
+                message=(
+                    "每条消息最多只能建议一个工具调用。"
+                    if error.error_code == "MULTIPLE_TOOL_CALLS_UNSUPPORTED"
+                    else AGENT_INTERNAL_ERROR_MESSAGE
+                ),
+            ) from None
+
+        result = outcome.result
+        if isinstance(result, KnowledgeAnswer):
+            bound_submission = self._materialize_task_for_unbound_call(
+                actor_context,
+                submission,
+                running_call,
+            )
+            return self.finalize_result(
+                actor_context,
+                bound_submission,
+                llm_call_id=running_call.llm_call_id,
+                result=result,
+                usage=outcome.usage,
+                provider_request_id=outcome.provider_request_id,
+            )
+
+        registrations = []
+        for proposal in result.candidates:
+            try:
+                registrations.append(
+                    self._tool_registry.resolve(proposal.tool_id, snapshot=catalog)
+                )
+            except UnknownToolError:
+                self._finalize_unbound_failure(
+                    actor_context,
+                    submission,
+                    running_call,
+                    error_code="LLM_SCHEMA_MISMATCH",
+                    safe_error_message=PROTOCOL_FAILURE_MESSAGE,
+                )
+                raise self._outcome_error(
+                    submission,
+                    status_code=500,
+                    code="AGENT_INTERNAL_ERROR",
+                    message=AGENT_INTERNAL_ERROR_MESSAGE,
+                ) from None
+        non_managed = [
+            registration
+            for registration in registrations
+            if registration.execution_profile is not ToolExecutionProfile.MANAGED
+        ]
+        if non_managed:
+            if len(registrations) != 1:
+                self._finalize_unbound_failure(
+                    actor_context,
+                    submission,
+                    running_call,
+                    error_code="MULTIPLE_TOOL_CALLS_UNSUPPORTED",
+                    safe_error_message="A model response may contain at most one executable Tool call.",
+                )
+                raise self._outcome_error(
+                    submission,
+                    status_code=422,
+                    code="MULTIPLE_TOOL_CALLS_UNSUPPORTED",
+                    message="每条消息最多只能建议一个工具调用。",
+                )
+            return self._finalize_standard_proposal(
+                actor_context,
+                submission,
+                running_call,
+                catalog=catalog,
+                proposal=result.candidates[0],
+                usage=outcome.usage,
+                provider_request_id=outcome.provider_request_id,
+                proposal_origin=getattr(outcome, "proposal_origin", ProposalOrigin.STRUCTURED),
+                provider_tool_call_id=getattr(outcome, "provider_tool_call_id", None),
+            )
+
+        resolved = self._resolve_tool_candidates(
+            result,
+            catalog,
+            context_result=context_result,
+            actor_context=actor_context,
+            current_text=submission.user_message.content_text,
+            conversation_id=submission.conversation_id,
+        )
+        bound_submission = self._materialize_task_for_unbound_call(
+            actor_context,
+            submission,
+            running_call,
+        )
+        return self.finalize_result(
+            actor_context,
+            bound_submission,
+            llm_call_id=running_call.llm_call_id,
+            result=resolved,
+            usage=outcome.usage,
+            provider_request_id=outcome.provider_request_id,
+        )
+
+    def _prepare_unbound_call(
+        self,
+        actor_context: ActorContext,
+        submission: PreparedSubmission,
+        *,
+        metadata: ChatOrchestrationRequestMetadata,
+        catalog: RoutingCatalogSnapshot,
+        context_snapshot: Mapping[str, object],
+    ) -> LLMCall:
+        timestamp = _validated_utc_now(self._clock)
+        call = LLMCall(
+            llm_call_id=self._id_factory("llm"),
+            task_id=None,
+            conversation_id=submission.conversation_id,
+            source_message_id=submission.user_message.message_id,
+            request_id=submission.user_message.request_id,
+            purpose=CHAT_ORCHESTRATION,
+            input_result_id=None,
+            provider=metadata.provider,
+            model_name=metadata.model_name,
+            prompt_template_id=metadata.prompt_template_id,
+            prompt_template_version=metadata.prompt_template_version,
+            prompt_digest=metadata.prompt_digest,
+            generation_parameters=metadata.generation_parameters,
+            structured_output_summary=None,
+            usage=None,
+            provider_request_id=None,
+            status=LLM_PENDING,
+            created_at=timestamp,
+            started_at=None,
+            completed_at=None,
+            duration_ms=None,
+            error_code=None,
+            safe_error_message=None,
+            catalog_snapshot_refs=tuple(entry.ref for entry in catalog.entries),
+            catalog_hash=self._catalog_hash(catalog),
+            context_snapshot=context_snapshot,
+        )
+        try:
+            with self._unit_of_work_factory() as unit_of_work:
+                message = unit_of_work.messages.get(submission.user_message.message_id)
+                conversation = unit_of_work.conversations.get_owned(
+                    submission.conversation_id,
+                    actor_context.actor_id,
+                )
+                existing = [
+                    item
+                    for item in unit_of_work.llm_calls.list_for_source_message(
+                        submission.user_message.message_id
+                    )
+                    if item.purpose == CHAT_ORCHESTRATION
+                    and not (
+                        item.status == LLM_FAILED
+                        and item.error_code == "PROCESS_INTERRUPTED_BEFORE_START"
+                    )
+                ]
+                if message is None or conversation is None or message.task_id is not None:
+                    raise self._conflict(submission)
+                if existing:
+                    if len(existing) != 1:
+                        raise self._conflict(submission)
+                    return existing[0]
+                unit_of_work.llm_calls.add(call)
+                unit_of_work.commit()
+        except PersistenceError as error:
+            raise from_persistence_error(
+                error,
+                conversation_id=submission.conversation_id,
+            ) from None
+        return call
+
+    def _start_unbound_call(
+        self,
+        actor_context: ActorContext,
+        submission: PreparedSubmission,
+        call: LLMCall,
+    ) -> _StartedChatCall:
+        if call.status != LLM_PENDING:
+            return _StartedChatCall(call=call, invoke_adapter=False)
+        running = replace(
+            call,
+            status=LLM_RUNNING,
+            started_at=_validated_utc_now(self._clock),
+        )
+        try:
+            with self._unit_of_work_factory() as unit_of_work:
+                message = unit_of_work.messages.get(submission.user_message.message_id)
+                if (
+                    message is None
+                    or message.task_id is not None
+                    or message.actor_id != actor_context.actor_id
+                ):
+                    raise self._conflict(submission)
+                saved = unit_of_work.llm_calls.update(
+                    running,
+                    expected_status=LLM_PENDING,
+                )
+                if saved is None:
+                    raise self._conflict(submission)
+                unit_of_work.commit()
+                return _StartedChatCall(call=saved, invoke_adapter=True)
+        except PersistenceError as error:
+            raise from_persistence_error(
+                error,
+                conversation_id=submission.conversation_id,
+            ) from None
+
+    def _materialize_task_for_unbound_call(
+        self,
+        actor_context: ActorContext,
+        submission: PreparedSubmission,
+        running_call: LLMCall,
+    ) -> PreparedSubmission:
+        timestamp = _validated_utc_now(self._clock)
+        task = Task(
+            task_id=self._id_factory("task"),
+            conversation_id=submission.conversation_id,
+            actor_id=actor_context.actor_id,
+            task_type=None,
+            current_status=TASK_RUNNING,
+            selected_tool_run_id=None,
+            selected_result_id=None,
+            created_at=submission.user_message.created_at,
+            started_at=timestamp,
+            updated_at=timestamp,
+            completed_at=None,
+            error_code=None,
+            safe_error_message=None,
+        )
+        try:
+            with self._unit_of_work_factory() as unit_of_work:
+                unit_of_work.tasks.add(task)
+                message = unit_of_work.messages.bind_task(
+                    submission.user_message.message_id,
+                    task.task_id,
+                )
+                call = unit_of_work.llm_calls.bind_task(
+                    running_call.llm_call_id,
+                    task.task_id,
+                    expected_status=LLM_RUNNING,
+                )
+                if message is None or call is None:
+                    raise self._conflict(submission)
+                unit_of_work.commit()
+        except PersistenceError as error:
+            raise from_persistence_error(
+                error,
+                conversation_id=submission.conversation_id,
+            ) from None
+        return PreparedSubmission(
+            conversation_id=submission.conversation_id,
+            user_message=message,
+            task=task,
+            submission_mode=NEW_TASK,
+            idempotency_record_id=submission.idempotency_record_id,
+            idempotency_outcome=submission.idempotency_outcome,
+        )
+
+    def _finalize_unbound_failure(
+        self,
+        actor_context: ActorContext,
+        submission: PreparedSubmission,
+        running_call: LLMCall,
+        *,
+        error_code: str,
+        safe_error_message: str,
+        provider_request_id: str | None = None,
+    ) -> LLMCall:
+        completed_at = _validated_utc_now(self._clock)
+        failed = replace(
+            running_call,
+            status=LLM_FAILED,
+            completed_at=completed_at,
+            duration_ms=_duration_ms(running_call.started_at, completed_at),
+            error_code=error_code,
+            safe_error_message=safe_error_message,
+            provider_request_id=provider_request_id,
+        )
+        with self._unit_of_work_factory() as unit_of_work:
+            message = unit_of_work.messages.get(submission.user_message.message_id)
+            if message is None or message.actor_id != actor_context.actor_id:
+                raise ResourceNotFoundError()
+            saved = unit_of_work.llm_calls.update(failed, expected_status=LLM_RUNNING)
+            if saved is None:
+                raise self._conflict(submission)
+            unit_of_work.commit()
+            return saved
+
+    def _finalize_standard_proposal(
+        self,
+        actor_context: ActorContext,
+        submission: PreparedSubmission,
+        running_call: LLMCall,
+        *,
+        catalog: RoutingCatalogSnapshot,
+        proposal: ToolCandidateProposal,
+        usage: Mapping[str, int] | None,
+        provider_request_id: str | None,
+        proposal_origin: ProposalOrigin,
+        provider_tool_call_id: str | None,
+    ) -> ChatOrchestrationProjection:
+        invocation_proposal = ToolInvocationProposal(
+            conversation_id=submission.conversation_id,
+            source_message_id=submission.user_message.message_id,
+            llm_call_id=running_call.llm_call_id,
+            model_tool_name=proposal.tool_id,
+            proposed_arguments=proposal.proposed_arguments,
+            origin=proposal_origin,
+            provider_tool_call_id=provider_tool_call_id,
+        )
+        resolved = resolve_tool_proposal(
+            self._tool_registry,
+            catalog,
+            invocation_proposal,
+        )
+        validator = resolved.registration.binding.validator
+        assistant: Message | None = None
+        try:
+            if validator is None:
+                raise ValueError("validator unavailable")
+            validator(invocation_proposal.proposed_arguments)
+        except (TypeError, ValueError):
+            completed_at = _validated_utc_now(self._clock)
+            assistant = Message(
+                message_id=self._id_factory("msg"),
+                conversation_id=submission.conversation_id,
+                task_id=None,
+                actor_id=actor_context.actor_id,
+                request_id=submission.user_message.request_id,
+                role=ASSISTANT,
+                generation_source=LLM,
+                content_text=FOLLOW_UP_TEXT,
+                structured_content=None,
+                llm_call_id=running_call.llm_call_id,
+                created_at=completed_at,
+            )
+        completed_at = _validated_utc_now(self._clock)
+        succeeded = replace(
+            running_call,
+            structured_output_summary=self._candidate_summary(
+                ToolCandidateSet((proposal,))
+            ),
+            usage=usage,
+            provider_request_id=provider_request_id,
+            status=LLM_SUCCEEDED,
+            completed_at=completed_at,
+            duration_ms=_duration_ms(running_call.started_at, completed_at),
+            error_code=None,
+            safe_error_message=None,
+        )
+        with self._unit_of_work_factory() as unit_of_work:
+            if assistant is not None:
+                unit_of_work.messages.add(assistant)
+            saved = unit_of_work.llm_calls.update(
+                succeeded,
+                expected_status=LLM_RUNNING,
+            )
+            if saved is None:
+                raise self._conflict(submission)
+            unit_of_work.commit()
+        if assistant is not None:
+            return ChatOrchestrationProjection(
+                conversation_id=submission.conversation_id,
+                user_message=submission.user_message,
+                task=None,
+                llm_call=succeeded,
+                assistant_message=assistant,
+                revision=None,
+                invocation=None,
+            )
+        if self._invocation_service is None:
+            raise AgentInternalError(conversation_id=submission.conversation_id)
+        invocation = self._invocation_service.create_from_proposal(
+            actor_context,
+            resolved,
+            request_id=submission.user_message.request_id,
+            idempotency_key=f"invocation:{submission.idempotency_record_id}",
+        )
+        return ChatOrchestrationProjection(
+            conversation_id=submission.conversation_id,
+            user_message=submission.user_message,
+            task=None,
+            llm_call=succeeded,
+            assistant_message=None,
+            revision=None,
+            invocation=invocation,
+        )
+
+    def _load_unbound_projection(
+        self,
+        actor_context: ActorContext,
+        submission: PreparedSubmission,
+        call: LLMCall,
+    ) -> ChatOrchestrationProjection:
+        with self._unit_of_work_factory() as unit_of_work:
+            message = unit_of_work.messages.get(submission.user_message.message_id)
+            if message is None or message.actor_id != actor_context.actor_id:
+                raise ResourceNotFoundError()
+            assistant = unit_of_work.messages.get_by_llm_call_id(call.llm_call_id)
+            persisted_run = unit_of_work.invocation_runs.get_by_message(message.message_id)
+        invocation = (
+            None
+            if persisted_run is None or self._invocation_service is None
+            else self._invocation_service.get(actor_context, persisted_run.invocation_run_id)
+        )
+        if (
+            invocation is None
+            and call.status == LLM_SUCCEEDED
+            and assistant is None
+            and isinstance(call.structured_output_summary, Mapping)
+            and call.structured_output_summary.get("route") == "TOOL_CANDIDATES"
+            and self._invocation_service is not None
+        ):
+            candidates = call.structured_output_summary.get("candidates")
+            if isinstance(candidates, (list, tuple)) and len(candidates) == 1:
+                candidate = candidates[0]
+                if isinstance(candidate, Mapping):
+                    tool_id = candidate.get("tool_id")
+                    arguments = candidate.get("proposed_arguments")
+                    if type(tool_id) is str and isinstance(arguments, Mapping):
+                        registration = self._tool_registry.resolve(tool_id)
+                        if (
+                            registration.execution_profile
+                            is not ToolExecutionProfile.MANAGED
+                            and call.catalog_snapshot_refs is not None
+                            and registration.ref in call.catalog_snapshot_refs
+                        ):
+                            proposal = ToolInvocationProposal(
+                                conversation_id=message.conversation_id,
+                                source_message_id=message.message_id,
+                                llm_call_id=call.llm_call_id,
+                                model_tool_name=tool_id,
+                                proposed_arguments=arguments,
+                                origin=ProposalOrigin.STRUCTURED,
+                                provider_tool_call_id=None,
+                            )
+                            invocation = self._invocation_service.create_from_proposal(
+                                actor_context,
+                                ResolvedToolInvocationProposal(proposal, registration),
+                                request_id=message.request_id,
+                                idempotency_key=f"invocation:{submission.idempotency_record_id}",
+                            )
+        return ChatOrchestrationProjection(
+            conversation_id=submission.conversation_id,
+            user_message=message,
+            task=None,
+            llm_call=call,
+            assistant_message=assistant,
+            revision=None,
+            invocation=invocation,
+        )
 
     def _orchestrate_bound_supplement(
         self,
@@ -904,6 +1568,7 @@ class ChatOrchestrationService:
             llm_call_id=self._id_factory("llm"),
             task_id=submission.task.task_id,
             conversation_id=submission.conversation_id,
+            source_message_id=submission.user_message.message_id,
             request_id=submission.user_message.request_id,
             purpose=TOOL_INPUT_EXTRACTION,
             input_result_id=None,
@@ -1208,6 +1873,7 @@ class ChatOrchestrationService:
             llm_call_id=self._id_factory("llm"),
             task_id=submission.task.task_id,
             conversation_id=submission.conversation_id,
+            source_message_id=submission.user_message.message_id,
             request_id=submission.user_message.request_id,
             purpose=TOOL_INPUT_EXTRACTION,
             input_result_id=None,
@@ -2267,7 +2933,7 @@ class ChatOrchestrationService:
         current_text: str,
         conversation_id: str,
     ) -> Mapping[str, object]:
-        delta = self._plain_json(proposal.candidate_input_delta)
+        delta = self._plain_json(proposal.proposed_arguments)
         if not isinstance(delta, dict):
             raise ChatOrchestrationProtocolError(
                 "Tool candidate delta is invalid.",
@@ -2483,8 +3149,8 @@ class ChatOrchestrationService:
             "candidates": [
                 {
                     "tool_id": candidate.tool_id,
-                    "candidate_input_delta": cls._plain_json(
-                        candidate.candidate_input_delta
+                    "proposed_arguments": cls._plain_json(
+                        candidate.proposed_arguments
                     ),
                     **(
                         {}
@@ -2527,6 +3193,7 @@ class ChatOrchestrationService:
             llm_call_id=self._id_factory("llm"),
             task_id=submission.task.task_id,
             conversation_id=submission.conversation_id,
+            source_message_id=submission.user_message.message_id,
             request_id=submission.user_message.request_id,
             purpose=CHAT_ORCHESTRATION,
             input_result_id=None,
@@ -3131,7 +3798,7 @@ class ChatOrchestrationService:
             status_code=status_code,
             details=details,
             conversation_id=submission.conversation_id,
-            task_id=submission.task.task_id,
+            task_id=None if submission.task is None else submission.task.task_id,
         )
 
     def _load_projection(
@@ -3492,7 +4159,7 @@ class ChatOrchestrationService:
     def _conflict(submission: PreparedSubmission) -> ApplicationConflictError:
         return ApplicationConflictError(
             conversation_id=submission.conversation_id,
-            task_id=submission.task.task_id,
+            task_id=None if submission.task is None else submission.task.task_id,
         )
 
     @staticmethod

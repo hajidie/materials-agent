@@ -119,7 +119,7 @@ def _controlled_tool_payload(
         "candidates": [
             {
                 "tool_id": "zta35g_sem_virtual_lab",
-                "candidate_input_delta": {
+                "proposed_arguments": {
                     "material": material,
                     "solution_temperature": {
                         "value": solution_temperature,

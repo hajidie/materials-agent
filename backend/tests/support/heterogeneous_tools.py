@@ -9,10 +9,16 @@ from materialsagent.domain.ports.tool_execution import (
     ToolRequestContext,
 )
 from materialsagent.domain.ports.tool_registry import (
+    ExecutionMode,
     ExecutionPolicy,
     NeedsInputNormalization,
+    PresentationMode,
     ReadyNormalization,
+    RegisteredTool,
     ToolDefinition,
+    ToolExecutionBinding,
+    ToolExecutionPolicy,
+    ToolExecutionProfile,
     ToolStatus,
 )
 
@@ -205,7 +211,7 @@ def build_ml_training_test_definition(
         None,
     ]
     | None = None,
-) -> ToolDefinition:
+) -> RegisteredTool:
     metadata = ToolMetadata(
         tool_id=ML_TRAINING_TOOL_ID,
         tool_version="test-fixture-1",
@@ -244,19 +250,32 @@ def build_ml_training_test_definition(
             prior_normalized_input,
         )
 
-    return ToolDefinition(
-        tool_id=ML_TRAINING_TOOL_ID,
-        version=version,
-        status=ToolStatus.ACTIVE,
-        execution_policy=ExecutionPolicy.ANY_TASK,
-        display_name=metadata.display_name,
-        description=metadata.description,
-        input_schema=ML_TRAINING_INPUT_SCHEMA,
-        candidate_input_schema=ML_TRAINING_CANDIDATE_SCHEMA,
-        runtime_metadata=metadata,
-        tool=tool,
-        supported_outputs=ML_TRAINING_OUTPUTS,
-        supported_asset_types=(),
-        limitations=metadata.limitations,
-        normalizer=normalizer,
+    return RegisteredTool(
+        definition=ToolDefinition(
+            tool_id=ML_TRAINING_TOOL_ID,
+            version=version,
+            status=ToolStatus.ACTIVE,
+            display_name=metadata.display_name,
+            description=metadata.description,
+            input_schema=ML_TRAINING_INPUT_SCHEMA,
+            proposal_schema=ML_TRAINING_CANDIDATE_SCHEMA,
+            output_schema={"type": "object"},
+            runtime_metadata=metadata,
+            supported_outputs=ML_TRAINING_OUTPUTS,
+            supported_asset_types=(),
+            limitations=metadata.limitations,
+            execution_profile=ToolExecutionProfile.MANAGED,
+            execution_mode=ExecutionMode.SYNC,
+            executor_id="managed_runtime",
+            tool_execution_policy=ToolExecutionPolicy(
+                lifecycle_policy=ExecutionPolicy.ANY_TASK,
+            ),
+            presentation_mode=PresentationMode.DETERMINISTIC,
+            presenter_id="managed_tool_result",
+        ),
+        binding=ToolExecutionBinding(
+            execution_target=tool,
+            normalizer=normalizer,
+            health_probe=tool.health_check,
+        ),
     )

@@ -30,7 +30,7 @@ IMMEDIATE_PREVIOUS_REVISION = "0006_asset"
 M8_REVISION = "0008_idempotency_record"
 M9_REVISION = "0009_timeline_query_indexes"
 M10_REVISION = "0010_registry_routing_state"
-EXPECTED_REVISION = "0013_conversation_delete"
+EXPECTED_REVISION = "0014_tool_invocation"
 ALEMBIC_INI = Path(__file__).resolve().parents[3] / "alembic.ini"
 NEW_TASK_TIME_CHECKS = {
     "ck_task_started_at_not_before_created_at",
@@ -56,6 +56,7 @@ M8_TABLES = M7_TABLES | {
     "idempotency_record",
     "conversation_object_cleanup",
 }
+HEAD_TABLES = M8_TABLES | {"invocation_run", "invocation_result"}
 
 
 def _make_alembic_config(settings: AppSettings) -> Config:
@@ -134,7 +135,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
     engine = create_engine_from_settings(temporary_database)
     try:
         inspector = inspect(engine)
-        assert set(inspector.get_table_names(schema="public")) == M8_TABLES
+        assert set(inspector.get_table_names(schema="public")) == HEAD_TABLES
         version_columns = _column_map(inspector, "alembic_version")
         assert version_columns["version_num"]["type"].length >= len(
             EXPECTED_REVISION
@@ -301,6 +302,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "llm_call_id",
                 "task_id",
                 "conversation_id",
+                "source_message_id",
                 "request_id",
                 "purpose",
                 "input_result_id",
@@ -442,6 +444,53 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "error_code",
                 "safe_error_message",
             },
+            "invocation_result": {
+                "invocation_result_id",
+                "invocation_run_id",
+                "data",
+                "presentation",
+                "created_at",
+            },
+            "invocation_run": {
+                "invocation_run_id",
+                "actor_id",
+                "conversation_id",
+                "source_message_id",
+                "task_id",
+                "retry_of_invocation_run_id",
+                "request_id",
+                "idempotency_key",
+                "trigger",
+                "tool_id",
+                "tool_version",
+                "schema_hash",
+                "execution_profile",
+                "executor_id",
+                "proposed_arguments",
+                "policy_snapshot",
+                "tool_projection",
+                "status",
+                "confirmation_required",
+                "confirmation_expires_at",
+                "confirmed_at",
+                "confirmed_by",
+                "rejected_at",
+                "rejected_by",
+                "expired_at",
+                "authorization_checked_at",
+                "denied_at",
+                "execution_claim_token",
+                "execution_lease_expires_at",
+                "dispatch_started_at",
+                "execution_attempt_count",
+                "invocation_result_id",
+                "managed_tool_run_id",
+                "error_code",
+                "safe_error_message",
+                "created_at",
+                "updated_at",
+                "completed_at",
+            },
         }
         for table_name, column_names in expected_columns.items():
             assert set(_column_map(inspector, table_name)) == column_names
@@ -474,6 +523,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             assert task_columns[timestamp_name]["type"].timezone is True
 
         message_columns = _column_map(inspector, "message")
+        assert message_columns["task_id"]["nullable"] is True
         assert message_columns["structured_content"]["nullable"] is True
         assert message_columns["llm_call_id"]["nullable"] is True
         assert isinstance(message_columns["structured_content"]["type"], JSONB)
@@ -503,6 +553,20 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
         for timestamp_name in {"created_at", "started_at", "completed_at"}:
             assert llm_call_columns[timestamp_name]["type"].timezone is True
         assert llm_call_columns["input_result_id"]["nullable"] is True
+        assert llm_call_columns["task_id"]["nullable"] is True
+        assert llm_call_columns["source_message_id"]["nullable"] is False
+
+        invocation_result_columns = _column_map(inspector, "invocation_result")
+        assert isinstance(invocation_result_columns["data"]["type"], JSONB)
+        assert isinstance(invocation_result_columns["presentation"]["type"], JSONB)
+        invocation_run_columns = _column_map(inspector, "invocation_run")
+        assert invocation_run_columns["task_id"]["nullable"] is True
+        for jsonb_name in {
+            "proposed_arguments",
+            "policy_snapshot",
+            "tool_projection",
+        }:
+            assert isinstance(invocation_run_columns[jsonb_name]["type"], JSONB)
 
         tool_run_columns = _column_map(inspector, "tool_run")
         for array_name in {
@@ -554,6 +618,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             "llm_call": {
                 "fk_llm_call_conversation": "conversation",
                 "fk_llm_call_input_result": "tool_result",
+                "fk_llm_call_source_message_conversation": "message",
                 "fk_llm_call_task": "task",
             },
             "tool_run": {
@@ -579,6 +644,18 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "fk_explanation_result": "tool_result",
                 "fk_explanation_task": "task",
             },
+            "invocation_result": {
+                "fk_invocation_result_run": "invocation_run",
+            },
+            "invocation_run": {
+                "fk_invocation_actor": "actor",
+                "fk_invocation_conversation": "conversation",
+                "fk_invocation_managed_tool_run_task": "tool_run",
+                "fk_invocation_result": "invocation_result",
+                "fk_invocation_retry_of": "invocation_run",
+                "fk_invocation_source_message_conversation": "message",
+                "fk_invocation_task": "task",
+            },
         }
         expected_ondelete = {
             "conversation": {"fk_conversation_actor": "RESTRICT"},
@@ -601,6 +678,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             "llm_call": {
                 "fk_llm_call_conversation": "CASCADE",
                 "fk_llm_call_input_result": "SET NULL",
+                "fk_llm_call_source_message_conversation": "CASCADE",
                 "fk_llm_call_task": "CASCADE",
             },
             "tool_run": {
@@ -625,6 +703,18 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "fk_explanation_llm_call": "CASCADE",
                 "fk_explanation_result": "CASCADE",
                 "fk_explanation_task": "CASCADE",
+            },
+            "invocation_result": {
+                "fk_invocation_result_run": "CASCADE",
+            },
+            "invocation_run": {
+                "fk_invocation_actor": "RESTRICT",
+                "fk_invocation_conversation": "CASCADE",
+                "fk_invocation_managed_tool_run_task": "CASCADE",
+                "fk_invocation_result": "RESTRICT",
+                "fk_invocation_retry_of": "RESTRICT",
+                "fk_invocation_source_message_conversation": "CASCADE",
+                "fk_invocation_task": "CASCADE",
             },
         }
         for table_name, expected in expected_foreign_keys.items():
@@ -716,6 +806,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "ck_llm_call_purpose_allowed",
                 "ck_llm_call_request_id_not_blank",
                 "ck_llm_call_safe_error_message_not_blank",
+                "ck_llm_call_source_message_not_blank",
                 "ck_llm_call_started_not_before_created",
                 "ck_llm_call_status_allowed",
                 "ck_llm_call_status_time_shape",
@@ -804,6 +895,39 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "ck_tool_result_tool_version_not_blank",
                 "ck_tool_result_warnings_array",
             },
+            "invocation_result": {
+                "ck_invocation_result_data_object",
+                "ck_invocation_result_id_not_blank",
+                "ck_invocation_result_presentation_object",
+                "ck_invocation_result_run_id_not_blank",
+            },
+            "invocation_run": {
+                "ck_invocation_attempt_count",
+                "ck_invocation_confirmation_expiry_required",
+                "ck_invocation_confirmation_fact_pairs",
+                "ck_invocation_confirmation_facts_exclusive",
+                "ck_invocation_confirmation_scope",
+                "ck_invocation_denied_facts",
+                "ck_invocation_dispatch_attempt",
+                "ck_invocation_expired_facts",
+                "ck_invocation_json_objects",
+                "ck_invocation_outcome_unknown_profile",
+                "ck_invocation_pending_confirmation_shape",
+                "ck_invocation_profile_allowed",
+                "ck_invocation_profile_confirmation",
+                "ck_invocation_profile_relationship",
+                "ck_invocation_rejected_facts",
+                "ck_invocation_result_relationship_exclusive",
+                "ck_invocation_result_terminal",
+                "ck_invocation_running_claim",
+                "ck_invocation_schema_hash",
+                "ck_invocation_status_allowed",
+                "ck_invocation_success_result_required",
+                "ck_invocation_terminal_completion",
+                "ck_invocation_tool_projection_object",
+                "ck_invocation_trigger_allowed",
+                "ck_invocation_updated_order",
+            },
         }
         for table_name, expected_names in expected_check_names.items():
             constraints = inspector.get_check_constraints(table_name)
@@ -836,7 +960,10 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
         assert {
             constraint["name"]: constraint["column_names"]
             for constraint in inspector.get_unique_constraints("message")
-        } == {"uq_message_llm_call_id": ["llm_call_id"]}
+        } == {
+            "uq_message_id_conversation": ["message_id", "conversation_id"],
+            "uq_message_llm_call_id": ["llm_call_id"],
+        }
         assert {
             constraint["name"]: constraint["column_names"]
             for constraint in inspector.get_unique_constraints(
@@ -849,6 +976,11 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             index["name"]: index["column_names"]
             for index in inspector.get_indexes("llm_call")
         } == {
+            "ix_llm_call_source_message_created": [
+                "source_message_id",
+                "created_at",
+                "llm_call_id",
+            ],
             "ix_llm_call_task_request_created": [
                 "task_id",
                 "request_id",
@@ -858,7 +990,37 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
         assert {
             constraint["name"]: constraint["column_names"]
             for constraint in inspector.get_unique_constraints("tool_run")
-        } == {"uq_tool_run_task_attempt": ["task_id", "attempt_no"]}
+        } == {
+            "uq_tool_run_id_task": ["tool_run_id", "task_id"],
+            "uq_tool_run_task_attempt": ["task_id", "attempt_no"],
+        }
+        assert {
+            constraint["name"]: constraint["column_names"]
+            for constraint in inspector.get_unique_constraints("invocation_result")
+        } == {
+            "uq_invocation_result_run": ["invocation_run_id"],
+        }
+        assert {
+            constraint["name"]: constraint["column_names"]
+            for constraint in inspector.get_unique_constraints("invocation_run")
+        } == {
+            "uq_invocation_actor_idempotency": ["actor_id", "idempotency_key"],
+            "uq_invocation_result": ["invocation_result_id"],
+        }
+        invocation_indexes = {
+            index["name"]: index["column_names"]
+            for index in inspector.get_indexes("invocation_run")
+            if index.get("duplicates_constraint") is None
+        }
+        assert invocation_indexes == {
+            "ix_invocation_conversation_created": [
+                "conversation_id",
+                "created_at",
+                "invocation_run_id",
+            ],
+            "ix_invocation_recovery": ["status", "execution_lease_expires_at"],
+            "uq_invocation_message_proposal": ["source_message_id"],
+        }
         assert {
             constraint["name"]: constraint["column_names"]
             for constraint in inspector.get_unique_constraints("asset")
@@ -1154,6 +1316,17 @@ def test_m7_result_and_explanation_migration_round_trip(
                     "('task_1', 'conversation_1', 'actor_1', 'TOOL_EXECUTION', "
                     "'RUNNING', NULL, NULL, :created_at, :created_at, "
                     ":created_at, NULL, NULL, NULL)"
+                ),
+                {"created_at": created_at},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO message (message_id, conversation_id, task_id, "
+                    "actor_id, request_id, role, generation_source, content_text, "
+                    "structured_content, llm_call_id, created_at) VALUES "
+                    "('message_1', 'conversation_1', 'task_1', 'actor_1', "
+                    "'request_1', 'USER', NULL, 'migration fixture', NULL, NULL, "
+                    ":created_at)"
                 ),
                 {"created_at": created_at},
             )
@@ -2033,6 +2206,17 @@ def test_m10_backfills_only_known_zta_tasks_and_refuses_ready_downgrade(
                     ),
                     {"task_id": task_id, "task_type": task_type, "created_at": created_at},
                 )
+            connection.execute(
+                text(
+                    "INSERT INTO message (message_id, conversation_id, task_id, "
+                    "actor_id, request_id, role, generation_source, content_text, "
+                    "structured_content, llm_call_id, created_at) VALUES "
+                    "('message_m10', 'conversation_m10', 'task_m10_tool', "
+                    "'actor_m10', 'request_m10', 'USER', NULL, "
+                    "'migration fixture', NULL, NULL, :created_at)"
+                ),
+                {"created_at": created_at},
+            )
             connection.execute(
                 text(
                     "INSERT INTO task_input_revision ("

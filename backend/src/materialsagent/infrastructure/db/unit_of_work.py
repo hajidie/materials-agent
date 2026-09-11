@@ -15,6 +15,8 @@ from materialsagent.domain.ports.unit_of_work import (
     DatabaseUnavailableError,
     ExplanationRepository,
     IdempotencyRecordRepository,
+    InvocationResultRepository,
+    InvocationRunRepository,
     LLMCallRepository,
     MessageRepository,
     PersistenceConflictError,
@@ -43,6 +45,10 @@ from materialsagent.infrastructure.db.tool_result import (
     SQLAlchemyToolResultRepository,
 )
 from materialsagent.infrastructure.db.tool_run import SQLAlchemyToolRunRepository
+from materialsagent.infrastructure.db.tool_invocation import (
+    SQLAlchemyInvocationResultRepository,
+    SQLAlchemyInvocationRunRepository,
+)
 from materialsagent.infrastructure.db.conversation_task import (
     SQLAlchemyConversationRepository,
     SQLAlchemyMessageRepository,
@@ -66,6 +72,8 @@ class SQLAlchemyUnitOfWork:
         self._task_input_revisions: TaskInputRevisionRepository | None = None
         self._llm_calls: LLMCallRepository | None = None
         self._tool_runs: ToolRunRepository | None = None
+        self._invocation_runs: InvocationRunRepository | None = None
+        self._invocation_results: InvocationResultRepository | None = None
         self._assets: AssetRepository | None = None
         self._tool_results: ToolResultRepository | None = None
         self._result_asset_links: ResultAssetLinkRepository | None = None
@@ -115,6 +123,18 @@ class SQLAlchemyUnitOfWork:
         if self._tool_runs is None:
             raise RuntimeError("UnitOfWork has not been entered.")
         return self._tool_runs
+
+    @property
+    def invocation_runs(self) -> InvocationRunRepository:
+        if self._invocation_runs is None:
+            raise RuntimeError("UnitOfWork has not been entered.")
+        return self._invocation_runs
+
+    @property
+    def invocation_results(self) -> InvocationResultRepository:
+        if self._invocation_results is None:
+            raise RuntimeError("UnitOfWork has not been entered.")
+        return self._invocation_results
 
     @property
     def assets(self) -> AssetRepository:
@@ -171,6 +191,8 @@ class SQLAlchemyUnitOfWork:
         )
         self._llm_calls = SQLAlchemyLLMCallRepository(self.session)
         self._tool_runs = SQLAlchemyToolRunRepository(self.session)
+        self._invocation_runs = SQLAlchemyInvocationRunRepository(self.session)
+        self._invocation_results = SQLAlchemyInvocationResultRepository(self.session)
         self._assets = SQLAlchemyAssetRepository(self.session)
         self._tool_results = SQLAlchemyToolResultRepository(self.session)
         self._result_asset_links = SQLAlchemyResultAssetLinkRepository(
@@ -210,6 +232,8 @@ class SQLAlchemyUnitOfWork:
                 self._task_input_revisions = None
                 self._llm_calls = None
                 self._tool_runs = None
+                self._invocation_runs = None
+                self._invocation_results = None
                 self._assets = None
                 self._tool_results = None
                 self._result_asset_links = None

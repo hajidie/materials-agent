@@ -194,7 +194,7 @@ def _chat_port_for_outputs(outputs: list[str]):
             "candidates": [
                 {
                     "tool_id": "zta35g_sem_virtual_lab",
-                    "candidate_input_delta": {
+                    "proposed_arguments": {
                         "material": "ZTA35G",
                         "solution_temperature": {"value": 1000, "unit": "°C"},
                         "solution_time": {"value": 3, "unit": "h"},

@@ -8,6 +8,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -37,8 +38,12 @@ class LLMCallRow(Base):
             name="ck_llm_call_llm_call_id_not_blank",
         ),
         CheckConstraint(
-            "length(btrim(task_id)) > 0",
+            "task_id IS NULL OR length(btrim(task_id)) > 0",
             name="ck_llm_call_task_id_not_blank",
+        ),
+        CheckConstraint(
+            "length(btrim(source_message_id)) > 0",
+            name="ck_llm_call_source_message_not_blank",
         ),
         CheckConstraint(
             "length(btrim(conversation_id)) > 0",
@@ -173,16 +178,29 @@ class LLMCallRow(Base):
             "request_id",
             "created_at",
         ),
+        Index(
+            "ix_llm_call_source_message_created",
+            "source_message_id",
+            "created_at",
+            "llm_call_id",
+        ),
+        ForeignKeyConstraint(
+            ["source_message_id", "conversation_id"],
+            ["message.message_id", "message.conversation_id"],
+            name="fk_llm_call_source_message_conversation",
+            ondelete="CASCADE",
+            use_alter=True,
+        ),
     )
 
     llm_call_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    task_id: Mapped[str] = mapped_column(
+    task_id: Mapped[str | None] = mapped_column(
         ForeignKey(
             "task.task_id",
             name="fk_llm_call_task",
             ondelete="CASCADE",
         ),
-        nullable=False,
+        nullable=True,
     )
     conversation_id: Mapped[str] = mapped_column(
         ForeignKey(
@@ -192,6 +210,7 @@ class LLMCallRow(Base):
         ),
         nullable=False,
     )
+    source_message_id: Mapped[str] = mapped_column(Text, nullable=False)
     request_id: Mapped[str] = mapped_column(Text, nullable=False)
     purpose: Mapped[str] = mapped_column(String(64), nullable=False)
     input_result_id: Mapped[str | None] = mapped_column(
@@ -279,6 +298,7 @@ def _from_row(row: LLMCallRow) -> LLMCall:
         llm_call_id=row.llm_call_id,
         task_id=row.task_id,
         conversation_id=row.conversation_id,
+        source_message_id=row.source_message_id,
         request_id=row.request_id,
         purpose=row.purpose,
         input_result_id=row.input_result_id,
@@ -328,6 +348,7 @@ def _immutable_matches(row: LLMCallRow, call: LLMCall) -> bool:
             "llm_call_id",
             "task_id",
             "conversation_id",
+            "source_message_id",
             "request_id",
             "purpose",
             "input_result_id",
@@ -377,6 +398,7 @@ class SQLAlchemyLLMCallRepository:
                     llm_call_id=call.llm_call_id,
                     task_id=call.task_id,
                     conversation_id=call.conversation_id,
+                    source_message_id=call.source_message_id,
                     request_id=call.request_id,
                     purpose=call.purpose,
                     input_result_id=call.input_result_id,
@@ -430,6 +452,44 @@ class SQLAlchemyLLMCallRepository:
         except SQLAlchemyError as error:
             _raise_safe_persistence_error(error)
         return [_from_row(row) for row in rows]
+
+    def list_for_source_message(self, source_message_id: str) -> list[LLMCall]:
+        statement = (
+            select(LLMCallRow)
+            .where(LLMCallRow.source_message_id == source_message_id)
+            .order_by(LLMCallRow.created_at.asc(), LLMCallRow.llm_call_id.asc())
+        )
+        try:
+            rows = self._session.scalars(statement).all()
+        except SQLAlchemyError as error:
+            _raise_safe_persistence_error(error)
+        return [_from_row(row) for row in rows]
+
+    def bind_task(
+        self,
+        llm_call_id: str,
+        task_id: str,
+        *,
+        expected_status: str,
+    ) -> LLMCall | None:
+        try:
+            row = self._session.get(
+                LLMCallRow,
+                llm_call_id,
+                populate_existing=True,
+                with_for_update=True,
+            )
+            if row is None or row.status != expected_status:
+                return None
+            if row.task_id == task_id:
+                return _from_row(row)
+            if row.task_id is not None:
+                return None
+            row.task_id = task_id
+            self._session.flush()
+            return _from_row(row)
+        except SQLAlchemyError as error:
+            _raise_safe_persistence_error(error)
 
     def update(
         self,

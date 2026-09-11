@@ -22,6 +22,7 @@ TimelineItemType = Literal[
     "USER_MESSAGE",
     "ASSISTANT_MESSAGE",
     "TOOL_TASK",
+    "TOOL_INVOCATION",
 ]
 
 
@@ -37,7 +38,7 @@ class TimelinePosition:
 class TimelineKey:
     item_type: TimelineItemType
     item_id: str
-    task_id: str
+    task_id: str | None
     anchor_at: datetime
     item_type_rank: int
 

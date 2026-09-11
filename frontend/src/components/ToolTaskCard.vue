@@ -8,6 +8,7 @@ import type {
 } from "../api/types";
 import AssetGallery from "./AssetGallery.vue";
 import ResearchResultSummary from "./ResearchResultSummary.vue";
+import ToolInvocationCard from "./ToolInvocationCard.vue";
 
 defineOptions({ name: "ToolTaskCard" });
 
@@ -27,6 +28,8 @@ const emit = defineEmits<{
   ];
   "retry-tool": [taskId: string];
   "retry-explanation": [resultId: string];
+  "confirm-invocation": [invocationRunId: string];
+  "reject-invocation": [invocationRunId: string];
 }>();
 
 const fieldLabels: Record<string, string> = {
@@ -239,6 +242,14 @@ function requestSupplement(): void {
         {{ statusBadge }}
       </span>
     </header>
+
+    <ToolInvocationCard
+      v-if="item.invocation"
+      :invocation="item.invocation"
+      :mutation-busy="mutationBusy"
+      @confirm="$emit('confirm-invocation', $event)"
+      @reject="$emit('reject-invocation', $event)"
+    />
 
     <template v-if="item.result">
       <AssetGallery :assets="item.assets" />

@@ -29,6 +29,10 @@ from materialsagent.infrastructure.db.conversation_task import (
 )
 from materialsagent.infrastructure.db.llm_call import LLMCallRow
 from materialsagent.infrastructure.db.session import create_session_factory
+from materialsagent.infrastructure.db.tool_invocation import (
+    InvocationResultRow,
+    InvocationRunRow,
+)
 from materialsagent.infrastructure.llm.mock import (
     MockChatOrchestrationAdapter,
     default_mock_responder,
@@ -557,6 +561,76 @@ def test_enabled_m7_without_runtime_boundary_has_zero_tool_side_effects(
                 "WHERE purpose='TOOL_RESULT_EXPLANATION'"
             )
         ) == 0
+
+
+def test_standard_tool_result_and_terminal_invocation_commit_together(
+    api_harness,
+    monkeypatch,
+) -> None:
+    actor_id = "actor_standard_invocation"
+    api_harness.persist_actor(actor_id)
+
+    class _OfflineEncoding:
+        @staticmethod
+        def encode(value: str) -> list[int]:
+            return list(value.encode("utf-8"))
+
+    monkeypatch.setattr(
+        "materialsagent.infrastructure.llm.token_counter.tiktoken.get_encoding",
+        lambda _name: _OfflineEncoding(),
+    )
+
+    def responder(_input: object) -> dict[str, object]:
+        return {
+            "route": "TOOL_CANDIDATES",
+            "candidates": [{
+                "tool_id": "materials_unit_conversion",
+                "proposed_arguments": {
+                    "value": 1000,
+                    "from_unit": "°C",
+                    "to_unit": "K",
+                },
+            }],
+        }
+
+    with api_harness.create_client(
+        actor_id,
+        chat_orchestration_port=MockChatOrchestrationAdapter(responder),
+        m7_tool_chain_enabled=True,
+    ) as client:
+        conversation_id = _create_conversation(client)
+        response = _submit(client, conversation_id, "把 1000 °C 转换为 K。")
+        timeline_response = client.get(
+            f"/api/v1/conversations/{conversation_id}/timeline?limit=50"
+        )
+
+    assert response.status_code == 200, response.text
+    invocation = response.json()["data"]["tool_invocation"]
+    assert invocation["status"] == "SUCCEEDED"
+    assert response.json()["data"]["task"] is None
+    assert invocation["result"]["data"] == {
+        "input_value": 1000.0,
+        "input_unit": "°C",
+        "value": 1273.15,
+        "unit": "K",
+    }
+    assert timeline_response.status_code == 200, timeline_response.text
+    timeline_invocation = next(
+        item["invocation"]
+        for item in timeline_response.json()["data"]["items"]
+        if item["item_type"] == "TOOL_INVOCATION"
+    )
+    assert timeline_invocation["status"] == "SUCCEEDED"
+    assert timeline_invocation["result"] == invocation["result"]
+
+    with create_session_factory(api_harness.engine)() as session:
+        run = session.scalar(select(InvocationRunRow))
+        result = session.scalar(select(InvocationResultRow))
+        assert run is not None and result is not None
+        assert run.status == "SUCCEEDED"
+        assert run.task_id is None
+        assert run.invocation_result_id == result.invocation_result_id
+        assert result.invocation_run_id == run.invocation_run_id
 
 
 def test_injected_enabled_chat_service_is_disabled_without_complete_workflow(

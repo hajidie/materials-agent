@@ -84,6 +84,7 @@ class ModelCapabilities(_StrictModel):
     ]
     supports_sampling_with_reasoning: bool
     requires_streaming_for_reasoning: bool
+    supports_tool_calling: bool = False
 
     @field_validator(
         "supported_parameters",
@@ -196,6 +197,7 @@ class RoleDefinition(_StrictModel):
         int,
         Field(ge=0, le=131_072, strict=True),
     ]
+    tool_calling_mode: Literal["structured", "native"] = "structured"
 
     @field_validator("model")
     @classmethod
@@ -318,6 +320,7 @@ class ConfiguredRole:
     prompt_limit_tokens: int
     history_token_budget: int
     safety_margin_tokens: int
+    tool_calling_mode: Literal["structured", "native"] = "structured"
 
     @property
     def generation_parameters(self) -> Mapping[str, object]:
@@ -334,6 +337,8 @@ class ConfiguredRole:
             values["thinking_budget"] = self.thinking_budget
         values["response_format"] = self.response_format
         values["streaming"] = self.streaming
+        if self.role == "chat_orchestration":
+            values["tool_calling_mode"] = self.tool_calling_mode
         return MappingProxyType(values)
 
 
@@ -392,6 +397,12 @@ def _validate_role(
     model: ModelDefinition,
 ) -> None:
     capabilities = model.capabilities
+    if role.tool_calling_mode == "native" and (
+        role_name != "chat_orchestration" or not capabilities.supports_tool_calling
+    ):
+        raise ConfigurationError(
+            f"Invalid LLM role '{role_name}': native Tool Calling is unavailable."
+        )
     configured_parameters = {
         name
         for name in ("temperature", "top_p", "top_k", "max_tokens")
@@ -502,5 +513,6 @@ def load_llm_configuration(
             prompt_limit_tokens=role.prompt_limit_tokens,
             history_token_budget=role.history_token_budget,
             safety_margin_tokens=role.safety_margin_tokens,
+            tool_calling_mode=role.tool_calling_mode,
         )
     return LLMConfiguration(roles=MappingProxyType(roles))

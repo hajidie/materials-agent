@@ -791,3 +791,32 @@ def test_invalid_provider_environment_configuration_is_sanitized(
     ) as captured:
         load_settings(values)
     assert "test-only-secret" not in str(captured.value)
+
+
+def test_dev_fake_side_effect_tool_is_forbidden_in_production() -> None:
+    from materialsagent.infrastructure.config import ConfigurationError, load_settings
+
+    with pytest.raises(
+        ConfigurationError,
+        match=r"^Invalid application configuration\.$",
+    ):
+        load_settings(
+            {
+                "APP_ENV": "production",
+                "ENABLE_DEV_FAKE_SIDE_EFFECT_TOOL": "true",
+            }
+        )
+
+
+def test_injected_side_effect_registry_is_forbidden_in_production() -> None:
+    from materialsagent.application.tools import build_tool_registry
+    from materialsagent.infrastructure.config import ConfigurationError, load_settings
+    from materialsagent.main import create_app
+
+    registry = build_tool_registry(enable_dev_fake_side_effect_tool=True)
+
+    with pytest.raises(ConfigurationError, match="forbidden in the production Catalog"):
+        create_app(
+            settings=load_settings({"APP_ENV": "production"}),
+            tool_registry=registry,
+        )

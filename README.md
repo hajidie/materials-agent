@@ -1,8 +1,8 @@
 # Materials Agent MVP
 
-这是一个面向材料研究的本地材料智能体 MVP。用户通过自然语言创建对话，调用当前默认应用
-组合中唯一注册的 `zta35g_sem_virtual_lab` Tool，根据 ZTA35G 热处理工艺参数生成 SEM 图像，
-并按请求获得力学性能结果和可追溯解释。
+这是一个面向材料研究的本地材料智能体 MVP。用户通过自然语言创建对话，可调用默认应用组合中
+的材料单位换算 Standard Tool，或通过受严格治理的 `zta35g_sem_virtual_lab` Managed Tool，
+根据 ZTA35G 热处理工艺参数生成 SEM 图像，并按请求获得力学性能结果和可追溯解释。
 
 ## Quick Context
 
@@ -11,8 +11,8 @@
 | 项目类型 | 单用户、本地运行的材料研究智能体；Backend 是模块化单体，模型执行在隔离 Runtime 中 |
 | 当前阶段 | 可运行 MVP，不是生产部署方案 |
 | 主要能力 | 自然语言输入 → 受控 Tool 路由与补参 → ZTA35G SEM 生成 → 可选力学性能与解释 |
-| 当前 Tool | 默认应用组合只注册 `zta35g_sem_virtual_lab` |
-| 扩展底座 | 显式、进程内 Tool Registry 与 Router；新 Tool 需要显式定义、适配器和隔离边界 |
+| 当前 Tool | `materials_unit_conversion`（Standard）与 `zta35g_sem_virtual_lab`（Managed） |
+| 扩展底座 | 单一 Tool Registry、统一 ToolDefinition、LangChain Tool Adapter 与 ExecutorRouter |
 | 数据存储 | PostgreSQL 保存结构化事实，MinIO 保存生成图片 |
 | 明确不包含 | 登录、多用户、Redis、后台 Worker、SSE/WebSocket、上传真实 SEM、多 Agent、动态插件和生产部署 |
 
@@ -23,12 +23,16 @@
 ## 当前能力
 
 - Vue 3 + Vite 的本地聊天界面；
-- 对话、消息、任务、输入 Revision、ToolRun、ToolResult、资产和解释结果持久化；
+- 对话、消息、可选任务、InvocationRun、输入 Revision、ToolRun、ToolResult、资产和解释结果持久化；
 - 空白工作区首条消息使用稳定幂等描述符创建 Conversation 并提交 Message；
 - 可永久删除 Conversation；数据库聚合先原子删除，生成图片由持久化 cleanup 记录安全清理；
 - 同一 Conversation 内按 token 预算注入近期完整对话轮次；新建 Conversation 不共享历史；
-- Mock 或受控 DeepSeek/Qwen Provider 聊天编排；当前使用 LangChain，不使用 LangGraph；
-- LLM 候选提议、Registry 解析与授权、固定 Tool 补参组成的自然语言单 Tool 链路；
+- Mock 或受控 DeepSeek/Qwen Provider 聊天编排；LangChain 负责模型调用、Structured Output 或
+  native Tool Calling 适配，不负责平台执行循环；
+- LLM 调用建议统一转换为单个 ToolInvocationProposal，再由 Registry、Policy、InvocationRun
+  与 ExecutorRouter 控制执行；每条用户消息最多形成一个自动执行 Invocation；
+- Side-effect Tool 的确认、权限复核、幂等、审计与崩溃后未知结果状态；生产 Catalog 禁止此类
+  Tool，test/dev 可显式启用 Fake Side-effect Tool 验证闭环；
 - 与 Backend 合同一致的 Mock Runtime；
 - Python 3.8 隔离环境中的真实 ZTA35G Runtime；
 - PostgreSQL 保存结构化事实，MinIO 保存生成图片；

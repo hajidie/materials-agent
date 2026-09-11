@@ -8,7 +8,7 @@ import math
 from typing import TypeAlias
 from types import MappingProxyType
 
-from materialsagent.domain.ports.tool_execution import MaterialTool, ToolMetadata
+from materialsagent.domain.ports.tool_execution import ToolMetadata
 
 
 class ToolStatus(StrEnum):
@@ -17,10 +17,31 @@ class ToolStatus(StrEnum):
     DISABLED = "DISABLED"
 
 
-class ExecutionPolicy(StrEnum):
+class ToolLifecyclePolicy(StrEnum):
     ANY_TASK = "ANY_TASK"
     EXISTING_TASK_ONLY = "EXISTING_TASK_ONLY"
     NONE = "NONE"
+
+
+# Backward-compatible import name. New code should use ToolLifecyclePolicy.
+ExecutionPolicy = ToolLifecyclePolicy
+
+
+class ToolExecutionProfile(StrEnum):
+    STANDARD = "STANDARD"
+    SIDE_EFFECT = "SIDE_EFFECT"
+    MANAGED = "MANAGED"
+
+
+class ExecutionMode(StrEnum):
+    SYNC = "SYNC"
+    ASYNC = "ASYNC"
+
+
+class PresentationMode(StrEnum):
+    DETERMINISTIC = "DETERMINISTIC"
+    LLM_SUMMARY = "LLM_SUMMARY"
+    CUSTOM = "CUSTOM"
 
 
 class ToolAction(StrEnum):
@@ -33,6 +54,11 @@ class ToolAction(StrEnum):
 JsonObject: TypeAlias = Mapping[str, object]
 ToolNormalizer: TypeAlias = Callable[[JsonObject, JsonObject | None], "ToolNormalization"]
 ToolContextProjector: TypeAlias = Callable[[JsonObject], JsonObject]
+ToolInputValidator: TypeAlias = Callable[[JsonObject], JsonObject]
+ToolResultCodec: TypeAlias = Callable[[object], JsonObject]
+ToolResultPresenter: TypeAlias = Callable[[JsonObject], JsonObject]
+ToolConfirmationPreviewBuilder: TypeAlias = Callable[[JsonObject], JsonObject]
+ToolHealthProbe: TypeAlias = Callable[[], str]
 MAX_SAFE_JSON_INTEGER = 9_007_199_254_740_991
 MAX_NORMALIZED_INPUT_BYTES = 4096
 MAX_SCHEMA_BYTES = 16_384
@@ -55,6 +81,35 @@ class ToolRef:
 class AuthorizationDecision:
     authorized_ref: ToolRef
     execution_policy_snapshot: ExecutionPolicy
+
+
+@dataclass(frozen=True, slots=True)
+class ToolExecutionPolicy:
+    lifecycle_policy: ToolLifecyclePolicy = ToolLifecyclePolicy.ANY_TASK
+    required_permissions: tuple[str, ...] = ()
+    confirmation_required: bool = False
+    confirmation_ttl_seconds: int = 900
+    idempotency_required: bool = True
+    audit_required: bool = True
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.lifecycle_policy, ToolLifecyclePolicy):
+            raise ValueError("lifecycle_policy is invalid.")
+        permissions = _controlled_text_tuple(
+            self.required_permissions,
+            "required_permissions",
+        )
+        if type(self.confirmation_required) is not bool:
+            raise ValueError("confirmation_required must be boolean.")
+        if (
+            type(self.confirmation_ttl_seconds) is not int
+            or self.confirmation_ttl_seconds <= 0
+            or self.confirmation_ttl_seconds > 86_400
+        ):
+            raise ValueError("confirmation_ttl_seconds is invalid.")
+        if type(self.idempotency_required) is not bool or type(self.audit_required) is not bool:
+            raise ValueError("execution control flags must be boolean.")
+        object.__setattr__(self, "required_permissions", permissions)
 
 
 @dataclass(frozen=True, slots=True)
@@ -391,53 +446,228 @@ class ToolDefinition:
     tool_id: str
     version: str
     status: ToolStatus
-    execution_policy: ExecutionPolicy
     display_name: str
     description: str
     input_schema: JsonObject
     runtime_metadata: ToolMetadata
-    tool: MaterialTool
     supported_outputs: tuple[str, ...]
     supported_asset_types: tuple[str, ...]
     limitations: tuple[str, ...]
-    normalizer: ToolNormalizer | None = None
+    execution_profile: ToolExecutionProfile = ToolExecutionProfile.MANAGED
+    execution_mode: ExecutionMode = ExecutionMode.SYNC
+    executor_id: str = "managed_runtime"
+    tool_execution_policy: ToolExecutionPolicy = field(
+        default_factory=ToolExecutionPolicy
+    )
+    presentation_mode: PresentationMode = PresentationMode.DETERMINISTIC
+    presenter_id: str = "deterministic"
     schema_hash: str = field(default="", compare=True)
-    candidate_input_schema: JsonObject | None = None
-    context_projector: ToolContextProjector | None = None
+    proposal_schema: JsonObject | None = None
+    output_schema: JsonObject = field(default_factory=dict)
     context_projection_version: str = "metadata-only-v1"
+    confirmation_prompt: str | None = None
 
     def __post_init__(self) -> None:
-        input_schema = _freeze_json(self.input_schema)
-        candidate_schema = _freeze_json(
-            input_schema
-            if self.candidate_input_schema is None
-            else self.candidate_input_schema
+        input_schema = _controlled_json_object(
+            self.input_schema,
+            "input_schema",
+            max_bytes=MAX_SCHEMA_BYTES,
+        )
+        proposal_schema = _controlled_json_object(
+            input_schema if self.proposal_schema is None else self.proposal_schema,
+            "proposal_schema",
+            max_bytes=MAX_SCHEMA_BYTES,
+        )
+        output_schema = _controlled_json_object(
+            self.output_schema,
+            "output_schema",
+            max_bytes=MAX_SCHEMA_BYTES,
         )
         object.__setattr__(self, "input_schema", input_schema)
-        object.__setattr__(self, "candidate_input_schema", candidate_schema)
-        if self.context_projector is not None and not callable(
-            self.context_projector
-        ):
-            raise ValueError("context_projector must be callable.")
+        object.__setattr__(self, "proposal_schema", proposal_schema)
+        object.__setattr__(self, "output_schema", output_schema)
+        if not isinstance(self.execution_profile, ToolExecutionProfile):
+            raise ValueError("execution_profile is invalid.")
+        if not isinstance(self.execution_mode, ExecutionMode):
+            raise ValueError("execution_mode is invalid.")
+        if not isinstance(self.tool_execution_policy, ToolExecutionPolicy):
+            raise ValueError("tool_execution_policy is invalid.")
+        if not isinstance(self.presentation_mode, PresentationMode):
+            raise ValueError("presentation_mode is invalid.")
+        for field_name in ("executor_id", "presenter_id"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field_name} must be non-blank text.")
         if (
             not isinstance(self.context_projection_version, str)
             or not self.context_projection_version.strip()
         ):
             raise ValueError("context_projection_version must be non-blank text.")
+        if self.confirmation_prompt is not None and (
+            type(self.confirmation_prompt) is not str
+            or not self.confirmation_prompt.strip()
+            or len(self.confirmation_prompt.encode("utf-8")) > 512
+        ):
+            raise ValueError("confirmation_prompt must be controlled text.")
 
     @property
     def metadata(self) -> ToolMetadata:
         return self.runtime_metadata
 
     @property
+    def execution_policy(self) -> ToolLifecyclePolicy:
+        """Compatibility view of the former lifecycle-only field."""
+
+        return self.tool_execution_policy.lifecycle_policy
+
+    @property
+    def candidate_input_schema(self) -> JsonObject:
+        """Compatibility name for the model-facing proposal schema."""
+
+        assert self.proposal_schema is not None
+        return self.proposal_schema
+
+    @property
     def ref(self) -> ToolRef:
         return ToolRef(self.tool_id, self.version, self.schema_hash)
+
+
+@dataclass(frozen=True, slots=True)
+class ToolExecutionBinding:
+    execution_target: object
+    normalizer: ToolNormalizer | None = None
+    validator: ToolInputValidator | None = None
+    context_projector: ToolContextProjector | None = None
+    codec: ToolResultCodec | None = None
+    presenter: ToolResultPresenter | None = None
+    confirmation_preview_builder: ToolConfirmationPreviewBuilder | None = None
+    health_probe: ToolHealthProbe | None = None
+
+    def __post_init__(self) -> None:
+        if self.execution_target is None:
+            raise ValueError("execution_target is required.")
+        for field_name in (
+            "normalizer",
+            "validator",
+            "context_projector",
+            "codec",
+            "presenter",
+            "confirmation_preview_builder",
+            "health_probe",
+        ):
+            value = getattr(self, field_name)
+            if value is not None and not callable(value):
+                raise ValueError(f"{field_name} must be callable.")
+
+
+@dataclass(frozen=True, slots=True)
+class RegisteredTool:
+    definition: ToolDefinition
+    binding: ToolExecutionBinding
+
+    @property
+    def tool_id(self) -> str:
+        return self.definition.tool_id
+
+    @property
+    def version(self) -> str:
+        return self.definition.version
+
+    @property
+    def status(self) -> ToolStatus:
+        return self.definition.status
+
+    @property
+    def execution_policy(self) -> ToolLifecyclePolicy:
+        return self.definition.execution_policy
+
+    @property
+    def execution_profile(self) -> ToolExecutionProfile:
+        return self.definition.execution_profile
+
+    @property
+    def execution_mode(self) -> ExecutionMode:
+        return self.definition.execution_mode
+
+    @property
+    def executor_id(self) -> str:
+        return self.definition.executor_id
+
+    @property
+    def display_name(self) -> str:
+        return self.definition.display_name
+
+    @property
+    def description(self) -> str:
+        return self.definition.description
+
+    @property
+    def input_schema(self) -> JsonObject:
+        return self.definition.input_schema
+
+    @property
+    def candidate_input_schema(self) -> JsonObject:
+        return self.definition.candidate_input_schema
+
+    @property
+    def proposal_schema(self) -> JsonObject:
+        return self.definition.candidate_input_schema
+
+    @property
+    def output_schema(self) -> JsonObject:
+        return self.definition.output_schema
+
+    @property
+    def runtime_metadata(self) -> ToolMetadata:
+        return self.definition.runtime_metadata
+
+    @property
+    def metadata(self) -> ToolMetadata:
+        return self.definition.runtime_metadata
+
+    @property
+    def supported_outputs(self) -> tuple[str, ...]:
+        return self.definition.supported_outputs
+
+    @property
+    def supported_asset_types(self) -> tuple[str, ...]:
+        return self.definition.supported_asset_types
+
+    @property
+    def limitations(self) -> tuple[str, ...]:
+        return self.definition.limitations
+
+    @property
+    def schema_hash(self) -> str:
+        return self.definition.schema_hash
+
+    @property
+    def context_projection_version(self) -> str:
+        return self.definition.context_projection_version
+
+    @property
+    def ref(self) -> ToolRef:
+        return self.definition.ref
+
+    @property
+    def tool(self) -> object:
+        """Compatibility access to the execution target, never metadata."""
+
+        return self.binding.execution_target
+
+    @property
+    def normalizer(self) -> ToolNormalizer | None:
+        return self.binding.normalizer
+
+    @property
+    def context_projector(self) -> ToolContextProjector | None:
+        return self.binding.context_projector
 
     def normalize(
         self,
         candidate_input: JsonObject,
         prior_normalized_input: JsonObject | None = None,
     ) -> ToolNormalization:
-        if self.normalizer is None:
+        if self.binding.normalizer is None:
             raise ValueError("Tool normalizer is unavailable.")
-        return self.normalizer(candidate_input, prior_normalized_input)
+        return self.binding.normalizer(candidate_input, prior_normalized_input)

@@ -5,11 +5,25 @@ import json
 import tiktoken
 
 
+class _Utf8ByteEncoding:
+    """Conservative offline fallback: BPE cannot use more tokens than bytes."""
+
+    @staticmethod
+    def encode(value: str) -> list[int]:
+        return list(value.encode("utf-8"))
+
+
 class Cl100kTokenCounter:
     """Deterministic provider-neutral prompt token approximation."""
 
     def __init__(self) -> None:
-        self._encoding = tiktoken.get_encoding("cl100k_base")
+        try:
+            self._encoding = tiktoken.get_encoding("cl100k_base")
+        except OSError:
+            # tiktoken downloads its vocabulary on first use. Local/offline
+            # startup must remain available when that cache is absent; byte
+            # counting is deterministic and conservatively overestimates BPE.
+            self._encoding = _Utf8ByteEncoding()
 
     def count_text(self, value: str) -> int:
         return len(self._encoding.encode(value))

@@ -210,6 +210,7 @@ def _explanation_attempt(
         llm_call_id=llm_call_id,
         task_id="task_1",
         conversation_id="conversation_1",
+        source_message_id="message_1",
         request_id=f"request_explanation_{attempt_no}",
         purpose="TOOL_RESULT_EXPLANATION",
         input_result_id="result_1",

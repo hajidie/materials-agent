@@ -127,35 +127,34 @@ def test_catalog_list_detail_and_unknown_tool_are_safely_projected(
         unknown = client.get("/api/v1/tools/not-registered")
 
     assert listing.status_code == 200
-    assert len(listing.json()["data"]) == 1
-    entry = listing.json()["data"][0]
+    entries = {
+        item["tool_id"]: item for item in listing.json()["data"]
+    }
+    assert set(entries) == {
+        "materials_unit_conversion",
+        "zta35g_sem_virtual_lab",
+    }
+    entry = entries["zta35g_sem_virtual_lab"]
     assert set(entry) == {
         "tool_id",
         "display_name",
         "description",
-        "material_scope",
-        "enabled",
         "status",
-        "execution_policy",
-        "version",
-        "schema_hash",
+        "execution_profile",
+        "confirmation_required",
         "availability",
-        "tool_version",
-        "schema_version",
         "supported_outputs",
-        "input_fields",
-        "output_summary",
-        "supported_asset_types",
         "limitations",
     }
     assert entry["tool_id"] == "zta35g_sem_virtual_lab"
     assert entry["status"] == "ACTIVE"
-    assert entry["execution_policy"] == "ANY_TASK"
-    assert entry["version"] == "1"
-    assert len(entry["schema_hash"]) == 64
-    assert entry["tool_version"] == "0.1.0"
-    assert entry["schema_version"] == "1.0"
+    assert entry["execution_profile"] == "MANAGED"
+    assert entry["confirmation_required"] is False
     assert entry["availability"] == "AVAILABLE"
+    assert "version" not in entry
+    assert "schema_hash" not in entry
+    assert "runtime_url" not in entry
+    assert entries["materials_unit_conversion"]["execution_profile"] == "STANDARD"
     assert detail.status_code == 200
     assert detail.json()["data"] == entry
     assert unknown.status_code == 404

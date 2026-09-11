@@ -7,6 +7,7 @@ import unicodedata
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 CONVERSATION_CREATE = "CONVERSATION_CREATE"
+MESSAGE_SUBMIT = "MESSAGE_SUBMIT"
 TASK_CREATE = "TASK_CREATE"
 TASK_INPUT_SUPPLEMENT = "TASK_INPUT_SUPPLEMENT"
 TOOL_RETRY = "TOOL_RETRY"
@@ -14,6 +15,7 @@ EXPLANATION_RETRY = "EXPLANATION_RETRY"
 IDEMPOTENCY_OPERATIONS = frozenset(
     {
         CONVERSATION_CREATE,
+        MESSAGE_SUBMIT,
         TASK_CREATE,
         TASK_INPUT_SUPPLEMENT,
         TOOL_RETRY,
@@ -104,6 +106,14 @@ class IdempotencyRecord:
                 self.conversation_id is not None
                 and self.task_id is None
                 and self.message_id is None
+                and self.task_input_revision_id is None
+                and self.tool_run_id is None
+                and self.explanation_id is None
+            ),
+            MESSAGE_SUBMIT: (
+                self.conversation_id is not None
+                and self.message_id is not None
+                and self.task_id is None
                 and self.task_input_revision_id is None
                 and self.tool_run_id is None
                 and self.explanation_id is None

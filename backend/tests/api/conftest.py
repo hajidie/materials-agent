@@ -164,18 +164,21 @@ class APITestHarness:
             "m7_tool_chain_enabled": False,
             "task_query_service": TaskQueryService(query_repository),
         }
-        if configure_timeline:
-            options["timeline_query_service"] = TimelineQueryService(
+        injected_timeline_service = app_overrides.get("timeline_query_service")
+        options.update(app_overrides)
+        app = create_app(**options)
+        if configure_timeline and injected_timeline_service is None:
+            app.state.timeline_query_service = TimelineQueryService(
                 query_repository,
                 TimelineCursorCodec(
                     SecretStr(
                         "api-test-timeline-signing-key-at-least-32-bytes"
                     )
                 ),
+                app.state.invocation_service,
             )
-        options.update(app_overrides)
         return TestClient(
-            create_app(**options),
+            app,
             raise_server_exceptions=raise_server_exceptions,
         )
 

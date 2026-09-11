@@ -20,7 +20,9 @@ from materialsagent.application.timeline import (
     SafeTimelineError,
     TimelineQueryService,
     ToolTaskTimelineItem,
+    ToolInvocationTimelineItem,
 )
+from materialsagent.api.routes.tool_invocations import InvocationDataView
 from materialsagent.application.result_service import (
     ResultArtifactProjection,
 )
@@ -181,7 +183,7 @@ class NeedsInputView(StrictModel):
 class UserMessageTimelineItemView(StrictModel):
     item_type: Literal["USER_MESSAGE"]
     item_id: str
-    task_id: str
+    task_id: str | None
     anchor_at: str
     message: TimelineMessageView
 
@@ -189,7 +191,7 @@ class UserMessageTimelineItemView(StrictModel):
 class AssistantMessageTimelineItemView(StrictModel):
     item_type: Literal["ASSISTANT_MESSAGE"]
     item_id: str
-    task_id: str
+    task_id: str | None
     anchor_at: str
     message: TimelineMessageView
 
@@ -211,6 +213,15 @@ class ToolTaskTimelineItemView(StrictModel):
     latest_explanation_failure: ExplanationSummaryView | None
     needs_input: NeedsInputView | None
     errors: list[SafeErrorView]
+    invocation: InvocationDataView | None = None
+
+
+class ToolInvocationTimelineItemView(StrictModel):
+    item_type: Literal["TOOL_INVOCATION"]
+    item_id: str
+    task_id: None
+    anchor_at: str
+    invocation: InvocationDataView
 
 
 TimelineItemView = Annotated[
@@ -218,6 +229,7 @@ TimelineItemView = Annotated[
         UserMessageTimelineItemView
         | AssistantMessageTimelineItemView
         | ToolTaskTimelineItemView
+        | ToolInvocationTimelineItemView
     ),
     Field(discriminator="item_type"),
 ]
@@ -335,8 +347,18 @@ def _explanation_view(
 
 
 def _item_view(
-    item: MessageTimelineItem | ToolTaskTimelineItem,
+    item: MessageTimelineItem | ToolTaskTimelineItem | ToolInvocationTimelineItem,
 ) -> TimelineItemView:
+    if isinstance(item, ToolInvocationTimelineItem):
+        return ToolInvocationTimelineItemView(
+            item_type="TOOL_INVOCATION",
+            item_id=item.item_id,
+            task_id=None,
+            anchor_at=_utc_text(item.anchor_at),
+            invocation=InvocationDataView.model_validate(
+                item.invocation.to_dict()
+            ),
+        )
     if isinstance(item, MessageTimelineItem):
         values = {
             "item_type": item.item_type,
@@ -411,6 +433,11 @@ def _item_view(
             SafeErrorView(code=error.code, message=error.message)
             for error in item.errors
         ],
+        invocation=(
+            None
+            if item.invocation is None
+            else InvocationDataView.model_validate(item.invocation.to_dict())
+        ),
     )
 
 

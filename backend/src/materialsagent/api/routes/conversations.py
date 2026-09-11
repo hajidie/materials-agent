@@ -13,6 +13,7 @@ from materialsagent.api.dependencies import (
     get_conversation_cleanup_service,
     get_message_submission_service,
     get_optional_tool_workflow_service,
+    get_invocation_service,
 )
 from materialsagent.application.chat_orchestration import (
     ChatOrchestrationService,
@@ -31,6 +32,8 @@ from materialsagent.application.tool_workflow import (
     ToolWorkflowProjection,
     ToolWorkflowService,
 )
+from materialsagent.application.tool_invocations import InvocationService
+from materialsagent.api.routes.tool_invocations import InvocationDataView
 from materialsagent.api.routes.tool_results import (
     ResultArtifactView,
     _public_json,
@@ -170,7 +173,8 @@ class ExplanationView(StrictModel):
 class MessageSubmissionData(StrictModel):
     conversation_id: str
     user_message: UserMessageView
-    task: MessageTaskView
+    task: MessageTaskView | None
+    tool_invocation: InvocationDataView | None = None
     assistant_message: AssistantMessageView | None = None
     needs_input: NeedsInputView | None = None
     result_summary: ResultSummaryView | None = None
@@ -306,6 +310,10 @@ def submit_message(
         ToolWorkflowService | None,
         Depends(get_optional_tool_workflow_service),
     ],
+    invocation_service: Annotated[
+        InvocationService,
+        Depends(get_invocation_service),
+    ],
     idempotency_key: Annotated[
         str | None,
         Header(alias="Idempotency-Key"),
@@ -340,22 +348,32 @@ def submit_message(
             submission,
         )
     workflow: ToolWorkflowProjection | None = None
+    managed_invocation = None
     if (
-        projection.task.task_type == "TOOL_EXECUTION"
+        projection.task is not None
+        and projection.task.task_type == "TOOL_EXECUTION"
         and projection.task.current_status == "READY"
     ):
         if projection.revision is None:
             raise ApplicationInternalError(task_id=projection.task.task_id)
         if tool_workflow_service is not None:
             try:
-                workflow = tool_workflow_service.execute(
+                managed_invocation, workflow_result = invocation_service.execute_managed_task(
                     actor_context,
                     task_id=projection.task.task_id,
+                    source_message_id=projection.user_message.message_id,
                     task_input_revision_id=(
                         projection.revision.task_input_revision_id
                     ),
                     request_id=projection.user_message.request_id,
+                    idempotency_key=(
+                        f"managed-invocation:{submission.idempotency_record_id}"
+                    ),
+                    workflow_service=tool_workflow_service,
                 )
+                if not isinstance(workflow_result, ToolWorkflowProjection):
+                    raise ApplicationInternalError(task_id=projection.task.task_id)
+                workflow = workflow_result
             except ApplicationConflictError:
                 projection = orchestration_service.load_current_submission(
                     actor_context,
@@ -367,7 +385,8 @@ def submit_message(
                         task_id=projection.task.task_id,
                     )
     elif (
-        projection.task.task_type == "TOOL_EXECUTION"
+        projection.task is not None
+        and projection.task.task_type == "TOOL_EXECUTION"
         and projection.task.selected_result_id is not None
     ):
         if tool_workflow_service is None:
@@ -375,6 +394,17 @@ def submit_message(
         workflow = tool_workflow_service.load_current_for_task(
             actor_context,
             task_id=projection.task.task_id,
+        )
+        managed_invocation = next(
+            (
+                item
+                for item in invocation_service.list_for_conversation(
+                    actor_context,
+                    submission.conversation_id,
+                )
+                if item.run.source_message_id == projection.user_message.message_id
+            ),
+            None,
         )
     message = projection.user_message
     task = workflow.task if workflow is not None else projection.task
@@ -390,14 +420,25 @@ def submit_message(
                 content_text=message.content_text,
                 created_at=_utc_text(message.created_at),
             ),
-            task=MessageTaskView(
-                task_id=task.task_id,
-                task_type=task.task_type,
-                status=task.current_status,
-                selected_tool_run_id=task.selected_tool_run_id,
-                selected_result_id=task.selected_result_id,
-                created_at=_utc_text(task.created_at),
-                updated_at=_utc_text(task.updated_at),
+            task=(
+                None
+                if task is None
+                else MessageTaskView(
+                    task_id=task.task_id,
+                    task_type=task.task_type,
+                    status=task.current_status,
+                    selected_tool_run_id=task.selected_tool_run_id,
+                    selected_result_id=task.selected_result_id,
+                    created_at=_utc_text(task.created_at),
+                    updated_at=_utc_text(task.updated_at),
+                )
+            ),
+            tool_invocation=(
+                None
+                if (projection.invocation or managed_invocation) is None
+                else InvocationDataView.model_validate(
+                    (projection.invocation or managed_invocation).to_dict()
+                )
             ),
             assistant_message=(
                 None
@@ -411,7 +452,9 @@ def submit_message(
             ),
             needs_input=(
                 None
-                if task.current_status != "NEEDS_INPUT" or revision is None
+                if task is None
+                or task.current_status != "NEEDS_INPUT"
+                or revision is None
                 else NeedsInputView(
                     missing_fields=list(revision.missing_fields),
                     ambiguous_fields=list(revision.ambiguous_fields),

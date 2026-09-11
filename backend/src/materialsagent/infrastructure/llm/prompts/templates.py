@@ -7,6 +7,7 @@ from typing import Final
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
 
+from materialsagent.application.tool_projections import ToolProjectionService
 from materialsagent.domain.ports.chat_orchestration import ChatOrchestrationInput
 from materialsagent.domain.ports.explanation import ExplanationInput
 from materialsagent.domain.ports.tool_input_extraction import ToolInputExtractionInput
@@ -29,11 +30,11 @@ _CHAT_ORCHESTRATION_TEMPLATE: Final = ChatPromptTemplate.from_messages(
             '{{"route":"KNOWLEDGE_ANSWER","answer_text":"..."}}. '
             "For Tool intent return one to five unique candidates as "
             '{{"route":"TOOL_CANDIDATES","candidates":[{{"tool_id":"...",'
-            '"candidate_input_delta":{{}},"history_reference":'
+            '"proposed_arguments":{{}},"history_reference":'
             '{{"context_ref":"ctx_ref_0001","reference_text":"..."}}}}]}}. '
-            "candidate_input_delta contains only values supplied or changed by the "
-            "current user message and must follow the Tool candidate_input_schema. "
-            "Root fields may be omitted from candidate_input_delta; when a nested "
+            "proposed_arguments contains the arguments proposed by the "
+            "current user message and must follow the Tool proposal_schema. "
+            "Root fields may be omitted from proposed_arguments; when a nested "
             "temperature or time parameter is present it must contain the complete "
             "value and unit pair. Preserve explicitly unresolved values as null or "
             "as the controlled candidates shape allowed by the schema. "
@@ -104,15 +105,7 @@ def render_chat_orchestration_prompt(
     value: ChatOrchestrationInput,
 ) -> list[dict[str, str]]:
     catalog = [
-        {
-            "tool_id": entry.tool_id,
-            "version": entry.version,
-            "schema_hash": entry.schema_hash,
-            "display_name": entry.display_name,
-            "description": entry.description,
-            "candidate_input_schema": _plain_json(entry.candidate_input_schema),
-            "supported_outputs": list(entry.supported_outputs),
-        }
+        ToolProjectionService.for_llm_snapshot_entry(entry).to_prompt_dict()
         for entry in value.routing_catalog.entries
     ]
     base = _controlled_messages(

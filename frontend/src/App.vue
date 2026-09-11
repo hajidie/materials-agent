@@ -27,7 +27,8 @@ const writeBusy = computed(
   () =>
     creatingConversation.value ||
     agent.mutationStatus.value === "SENDING" ||
-    agent.mutationStatus.value === "UNCERTAIN",
+    agent.mutationStatus.value === "UNCERTAIN" ||
+    agent.invocationMutationBusy.value,
 );
 
 const deleteCandidate = computed(() =>
@@ -146,6 +147,8 @@ function ignoreRejected(operation: Promise<unknown>): void {
         @retry-explanation="
           ignoreRejected(agent.retryExplanation($event))
         "
+        @confirm-invocation="ignoreRejected(agent.confirmInvocation($event))"
+        @reject-invocation="ignoreRejected(agent.rejectInvocation($event))"
         @refresh="ignoreRejected(agent.refreshTimeline())"
       />
     </section>

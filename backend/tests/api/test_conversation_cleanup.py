@@ -211,6 +211,7 @@ def _old_call(task, message, *, status: str) -> LLMCall:
         llm_call_id=f"llm_recovery_{status.lower()}",
         task_id=task.task_id,
         conversation_id=task.conversation_id,
+        source_message_id=message.message_id,
         request_id=message.request_id,
         purpose="CHAT_ORCHESTRATION",
         input_result_id=None,

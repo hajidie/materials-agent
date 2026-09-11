@@ -19,8 +19,9 @@ Materials Agent 是单用户、本地运行的材料研究智能体 MVP。平台
 模块化单体；真实 ZTA35G 模型在独立 Python 3.8 Runtime 中运行，以隔离旧版 PyTorch、CUDA、
 Joblib 和 scikit-learn 等依赖。
 
-当前默认应用组合只注册 `zta35g_sem_virtual_lab`。Backend 已提供显式的进程内 Tool Registry
-和单 Tool Router 底座，但这不等于产品已经提供多个 Tool，也不等于存在动态插件系统。
+当前默认应用组合注册 `materials_unit_conversion` Standard Tool 与
+`zta35g_sem_virtual_lab` Managed Tool。Backend 只有一个进程内 Tool Registry；异构执行能力
+不等于动态插件系统、开放式 Agent Tool Loop 或多 Tool 编排。
 
 ```text
 Frontend
@@ -28,9 +29,10 @@ Frontend
        -> PostgreSQL (structured facts)
        -> MinIO (generated image objects)
        -> LLM adapter (Mock or controlled DeepSeek/Qwen Provider)
-       -> explicit in-process Tool Registry
-            -> local Runtime client
-                 -> Mock Runtime or real ZTA35G Runtime
+       -> explicit in-process Tool Registry / Invocation control plane
+            -> ExecutorRouter
+                 -> in-process Standard target
+                 -> Managed workflow -> Mock or real ZTA35G Runtime
 ```
 
 Runtime 是模型兼容和执行隔离边界，不是把 Backend 拆成通用微服务的先例。PostgreSQL、MinIO、
@@ -71,29 +73,27 @@ Backend 与真实 Runtime 不共享 Python 包或虚拟环境。`SEM/` 是外部
 
 ## 主要数据流
 
-一次自然语言 Tool 请求的受控路径是：
+一次自然语言 Tool 请求的统一控制路径是：
 
 ```text
 用户消息
   -> 为本次路由创建 RoutingCatalogSnapshot
   -> Context Builder 从同一 Conversation 选择预算内的近期完整轮次
-  -> LLM Structured Output 提出 Tool candidates 与候选参数
-  -> Registry.resolve(candidate, same snapshot)
-  -> ToolDefinition.normalize(candidate, prior revision when applicable)
-  -> Task binding / NEEDS_INPUT / READY
-  -> Registry.authorize(action, current registration, bound ref)
-  -> 持久化 PENDING ToolRun 和执行快照
-  -> 持久化 RUNNING 与开始时间
-  -> 在数据库事务外调用独立 Runtime
-  -> 保存图片到 MinIO，提交结构化结果到 PostgreSQL
-  -> 更新 ToolRun/Task 终态并生成可追溯解释
+  -> LLM safe projection -> Structured Output 或 native Tool Calling
+  -> ToolInvocationProposal(model_tool_name, proposed_arguments)
+  -> Registry.resolve(original snapshot + current registration)
+  -> Execution Policy / authorization
+  -> InvocationRun -> ExecutorRouter
+       -> Standard: 同步无副作用执行与 InvocationResult
+       -> Side-effect: 确认、再次授权、幂等执行或 OUTCOME_UNKNOWN
+       -> Managed: Task/InputRevision/ToolRun/Asset/Explanation 严格链路
   -> timeline/API -> Frontend
 ```
 
-LLM 只根据本次受控 Catalog Snapshot 提出候选和候选参数，不决定 Tool 版本、Task binding 或
-执行权限。应用只能使用同一 Snapshot 通过 `Registry.resolve()` 验证候选，再根据当前注册项
-通过 `Registry.authorize()` 决定动作。Catalog 查询结果、LLM 输出和历史策略快照都不授予执行
-权限。
+Catalog、LLM 和 Invocation API 分别使用字段 allowlist 的投影 DTO，禁止直接序列化完整
+`ToolDefinition`。LLM 只能看到模型 Tool 名、描述和 `proposal_schema`，只提出名称与参数；
+version 和 `schema_hash` 由原 Routing Snapshot 与当前 Registry 双重 resolve 后补全。Catalog
+查询结果、LLM 输出、确认动作和历史策略快照都不授予执行权限。
 
 ## Conversation 级上下文记忆
 
@@ -108,7 +108,8 @@ Output 合同，不查询数据库，也不负责参数合并、引用解析或 
 角色分别配置应用 Prompt 上限、历史预算、最大输出和 safety margin。`1,024` 的默认 safety
 margin 是可调整的工程保护值，不保证覆盖所有 Provider tokenizer 差异。Context Builder 在
 选择历史后对最终消息重新计数；如果零历史时必需 Prompt 仍超限，不调用 Provider，并以
-`CONTEXT_BUDGET_EXCEEDED` 结束首次 Task，或让补参 Task 保持 `NEEDS_INPUT`。
+`CONTEXT_BUDGET_EXCEEDED` 结束首次 LLMCall 且不创建 Task，或让补参 Task 保持
+`NEEDS_INPUT`。
 
 NEW_TASK 不隐式继承任何历史实验参数。模型只有在当前消息明确引用历史条件时，才能返回本次
 Context Window 内的局部 `context_ref` 和当前消息中的原文引用。应用对两段文本做 Unicode
@@ -126,25 +127,24 @@ State 或 Tool 授权。
 
 ## Tool Registry 与扩展模型
 
-Registry 是显式、不可变、进程内的注册边界。一个 `ToolDefinition` 把以下事实绑定在一起：
+Registry 是显式、不可变、进程内的唯一注册边界。`ToolDefinition` 只保存不可变、可序列化的
+元数据：标识与版本、生命周期、执行 profile/mode、`executor_id`、输入/提议/输出 schema、
+ToolExecutionPolicy、展示模式和安全说明。normalizer、validator、execution target、codec、
+presenter、preview 与 health probe 位于独立 `ToolExecutionBinding`；两者组成 `RegisteredTool`。
+Binding 不持有 Executor，无状态 Executor 由 `ExecutorRouter` 按 `executor_id` 管理。
 
-- `tool_id`、`version`、生命周期状态和执行策略；
-- 执行语义的 `input_schema` 与候选输入 schema；
-- normalizer、支持的输出和资产类型、限制说明；
-- 可选且版本化的安全 ToolResult Context Projection；未配置时使用 metadata-only；
-- Registry 持有的 Runtime metadata 与实际执行对象。
+Registry 启动时联合校验 Definition、Binding 与 ExecutorRouter，拒绝重复 ID、非法生命周期、
+不匹配的 profile/binding、缺失 Presenter、不安全 schema 和 async-only Tool。LangChain Adapter
+可把 `@tool`、`StructuredTool` 或第三方 `BaseTool` 转成同一 RegisteredTool；LangChain Tool
+实例只作为 execution target，不成为领域核心抽象。当前没有独立 LangChain Registry、包扫描、
+动态上传、HTTP/MCP Executor 实现或开放式自动 Tool Loop。
 
-Registry 启动时拒绝重复 ID、非法生命周期组合、Runtime metadata 不匹配、缺少 normalizer 的
-可执行 Tool，以及不安全或超限的 JSON schema。当前没有包扫描、运行时动态加载或上传插件
-机制。
+新增 Tool 的预期扩展路径是：
 
-新增真实模型 Tool 的预期扩展路径是：
-
-1. 显式实现 ToolDefinition、输入规范化和领域执行端口；
-2. 提供自己的执行适配器和隔离 Runtime；
-3. 在应用组合根显式注册；
-4. 补齐 Registry、Router、合同、持久化和端到端测试；
-5. 若产品从单 Tool 变为多 Tool，先确认范围并同步 README 与公共交互。
+1. 定义纯元数据 ToolDefinition，并提供对应 ToolExecutionBinding；
+2. 选择已注册 Executor；Managed 模型继续提供隔离 Runtime 与完整领域链路；
+3. 在应用组合根显式注册到唯一 ToolRegistry；
+4. 补齐投影、授权、执行、持久化和端到端测试。
 
 测试中的 `ml_training_test` 是异构合同夹具，只证明 Registry/Router 的扩展能力，不是产品 Tool。
 
@@ -169,7 +169,7 @@ Binding 保存首次绑定的 `tool_id`、`version` 和 `schema_hash`。三者�
 
 `schema_hash` 对影响执行语义的 Tool `input_schema` 计算 SHA-256。Canonical JSON 使用字段
 排序、UTF-8、紧凑编码并拒绝 NaN、Infinity、非文本键和其他非标准 JSON 值。展示名、描述、
-候选输入 schema、UI 字段、Runtime 地址和执行对象不参与该 Hash。
+`proposal_schema`、`output_schema`、UI 字段、Runtime 地址和执行对象不参与该 Hash。
 
 Hash 只证明执行输入合同相等，不推断向前或向后兼容：
 
@@ -181,14 +181,36 @@ Hash 只证明执行输入合同相等，不推断向前或向后兼容：
 
 生命周期和执行策略是两个字段，但当前 Registry 只接受三种组合：
 
-| `status` | `execution_policy` | 新路由 | 已绑定 Task 的补参/执行/重试 |
+| `status` | `lifecycle_policy` | 新路由 | 已绑定 Task 的补参/执行/重试 |
 |---|---|---|---|
 | `ACTIVE` | `ANY_TASK` | 允许 | 允许 |
 | `DEPRECATED` | `EXISTING_TASK_ONLY` | 排除 | 合同未漂移时允许 |
 | `DISABLED` | `NONE` | 排除 | 拒绝 |
 
 Registry 启动时拒绝 `ACTIVE + NONE`、`DISABLED + ANY_TASK` 等非法组合。退役不会物理删除 Tool
-或历史数据；当前也没有运行时动态卸载开关。
+或历史数据；旧 `ExecutionPolicy` 名称保留为 `ToolLifecyclePolicy` 的兼容 alias。
+
+## InvocationRun 状态、确认与恢复
+
+Standard/Side-effect 不创建 Managed Task；Message 与 LLMCall 的 `task_id` 因此可空，LLMCall
+直接关联 source Message。Managed Invocation 必须关联 Task 与同 Task 的 ToolRun，Standard 与
+Side-effect 则通过一对一强 FK 关联 InvocationResult。消息提议使用部分唯一约束，保证一条用户
+消息最多产生一个自动执行 Invocation；native Provider 返回多个 tool calls 时整批拒绝。
+
+InvocationRun 的唯一权威状态转换为：
+
+| 当前状态 | 允许后继 |
+|---|---|
+| `PENDING` | `PENDING_CONFIRMATION`、`RUNNING`、`DENIED`、`FAILED` |
+| `PENDING_CONFIRMATION` | `PENDING`、`REJECTED`、`EXPIRED` |
+| `RUNNING` | `SUCCEEDED`、`FAILED`、`OUTCOME_UNKNOWN` |
+| 所有终态 | 无 |
+
+只有 Side-effect 使用确认，事实由 confirmed/rejected/expired 时间与 actor 字段记录，不另建
+Confirmation 状态。执行先提交 claim/lease，再单独提交 dispatch marker，所有 target 调用都在
+marker 提交以后且位于事务外。重复确认可继续驱动已确认的 PENDING；未过期 RUNNING 不重复调用。
+lease 过期时，无 marker 可重新授权接管；有 marker 的 Standard 可用同一幂等键重放，Side-effect
+转 `OUTCOME_UNKNOWN`，Managed 只与 ToolRun/ToolResult 对账并要求显式重试，绝不再次调用 Runtime。
 
 ## Task 与 ToolRun 状态模型
 
@@ -221,7 +243,7 @@ PENDING -> RUNNING -> SUCCEEDED
 
 ## 执行、事务与重试
 
-每次执行在 `authorize()` 通过后：
+Managed 执行在 `authorize()` 通过后继续沿用严格链路：
 
 1. 在短事务内创建并提交 `PENDING` ToolRun，同时把 Task 置为 `RUNNING`；
 2. 在另一短事务内把 ToolRun 置为 `RUNNING` 并保存开始时间；
@@ -238,13 +260,16 @@ ToolRun、输入 Revision、资产所有者和来源一致性，不能跨 actor�
 
 ## Conversation 写入恢复与永久删除
 
-Conversation 创建和 Message/Task 提交分别使用持久化幂等记录。空白工作区的首条消息由一个
+Conversation 创建和 Message 提交分别使用持久化幂等记录。空白工作区的首条消息由一个
 客户端 operation descriptor 固定派生两个 key；刷新或结果不确定后的重试继续使用同一组 key，
-不通过 Timeline 推测写入结果。Message 已提交但编排尚未越过可靠启动边界时，重放继续原 Task；
+不通过 Timeline 推测写入结果。Message 已提交但编排尚未越过可靠启动边界时，重放继续原
+LLMCall；路由确定前 Message/LLMCall 的 `task_id` 保持为空；
 已有终态或 ToolRun、Result、Assistant Message 等真实执行事实时只返回现有投影，不重复创建
 Message/Task 或执行链。
 
-进程启动在接受请求前恢复旧进程遗留状态：可靠启动前的 PENDING LLMCall 以中断原因结束，原
+Invocation 查询、Timeline 刷新、消息幂等重放与重复 confirm 都会先执行同一按需恢复逻辑，不
+引入后台 Worker。进程启动在接受请求前恢复其他旧进程遗留状态：可靠启动前的 PENDING LLMCall
+以中断原因结束，原
 Task 保持可继续；旧 RUNNING LLMCall、ToolRun 和 Explanation 以进程中断失败，无法安全继续的
 Task 进入终态；PENDING Asset 只在数据库中标记 ORPHANED，不在恢复事务中访问 MinIO。删除时
 还会对目标 Conversation 使用同一进程 cutoff 再执行恢复，因此旧 PENDING/READY 不会永久造成
@@ -274,7 +299,9 @@ TOML 中的模型能力声明是开发期约束，不是动态发现结果。它
 覆盖模型和 generation 参数；省略的可选参数不发送给 Provider。配置仅在 Backend 重启时重载，
 不提供请求级切换、管理 API 或前端配置页。
 
-三类 Prompt 由版本化 `ChatPromptTemplate` 统一渲染。一次调用使用的同一份消息同时参与
+三类 Prompt 由版本化 `ChatPromptTemplate` 统一渲染。首次路由可配置 Structured Output/JSON
+fallback 或 native `bind_tools/tool_calls`；两者都只生成调用建议，不直接触发 Runtime，也不
+启动 AgentExecutor。一次调用使用的同一份消息同时参与
 Prompt digest，避免审计摘要和实际请求分叉。Provider 返回的 `reasoning_content`、完整原始
 响应和完整 Prompt 不进入日志、数据库或公共响应。
 
@@ -290,7 +317,8 @@ ToolRun 保存执行时的：
 
 LLMCall 审计保存实际 provider/model、安全 Catalog 引用与 Hash 或固定 Tool 上下文、受控
 Structured Output 摘要、Prompt digest，以及带 schema version 的有效 generation 参数。领域层
-仍可读取旧版 `candidate_input` 摘要；新调用保存 `candidate_input_delta` 与可选局部历史引用。
+仍可读取旧版 `candidate_input` 摘要；新的首次路由保存 `proposed_arguments`，只有已绑定 Managed
+Task 的补参提取保存 `candidate_input_delta` 与可选局部历史引用。
 nullable `context_snapshot` 使用严格的 ContextSnapshot v1 应用层 schema，记录策略、模型、预算、
 token 统计、选中来源、局部引用映射和 digest，但不保存完整 Prompt。Snapshot 的 canonical JSON
 超过 128 KiB 时只聚合审计元数据，保留首尾来源、类型计数和完整有序来源集合 digest；该聚合
@@ -301,7 +329,7 @@ token 统计、选中来源、局部引用映射和 digest，但不保存完整 
 
 ## ZTA35G Runtime 合同
 
-当前 Tool 只接受 ZTA35G 材料与受控热处理参数，能够生成 SEM，并按 requested outputs 返回
+当前 ZTA35G Managed Tool 只接受 ZTA35G 材料与受控热处理参数，能够生成 SEM，并按 requested outputs 返回
 力学性能。即使只请求力学性能，Runtime 仍会生成中间 SEM。
 
 固定推理参数属于 Backend、Mock Runtime、真实 Runtime 和测试共同维护的合同：
@@ -339,7 +367,7 @@ Conversation 记忆当前也不包含跨 Conversation 共享、滚动摘要、�
 
 以下变化不是局部实现细节，必须先确认产品/架构范围：
 
-- 把默认应用组合扩为多 Tool，或引入动态发现、上传、卸载；
+- 引入动态 Tool 发现、上传、卸载、生产 Side-effect Tool 或自动多 Tool 编排；
 - 引入 Worker、消息队列、Redis、流式推送或跨进程调度；
 - 引入登录、多用户权限或新的数据隔离模型；
 - 允许用户上传真实 SEM/EBSD 或其他文件；

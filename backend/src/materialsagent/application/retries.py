@@ -24,6 +24,7 @@ from materialsagent.application.result_service import (
     ToolResultQueryService,
 )
 from materialsagent.application.tool_execution import ToolExecutionService
+from materialsagent.application.tool_invocations import InvocationService
 from materialsagent.application.tool_workflow import ToolWorkflowService
 from materialsagent.domain.models.explanation import NaturalLanguageExplanation
 from materialsagent.domain.models.llm_call import LLMCall
@@ -57,11 +58,13 @@ class ToolRetryService:
         tool_execution_service: ToolExecutionService,
         tool_workflow_service: ToolWorkflowService,
         result_query_service: ToolResultQueryService,
+        invocation_service: InvocationService,
     ) -> None:
         self._unit_of_work_factory = unit_of_work_factory
         self._tool_execution_service = tool_execution_service
         self._tool_workflow_service = tool_workflow_service
         self._result_query_service = result_query_service
+        self._invocation_service = invocation_service
 
     def retry(
         self,
@@ -101,11 +104,14 @@ class ToolRetryService:
             idempotency_key=key,
             request_digest=digest,
         )
-        if not reservation.idempotency_replayed:
-            self._tool_workflow_service.execute_reserved_retry(
-                actor,
-                tool_run_id=reservation.tool_run.tool_run_id,
-            )
+        self._invocation_service.execute_managed_retry(
+            actor,
+            task_id=task_id,
+            tool_run_id=reservation.tool_run.tool_run_id,
+            request_id=request_id,
+            idempotency_key=key,
+            workflow_service=self._tool_workflow_service,
+        )
         return self._load_current(
             actor,
             task_id=task_id,

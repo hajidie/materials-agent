@@ -30,6 +30,7 @@ def test_openapi_exposes_strict_discriminated_timeline_contract() -> None:
         "TimelineDataView",
         "UserMessageTimelineItemView",
         "AssistantMessageTimelineItemView",
+        "ToolInvocationTimelineItemView",
         "ToolTaskTimelineItemView",
     ):
         assert components[name]["additionalProperties"] is False
@@ -39,5 +40,6 @@ def test_openapi_exposes_strict_discriminated_timeline_contract() -> None:
     assert set(items["discriminator"]["mapping"]) == {
         "USER_MESSAGE",
         "ASSISTANT_MESSAGE",
+        "TOOL_INVOCATION",
         "TOOL_TASK",
     }

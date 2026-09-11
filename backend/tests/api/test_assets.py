@@ -274,7 +274,7 @@ def test_conversation_delete_snapshots_real_asset_and_cleans_storage_after_commi
             "route": "TOOL_CANDIDATES",
             "candidates": [{
                 "tool_id": "zta35g_sem_virtual_lab",
-                "candidate_input_delta": {
+                "proposed_arguments": {
                     "material": "ZTA35G",
                     "solution_temperature": {"value": 1000, "unit": "°C"},
                     "solution_time": {"value": 3, "unit": "h"},

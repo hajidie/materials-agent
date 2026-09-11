@@ -52,7 +52,7 @@ def _default_tool_payload() -> dict[str, object]:
         "candidates": [
             {
                 "tool_id": "zta35g_sem_virtual_lab",
-                "candidate_input_delta": {
+                "proposed_arguments": {
                     "material": "ZTA35G",
                     **_default_parameters(),
                     "requested_outputs": ["sem_image", "mechanical_properties"],
@@ -92,7 +92,7 @@ def default_mock_responder(
             "route": "TOOL_CANDIDATES",
             "candidates": [{
                 "tool_id": "zta35g_sem_virtual_lab",
-                "candidate_input_delta": {
+                "proposed_arguments": {
                     "material": "ZTA35G",
                     **parameters,
                     "requested_outputs": ["sem_image", "mechanical_properties"],
@@ -103,7 +103,7 @@ def default_mock_responder(
         payload = _default_tool_payload()
         parameters = _default_parameters()
         parameters["aging_temperature"] = {"value": 730, "unit": "°C"}
-        payload["candidates"][0]["candidate_input_delta"].update(parameters)  # type: ignore[index,union-attr]
+        payload["candidates"][0]["proposed_arguments"].update(parameters)  # type: ignore[index,union-attr]
         return payload
     if "歧义" in content:
         parameters = _default_parameters()
@@ -115,7 +115,7 @@ def default_mock_responder(
             "route": "TOOL_CANDIDATES",
             "candidates": [{
                 "tool_id": "zta35g_sem_virtual_lab",
-                "candidate_input_delta": {
+                "proposed_arguments": {
                     "material": "ZTA35G",
                     **parameters,
                     "requested_outputs": ["sem_image"],
@@ -126,12 +126,12 @@ def default_mock_responder(
     if "solution_time = 180 min" in lowered:
         parameters = _default_parameters()
         parameters["solution_time"] = {"value": 180, "unit": "min"}
-        payload["candidates"][0]["candidate_input_delta"].update(parameters)  # type: ignore[index,union-attr]
+        payload["candidates"][0]["proposed_arguments"].update(parameters)  # type: ignore[index,union-attr]
         return payload
     if "越界温度" in content:
         parameters = _default_parameters()
         parameters["solution_temperature"] = {"value": 1200, "unit": "°C"}
-        payload["candidates"][0]["candidate_input_delta"].update(parameters)  # type: ignore[index,union-attr]
+        payload["candidates"][0]["proposed_arguments"].update(parameters)  # type: ignore[index,union-attr]
         return payload
     if "完整合法" in content:
         return payload
@@ -173,12 +173,13 @@ def _decode(payload: Mapping[str, object]) -> ChatOrchestrationResult:
             if not isinstance(item, Mapping):
                 raise ValueError("candidate must be an object.")
             if set(item) not in (
-                {"tool_id", "candidate_input_delta"},
-                {"tool_id", "candidate_input_delta", "history_reference"},
+                {"tool_id", "proposed_arguments"},
+                {"tool_id", "proposed_arguments", "history_reference"},
             ):
                 raise ValueError("candidate has missing or unknown fields.")
+            proposed_arguments = item.get("proposed_arguments")
             if not isinstance(item["tool_id"], str) or not isinstance(
-                item["candidate_input_delta"], Mapping
+                proposed_arguments, Mapping
             ):
                 raise ValueError("candidate has invalid fields.")
             history_reference = item.get("history_reference")
@@ -195,7 +196,7 @@ def _decode(payload: Mapping[str, object]) -> ChatOrchestrationResult:
             decoded.append(
                 ToolCandidateProposal(
                     tool_id=item["tool_id"],
-                    candidate_input_delta=item["candidate_input_delta"],
+                    proposed_arguments=proposed_arguments,
                     history_reference=(
                         None
                         if history_reference is None

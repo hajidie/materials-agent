@@ -21,6 +21,9 @@ from materialsagent.api.routes.tools import router as tools_router
 from materialsagent.api.routes.tool_results import (
     router as tool_results_router,
 )
+from materialsagent.api.routes.tool_invocations import (
+    router as tool_invocations_router,
+)
 from materialsagent.application.context import ActorContext
 from materialsagent.application.conversation_cleanup import ConversationCleanupService
 from materialsagent.application.asset_service import AssetService
@@ -72,10 +75,24 @@ from materialsagent.application.tools import (
     build_tool_registry,
 )
 from materialsagent.application.tool_registry import ToolRegistry
+from materialsagent.application.tool_invocations import (
+    ExecutorRouter,
+    InvocationService,
+    ManagedExecutor,
+    StandardSyncExecutor,
+)
+from materialsagent.application.fake_side_effect_tool import (
+    FAKE_SIDE_EFFECT_PERMISSION,
+)
+from materialsagent.domain.ports.tool_authorization import (
+    EmptyPermissionAuthorizationService,
+    ExactPermissionAuthorizationService,
+)
 from materialsagent.domain.ports.chat_orchestration import ChatOrchestrationPort
 from materialsagent.domain.ports.tool_input_extraction import (
     ToolInputExtractionPort,
 )
+from materialsagent.domain.ports.tool_registry import ToolExecutionProfile
 from materialsagent.domain.ports.storage import (
     StoredObjectMetadata,
     StorageService,
@@ -322,6 +339,7 @@ def create_app(
     tool_retry_service: ToolRetryService | None = None,
     explanation_retry_service: ExplanationRetryService | None = None,
     conversation_cleanup_service: ConversationCleanupService | None = None,
+    invocation_service: InvocationService | None = None,
     m7_tool_chain_enabled: bool | None = None,
 ) -> FastAPI:
     resolved_settings = settings or load_settings()
@@ -379,7 +397,22 @@ def create_app(
                 token=runtime_config.token.get_secret_value(),
                 timeout_seconds=runtime_config.timeout_seconds,
             )
-        resolved_tool_registry = build_tool_registry(runtime_client)
+        resolved_tool_registry = build_tool_registry(
+            runtime_client,
+            enable_dev_fake_side_effect_tool=(
+                resolved_settings.enable_dev_fake_side_effect_tool
+            ),
+        )
+    if (
+        resolved_settings.app_env == "production"
+        and any(
+            registration.execution_profile is ToolExecutionProfile.SIDE_EFFECT
+            for registration in resolved_tool_registry.list_registered()
+        )
+    ):
+        raise ConfigurationError(
+            "Side-effect Tools are forbidden in the production Catalog."
+        )
     resolved_tool_catalog_service = (
         tool_catalog_service or ToolCatalogService(resolved_tool_registry)
     )
@@ -392,6 +425,7 @@ def create_app(
     resolved_tool_workflow_service = tool_workflow_service
     resolved_tool_retry_service = tool_retry_service
     resolved_explanation_retry_service = explanation_retry_service
+    resolved_invocation_service = invocation_service
     process_cutoff = clock() if clock is not None else datetime.now(timezone.utc)
     resolved_chat_orchestration_port = chat_orchestration_port
     resolved_tool_input_extraction_port = tool_input_extraction_port
@@ -567,6 +601,23 @@ def create_app(
                 resolved_explanation_service,
                 clock=clock,
             )
+        if resolved_invocation_service is None:
+            authorization = (
+                ExactPermissionAuthorizationService(
+                    (FAKE_SIDE_EFFECT_PERMISSION,)
+                )
+                if resolved_settings.enable_dev_fake_side_effect_tool
+                else EmptyPermissionAuthorizationService()
+            )
+            resolved_invocation_service = InvocationService(
+                resolved_unit_of_work_factory,
+                resolved_tool_registry,
+                ExecutorRouter((StandardSyncExecutor(), ManagedExecutor())),
+                authorization=authorization,
+                clock=clock,
+                id_factory=id_factory,
+                managed_workflow_service=resolved_tool_workflow_service,
+            )
         if (
             resolved_tool_retry_service is None
             and resolved_tool_workflow_service is not None
@@ -578,6 +629,7 @@ def create_app(
                 resolved_tool_execution_service,
                 resolved_tool_workflow_service,
                 resolved_tool_result_query_service,
+                resolved_invocation_service,
             )
         if (
             resolved_explanation_retry_service is None
@@ -591,6 +643,8 @@ def create_app(
             auto_tool_chain_enabled
             and resolved_tool_workflow_service is not None
         )
+        if resolved_invocation_service is None:
+            raise ConfigurationError("Tool Invocation service is unavailable.")
         if resolved_chat_orchestration_service is None:
             if resolved_chat_orchestration_port is None:
                 raise ConfigurationError("Invalid LLM adapter configuration.")
@@ -604,6 +658,7 @@ def create_app(
                 tool_input_extraction_port=(
                     resolved_tool_input_extraction_port
                 ),
+                invocation_service=resolved_invocation_service,
             )
         else:
             resolved_chat_orchestration_service = (
@@ -628,6 +683,7 @@ def create_app(
             TimelineCursorCodec(
                 resolved_settings.timeline_cursor_signing_key
             ),
+            resolved_invocation_service,
         )
 
     request_logger = configure_logging(resolved_settings.log_level)
@@ -679,6 +735,7 @@ def create_app(
     app.state.explanation_retry_service = (
         resolved_explanation_retry_service
     )
+    app.state.invocation_service = resolved_invocation_service
     app.state.m5_dev_routes_enabled = resolved_settings.m5_dev_routes_enabled
 
     @app.middleware("http")
@@ -716,6 +773,7 @@ def create_app(
     app.include_router(timeline_router)
     app.include_router(tools_router)
     app.include_router(tool_results_router)
+    app.include_router(tool_invocations_router)
     app.add_exception_handler(ApplicationError, _application_error_handler)
     app.add_exception_handler(
         RequestValidationError,

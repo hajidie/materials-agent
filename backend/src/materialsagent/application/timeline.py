@@ -22,6 +22,7 @@ from materialsagent.application.explanation_service import (
 from materialsagent.application.result_service import (
     ResultArtifactProjection,
 )
+from materialsagent.application.tool_invocations import InvocationService, PublicInvocation
 from materialsagent.domain.models.conversation import Conversation
 from materialsagent.domain.models.explanation import (
     NaturalLanguageExplanation,
@@ -41,6 +42,7 @@ from materialsagent.domain.ports.unit_of_work import PersistenceError
 _RANKS = {
     "USER_MESSAGE": 10,
     "ASSISTANT_MESSAGE": 20,
+    "TOOL_INVOCATION": 25,
     "TOOL_TASK": 30,
 }
 _INPUT_THREAD_LIMIT = 50
@@ -148,7 +150,7 @@ class NeedsInputSummary:
 class MessageTimelineItem:
     item_type: Literal["USER_MESSAGE", "ASSISTANT_MESSAGE"]
     item_id: str
-    task_id: str
+    task_id: str | None
     anchor_at: datetime
     message: PublicMessage
 
@@ -171,9 +173,19 @@ class ToolTaskTimelineItem:
     latest_explanation_failure: PublicExplanationSummary | None
     needs_input: NeedsInputSummary | None
     errors: tuple[SafeTimelineError, ...]
+    invocation: PublicInvocation | None = None
 
 
-TimelineItem = MessageTimelineItem | ToolTaskTimelineItem
+@dataclass(frozen=True, slots=True)
+class ToolInvocationTimelineItem:
+    item_type: Literal["TOOL_INVOCATION"]
+    item_id: str
+    task_id: None
+    anchor_at: datetime
+    invocation: PublicInvocation
+
+
+TimelineItem = MessageTimelineItem | ToolTaskTimelineItem | ToolInvocationTimelineItem
 
 
 @dataclass(frozen=True, slots=True)
@@ -387,9 +399,11 @@ class TimelineQueryService:
         self,
         query: TimelineQueryPort,
         cursor_codec: TimelineCursorCodec,
+        invocation_service: InvocationService | None = None,
     ) -> None:
         self._query = query
         self._cursor_codec = cursor_codec
+        self._invocation_service = invocation_service
 
     def get_page(
         self,
@@ -414,6 +428,14 @@ class TimelineQueryService:
                 expected_conversation_id=conversation_id,
             )
         )
+        public_invocations = (
+            []
+            if self._invocation_service is None
+            else self._invocation_service.list_for_conversation(
+                actor_context,
+                conversation_id,
+            )
+        )
         try:
             page = self._query.fetch_owned_page(
                 actor_id=actor_context.actor_id,
@@ -433,6 +455,7 @@ class TimelineQueryService:
                 actor_context,
                 conversation_id=conversation_id,
                 page=page,
+                public_invocations=public_invocations,
             )
         except ApplicationInternalError:
             raise
@@ -468,6 +491,7 @@ class TimelineQueryService:
         *,
         conversation_id: str,
         page,
+        public_invocations: list[PublicInvocation] | None = None,
     ) -> tuple[TimelineItem, ...]:
         if (
             page.conversation.conversation_id != conversation_id
@@ -482,6 +506,10 @@ class TimelineQueryService:
             )
         messages = {item.message_id: item for item in page.messages}
         tasks = {item.task_id: item for item in page.tasks}
+        invocations = {
+            item.run.invocation_run_id: item
+            for item in (public_invocations or [])
+        }
         if len(messages) != len(page.messages) or len(tasks) != len(page.tasks):
             raise ApplicationInternalError(
                 conversation_id=conversation_id
@@ -502,7 +530,7 @@ class TimelineQueryService:
                 raise ApplicationInternalError(
                     conversation_id=conversation_id
                 )
-        key_task_ids = {key.task_id for key in page.keys}
+        key_task_ids = {key.task_id for key in page.keys if key.task_id is not None}
         if not key_task_ids <= set(tasks):
             raise ApplicationInternalError(
                 conversation_id=conversation_id
@@ -585,13 +613,38 @@ class TimelineQueryService:
                 raise ApplicationInternalError(
                     conversation_id=conversation_id
                 )
+            if key.item_type == "TOOL_INVOCATION":
+                invocation = invocations.get(key.item_id)
+                if (
+                    invocation is None
+                    or invocation.run.task_id is not None
+                    or invocation.run.created_at != key.anchor_at
+                ):
+                    raise ApplicationInternalError(conversation_id=conversation_id)
+                result.append(
+                    ToolInvocationTimelineItem(
+                        item_type="TOOL_INVOCATION",
+                        item_id=key.item_id,
+                        task_id=None,
+                        anchor_at=key.anchor_at,
+                        invocation=invocation,
+                    )
+                )
+                continue
             if key.item_type != "TOOL_TASK":
                 message = messages.get(key.item_id)
-                message_task = tasks.get(key.task_id)
+                message_task = (
+                    None if key.task_id is None else tasks.get(key.task_id)
+                )
                 if (
                     message is None
-                    or message_task is None
-                    or message_task.task_type == "TOOL_EXECUTION"
+                    or (
+                        key.task_id is not None
+                        and (
+                            message_task is None
+                            or message_task.task_type == "TOOL_EXECUTION"
+                        )
+                    )
                     or message.task_id != key.task_id
                     or message.role
                     != (
@@ -860,6 +913,18 @@ class TimelineQueryService:
                     ),
                     needs_input=_needs_input(task, task_revisions),
                     errors=tuple(errors),
+                    invocation=max(
+                        (
+                            invocation
+                            for invocation in invocations.values()
+                            if invocation.run.task_id == task.task_id
+                        ),
+                        key=lambda invocation: (
+                            invocation.run.created_at,
+                            invocation.run.invocation_run_id,
+                        ),
+                        default=None,
+                    ),
                 )
             )
         return tuple(result)

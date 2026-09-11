@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Annotated, Any
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request, status
 from pydantic import BaseModel, ConfigDict
@@ -32,9 +32,26 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class PublicToolCatalogItemView(StrictModel):
+    tool_id: str
+    display_name: str
+    description: str
+    status: str
+    execution_profile: str
+    confirmation_required: bool
+    supported_outputs: list[str]
+    limitations: list[str]
+    availability: str
+
+
+class CatalogListResponse(StrictModel):
+    request_id: str
+    data: list[PublicToolCatalogItemView]
+
+
 class CatalogResponse(StrictModel):
     request_id: str
-    data: Any
+    data: PublicToolCatalogItemView
 
 
 class ExecuteToolRequest(StrictModel):
@@ -98,14 +115,17 @@ def _project_tool_run(
     }
 
 
-@router.get("/api/v1/tools", response_model=CatalogResponse)
+@router.get("/api/v1/tools", response_model=CatalogListResponse)
 def list_tools(
     request: Request,
     service: Annotated[ToolCatalogService, Depends(get_tool_catalog_service)],
-) -> CatalogResponse:
-    return CatalogResponse(
+) -> CatalogListResponse:
+    return CatalogListResponse(
         request_id=request.state.request_id,
-        data=service.list_entries(),
+        data=[
+            PublicToolCatalogItemView.model_validate(item)
+            for item in service.list_entries()
+        ],
     )
 
 
@@ -119,7 +139,10 @@ def get_tool(
         entry = service.get_entry(tool_id)
     except UnknownToolError:
         raise ResourceNotFoundError() from None
-    return CatalogResponse(request_id=request.state.request_id, data=entry)
+    return CatalogResponse(
+        request_id=request.state.request_id,
+        data=PublicToolCatalogItemView.model_validate(entry),
+    )
 
 
 @router.post(

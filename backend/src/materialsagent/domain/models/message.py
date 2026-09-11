@@ -30,7 +30,7 @@ def _require_utc(value: datetime, field_name: str) -> None:
 class Message:
     message_id: str
     conversation_id: str
-    task_id: str
+    task_id: str | None
     actor_id: str
     request_id: str
     role: str
@@ -44,11 +44,12 @@ class Message:
         for field_name in (
             "message_id",
             "conversation_id",
-            "task_id",
             "actor_id",
             "request_id",
         ):
             _require_non_blank(getattr(self, field_name), field_name)
+        if self.task_id is not None:
+            _require_non_blank(self.task_id, "task_id")
         if self.role not in MESSAGE_ROLES:
             raise ValueError("role must be USER or ASSISTANT.")
         if self.generation_source not in GENERATION_SOURCES:
@@ -88,7 +89,7 @@ class Message:
         *,
         message_id: str,
         conversation_id: str,
-        task_id: str,
+        task_id: str | None,
         actor_id: str,
         request_id: str,
         content_text: str,

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from materialsagent.application.idempotency import (
     IdempotencyOutcome,
+    MESSAGE_SUBMIT,
     TASK_CREATE,
     TASK_INPUT_SUPPLEMENT,
     canonical_request_digest,
@@ -46,7 +47,7 @@ TitleGenerator = Callable[[str], str]
 class PreparedSubmission:
     conversation_id: str
     user_message: Message
-    task: Task
+    task: Task | None
     submission_mode: str = NEW_TASK
     idempotency_record_id: str | None = None
     idempotency_outcome: IdempotencyOutcome = IdempotencyOutcome.CREATED
@@ -110,7 +111,7 @@ class MessageSubmissionService:
             None if target_task_id is None else target_task_id.strip()
         )
         operation = (
-            TASK_CREATE
+            MESSAGE_SUBMIT
             if submission_mode == NEW_TASK
             else TASK_INPUT_SUPPLEMENT
         )
@@ -123,11 +124,7 @@ class MessageSubmissionService:
             }
         )
         timestamp = _validated_utc_now(self._clock)
-        task_id = (
-            self._id_factory("task")
-            if operation == TASK_CREATE
-            else normalized_target
-        )
+        task_id = normalized_target
         message_id = self._id_factory("msg")
         record_id = self._id_factory("idem")
         should_generate_title = False
@@ -160,7 +157,7 @@ class MessageSubmissionService:
                 )
                 if conversation is None:
                     raise ResourceNotFoundError()
-                if operation == TASK_CREATE:
+                if operation == MESSAGE_SUBMIT:
                     is_first_message = (
                         unit_of_work.messages.get_latest_for_conversation(
                             conversation_id,
@@ -171,13 +168,9 @@ class MessageSubmissionService:
                     should_generate_title = (
                         is_first_message and conversation.title is None
                     )
-                    task = Task.pending(
-                        task_id=task_id,
-                        conversation_id=conversation_id,
-                        actor_id=actor_context.actor_id,
-                        created_at=timestamp,
-                    )
+                    task = None
                 else:
+                    assert task_id is not None
                     task = unit_of_work.tasks.get_owned_for_update(
                         task_id,
                         actor_context.actor_id,
@@ -221,7 +214,7 @@ class MessageSubmissionService:
                 message = Message.user(
                     message_id=message_id,
                     conversation_id=conversation_id,
-                    task_id=task.task_id,
+                    task_id=None if task is None else task.task_id,
                     actor_id=actor_context.actor_id,
                     request_id=request_id,
                     content_text=normalized_content,
@@ -234,7 +227,7 @@ class MessageSubmissionService:
                     idempotency_key=validated_key,
                     request_digest=request_digest,
                     first_request_id=request_id,
-                    task_id=task.task_id,
+                    task_id=None if task is None else task.task_id,
                     message_id=message.message_id,
                     task_input_revision_id=None,
                     tool_run_id=None,
@@ -244,8 +237,6 @@ class MessageSubmissionService:
                     conversation_id=conversation_id,
                 )
                 conversation.updated_at = timestamp
-                if operation == TASK_CREATE:
-                    unit_of_work.tasks.add(task)
                 unit_of_work.messages.add(message)
                 unit_of_work.idempotency_records.add(record)
                 if unit_of_work.conversations.update(conversation) is None:
@@ -336,32 +327,38 @@ class MessageSubmissionService:
                 conversation_id=conversation_id,
                 task_id=record.task_id,
             )
-        task = (
-            None
-            if record.task_id is None
-            else unit_of_work.tasks.get_owned(
-                record.task_id,
-                actor_context.actor_id,
-            )
-        )
         message = (
             None
             if record.message_id is None
             else unit_of_work.messages.get(record.message_id)
+        )
+        task_id = record.task_id or (None if message is None else message.task_id)
+        task = (
+            None
+            if task_id is None
+            else unit_of_work.tasks.get_owned(task_id, actor_context.actor_id)
         )
         conversation = unit_of_work.conversations.get_owned(
             conversation_id,
             actor_context.actor_id,
         )
         if (
-            task is None
-            or message is None
+            message is None
             or conversation is None
-            or task.conversation_id != conversation_id
             or message.conversation_id != conversation_id
-            or message.task_id != task.task_id
             or message.actor_id != actor_context.actor_id
             or message.request_id != record.first_request_id
+            or (
+                task is not None
+                and (
+                    task.conversation_id != conversation_id
+                    or message.task_id != task.task_id
+                )
+            )
+            or (
+                record.operation == TASK_INPUT_SUPPLEMENT
+                and task is None
+            )
         ):
             raise ResourceNotFoundError()
         return PreparedSubmission(
@@ -370,7 +367,7 @@ class MessageSubmissionService:
             task=task,
             submission_mode=(
                 NEW_TASK
-                if record.operation == TASK_CREATE
+                if record.operation in {MESSAGE_SUBMIT, TASK_CREATE}
                 else SUPPLEMENT_TASK
             ),
             idempotency_record_id=record.idempotency_record_id,

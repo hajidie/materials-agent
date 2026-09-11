@@ -142,6 +142,52 @@ def test_user_message_factory_rejects_blank_content() -> None:
         )
 
 
+def test_existing_unbound_message_can_bind_new_task_in_same_unit_of_work(
+    migrated_database_engine: Engine,
+) -> None:
+    Conversation, Message, Task, _ = _domain_types()
+    actor_id = _opaque("actor")
+    conversation = Conversation(
+        conversation_id=_opaque("conversation"),
+        actor_id=actor_id,
+        title=None,
+        created_at=BASE_TIME,
+        updated_at=BASE_TIME,
+    )
+    message = Message.user(
+        message_id=_opaque("message"),
+        conversation_id=conversation.conversation_id,
+        task_id=None,
+        actor_id=actor_id,
+        request_id=_opaque("request"),
+        content_text="这是一条尚未路由的消息。",
+        created_at=BASE_TIME,
+    )
+    task = Task.pending(
+        task_id=_opaque("task"),
+        conversation_id=conversation.conversation_id,
+        actor_id=actor_id,
+        created_at=BASE_TIME,
+    )
+    factory = _uow_factory(migrated_database_engine)
+
+    _persist_actor(migrated_database_engine, actor_id)
+    with factory() as unit_of_work:
+        unit_of_work.conversations.add(conversation)
+        unit_of_work.messages.add(message)
+        unit_of_work.commit()
+
+    with factory() as unit_of_work:
+        unit_of_work.tasks.add(task)
+        bound = unit_of_work.messages.bind_task(message.message_id, task.task_id)
+        unit_of_work.commit()
+
+    assert bound is not None
+    assert bound.task_id == task.task_id
+    with factory() as unit_of_work:
+        assert unit_of_work.messages.get(message.message_id) == bound
+
+
 def test_domain_rejects_non_utc_times() -> None:
     conversation = _valid_facts()[0]
 

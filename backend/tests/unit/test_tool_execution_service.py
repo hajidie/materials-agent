@@ -35,6 +35,7 @@ from materialsagent.domain.ports.tool_registry import (
     AuthorizationDecision,
     ExecutionPolicy,
     ToolAction,
+    ToolExecutionPolicy,
     ToolStatus,
 )
 from materialsagent.domain.ports.unit_of_work import PersistenceError
@@ -105,6 +106,7 @@ def _llm_call() -> LLMCall:
         llm_call_id="llm_1",
         task_id="task_1",
         conversation_id="conversation_1",
+        source_message_id="message_1",
         request_id="message_request_1",
         purpose="CHAT_ORCHESTRATION",
         input_result_id=None,
@@ -409,15 +411,21 @@ def _service(
         if execution_policy is ExecutionPolicy.EXISTING_TASK_ONLY
         else ToolStatus.DISABLED
     )
+    registration = build_zta35g_tool_definition(client)
     registration = replace(
-        build_zta35g_tool_definition(client),
-        version=registration_version,
-        status=status,
-        execution_policy=execution_policy,
-        **(
-            {}
-            if registration_input_schema is None
-            else {"input_schema": registration_input_schema}
+        registration,
+        definition=replace(
+            registration.definition,
+            version=registration_version,
+            status=status,
+            tool_execution_policy=ToolExecutionPolicy(
+                lifecycle_policy=execution_policy,
+            ),
+            **(
+                {}
+                if registration_input_schema is None
+                else {"input_schema": registration_input_schema}
+            ),
         ),
     )
     registry = ToolRegistry((registration,))
@@ -486,12 +494,18 @@ def _current_registry(
         if execution_policy is ExecutionPolicy.EXISTING_TASK_ONLY
         else ToolStatus.DISABLED
     )
+    registration = build_zta35g_tool_definition(client)
     registration = replace(
-        build_zta35g_tool_definition(client),
-        version=version,
-        status=status,
-        execution_policy=execution_policy,
-        **({} if input_schema is None else {"input_schema": input_schema}),
+        registration,
+        definition=replace(
+            registration.definition,
+            version=version,
+            status=status,
+            tool_execution_policy=ToolExecutionPolicy(
+                lifecycle_policy=execution_policy,
+            ),
+            **({} if input_schema is None else {"input_schema": input_schema}),
+        ),
     )
     return ToolRegistry((registration,))
 

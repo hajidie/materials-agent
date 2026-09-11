@@ -541,7 +541,8 @@ def test_timeline_projects_full_selected_chain_without_external_calls(
         "runtime_url",
         "token",
         "weight_path",
-        "prompt",
+        "prompt_template",
+        "prompt_digest",
         "traceback",
         ":\\",
     ):

@@ -23,6 +23,7 @@ from materialsagent.domain.models.actor import Actor
 from materialsagent.domain.models.asset import Asset
 from materialsagent.domain.models.conversation import Conversation
 from materialsagent.domain.models.llm_call import LLMCall
+from materialsagent.domain.models.message import Message
 from materialsagent.domain.models.task import Task
 from materialsagent.domain.models.task_input_revision import TaskInputRevision
 from materialsagent.domain.models.tool_run import ToolRun
@@ -421,6 +422,17 @@ def _seed(
             bound_schema_hash=SCHEMA_HASH,
         )
         unit_of_work.tasks.add(task)
+        unit_of_work.messages.add(
+            Message.user(
+                message_id="message_1",
+                conversation_id="conversation_1",
+                task_id="task_1",
+                actor_id="actor_1",
+                request_id="request_1",
+                content_text="tool request",
+                created_at=BASE,
+            )
+        )
         if asset_task_id != "task_1":
             unit_of_work.tasks.add(
                 replace(
@@ -433,6 +445,7 @@ def _seed(
                 llm_call_id="llm_chat_1",
                 task_id="task_1",
                 conversation_id="conversation_1",
+                source_message_id="message_1",
                 request_id="request_1",
                 purpose="CHAT_ORCHESTRATION",
                 input_result_id=None,

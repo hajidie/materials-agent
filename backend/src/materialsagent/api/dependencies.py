@@ -27,6 +27,7 @@ from materialsagent.application.tool_execution import (
     ToolRunQueryService,
 )
 from materialsagent.application.tools import ToolCatalogService
+from materialsagent.application.tool_invocations import InvocationService
 
 
 def _required_app_state(request: Request, name: str):
@@ -80,6 +81,10 @@ def get_explanation_retry_service(
 
 def get_tool_catalog_service(request: Request) -> ToolCatalogService:
     return _required_app_state(request, "tool_catalog_service")
+
+
+def get_invocation_service(request: Request) -> InvocationService:
+    return _required_app_state(request, "invocation_service")
 
 
 def get_tool_execution_service(request: Request) -> ToolExecutionService:

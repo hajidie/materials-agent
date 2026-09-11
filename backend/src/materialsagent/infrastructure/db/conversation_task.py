@@ -235,7 +235,7 @@ class MessageRow(Base):
             name="ck_message_conversation_id_not_blank",
         ),
         CheckConstraint(
-            "length(btrim(task_id)) > 0",
+            "task_id IS NULL OR length(btrim(task_id)) > 0",
             name="ck_message_task_id_not_blank",
         ),
         CheckConstraint(
@@ -281,6 +281,11 @@ class MessageRow(Base):
             name="ck_message_template_source_role",
         ),
         UniqueConstraint("llm_call_id", name="uq_message_llm_call_id"),
+        UniqueConstraint(
+            "message_id",
+            "conversation_id",
+            name="uq_message_id_conversation",
+        ),
         Index(
             "ix_message_conversation_created",
             "conversation_id",
@@ -298,13 +303,13 @@ class MessageRow(Base):
         ),
         nullable=False,
     )
-    task_id: Mapped[str] = mapped_column(
+    task_id: Mapped[str | None] = mapped_column(
         ForeignKey(
             "task.task_id",
             name="fk_message_task",
             ondelete="CASCADE",
         ),
-        nullable=False,
+        nullable=True,
     )
     actor_id: Mapped[str] = mapped_column(
         ForeignKey(
@@ -738,6 +743,31 @@ class SQLAlchemyMessageRepository:
                     created_at=message.created_at,
                 )
             )
+        except SQLAlchemyError as error:
+            _raise_safe_persistence_error(error)
+
+    def bind_task(self, message_id: str, task_id: str) -> Message | None:
+        try:
+            # The unbound-message flow creates the Task and binds this existing
+            # Message in one unit of work.  SQLAlchemy has no ORM relationship
+            # between these rows, so flush the pending Task before issuing the
+            # FK-bearing Message update instead of relying on flush ordering.
+            self._session.flush()
+            row = self._session.get(
+                MessageRow,
+                message_id,
+                populate_existing=True,
+                with_for_update=True,
+            )
+            if row is None:
+                return None
+            if row.task_id == task_id:
+                return _message_from_row(row)
+            if row.task_id is not None:
+                return None
+            row.task_id = task_id
+            self._session.flush()
+            return _message_from_row(row)
         except SQLAlchemyError as error:
             _raise_safe_persistence_error(error)
 

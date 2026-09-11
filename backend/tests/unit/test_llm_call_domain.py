@@ -35,6 +35,7 @@ def _call(status: str = "PENDING", **overrides: object) -> object:
         "llm_call_id": "llm_call_domain",
         "task_id": "task_domain",
         "conversation_id": "conversation_domain",
+        "source_message_id": "message_domain",
         "request_id": "request_domain",
         "purpose": "CHAT_ORCHESTRATION",
         "input_result_id": None,
@@ -492,6 +493,87 @@ def test_versioned_provider_generation_parameters_are_generic_and_frozen() -> No
     assert call.generation_parameters == parameters
     with pytest.raises(TypeError):
         call.generation_parameters["top_k"] = 10
+
+
+@pytest.mark.parametrize("tool_calling_mode", ["structured", "native"])
+def test_chat_generation_parameters_accept_controlled_tool_calling_mode(
+    tool_calling_mode: str,
+) -> None:
+    parameters = {
+        "schema_version": 1,
+        "temperature": 0,
+        "max_tokens": 1024,
+        "reasoning_mode": "disabled",
+        "response_format": "json_object",
+        "streaming": False,
+        "tool_calling_mode": tool_calling_mode,
+    }
+
+    call = _call(
+        provider="deepseek",
+        model_name="deepseek-test",
+        generation_parameters=parameters,
+    )
+
+    assert call.generation_parameters == parameters
+
+
+@pytest.mark.parametrize(
+    ("purpose", "tool_calling_mode"),
+    [
+        ("CHAT_ORCHESTRATION", "automatic"),
+        ("CHAT_ORCHESTRATION", True),
+        ("TOOL_RESULT_EXPLANATION", "structured"),
+        ("TOOL_INPUT_EXTRACTION", "native"),
+    ],
+)
+def test_tool_calling_mode_is_chat_only_and_controlled(
+    purpose: str,
+    tool_calling_mode: object,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match="generation_parameters.tool_calling_mode",
+    ):
+        _call(
+            purpose=purpose,
+            input_result_id=(
+                "result_domain"
+                if purpose == "TOOL_RESULT_EXPLANATION"
+                else None
+            ),
+            structured_output_summary=(
+                None
+                if purpose == "TOOL_RESULT_EXPLANATION"
+                else (
+                    {"candidate_input_delta": {}}
+                    if purpose == "TOOL_INPUT_EXTRACTION"
+                    else {"route": "KNOWLEDGE_ANSWER"}
+                )
+            ),
+            tool_context_ref=(
+                {
+                    "tool_id": "zta35g_sem_virtual_lab",
+                    "version": "1",
+                    "schema_hash": "a" * 64,
+                }
+                if purpose == "TOOL_INPUT_EXTRACTION"
+                else None
+            ),
+            provider="deepseek",
+            model_name="deepseek-test",
+            generation_parameters={
+                "schema_version": 1,
+                "reasoning_mode": "disabled",
+                "response_format": (
+                    "text"
+                    if purpose == "TOOL_RESULT_EXPLANATION"
+                    else "json_object"
+                ),
+                "streaming": False,
+                "tool_calling_mode": tool_calling_mode,
+            },
+        )
 
 
 @pytest.mark.parametrize(

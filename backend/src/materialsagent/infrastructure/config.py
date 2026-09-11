@@ -5,7 +5,7 @@ from typing import Literal
 import unicodedata
 from urllib.parse import urlparse
 
-from pydantic import Field, SecretStr, ValidationError, field_validator
+from pydantic import Field, SecretStr, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -40,7 +40,7 @@ class AppSettings(BaseSettings):
         frozen=True,
     )
 
-    app_env: Literal["local", "test"] = "local"
+    app_env: Literal["local", "test", "production"] = "local"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     local_actor_id: str | None = None
 
@@ -65,6 +65,7 @@ class AppSettings(BaseSettings):
     zta35g_runtime_timeout_seconds: float = Field(default=10.0, gt=0, le=900)
     m5_dev_routes_enabled: bool = False
     timeline_cursor_signing_key: SecretStr | None = None
+    enable_dev_fake_side_effect_tool: bool = False
 
     @field_validator(
         "deepseek_api_key",
@@ -110,6 +111,12 @@ class AppSettings(BaseSettings):
             raise ValueError("Invalid timeline cursor signing key.")
         return value
 
+    @model_validator(mode="after")
+    def reject_dev_fake_in_production(self) -> "AppSettings":
+        if self.app_env == "production" and self.enable_dev_fake_side_effect_tool:
+            raise ValueError("Development fake Side-effect Tool is forbidden in production.")
+        return self
+
 
 ENVIRONMENT_FIELDS = {
     "APP_ENV": "app_env",
@@ -133,6 +140,7 @@ ENVIRONMENT_FIELDS = {
     "ZTA35G_RUNTIME_TIMEOUT_SECONDS": "zta35g_runtime_timeout_seconds",
     "M5_DEV_ROUTES_ENABLED": "m5_dev_routes_enabled",
     "TIMELINE_CURSOR_SIGNING_KEY": "timeline_cursor_signing_key",
+    "ENABLE_DEV_FAKE_SIDE_EFFECT_TOOL": "enable_dev_fake_side_effect_tool",
 }
 
 

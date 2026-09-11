@@ -336,6 +336,7 @@ def _explanation_attempt(
             llm_call_id=call_id,
             task_id=task_id,
             conversation_id=f"{task_id}_conversation",
+            source_message_id=f"{task_id}_message",
             request_id=f"{task_id}_explanation_request_{attempt_no:02}",
             purpose="TOOL_RESULT_EXPLANATION",
             input_result_id=result_id,

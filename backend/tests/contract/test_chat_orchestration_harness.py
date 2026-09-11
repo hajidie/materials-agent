@@ -113,9 +113,12 @@ def test_provider_visible_messages_define_output_and_missing_material_semantics(
         "zta35g_sem_virtual_lab",
         "solution_temperature",
         '"additionalProperties":false',
-        "schema_hash",
     ):
         assert semantic_anchor in system
+    assert '"version"' not in system
+    assert '"schema_hash"' not in system
+    assert '"required_permissions"' not in system
+    assert '"runtime_metadata"' not in system
     assert messages[1]["content"] == "自然语言样例输入"
 
 
@@ -217,7 +220,7 @@ def test_offline_adapter_contract_maps_fixture_payload_once(
         "candidates": [
             {
                 "tool_id": "zta35g_sem_virtual_lab",
-                "candidate_input_delta": {
+                    "proposed_arguments": {
                     "material": material,
                     **parameters,
                     "requested_outputs": list(requested_outputs),
@@ -263,7 +266,7 @@ def test_legacy_nested_candidate_parameters_cannot_pass_real_tool_normalizer() -
         "candidates": [
             {
                 "tool_id": "zta35g_sem_virtual_lab",
-                "candidate_input_delta": {
+                    "proposed_arguments": {
                     "material": "ZTA35G",
                     "candidate_parameters": _COMPLETE_PARAMETERS,
                     "requested_outputs": ["sem_image"],

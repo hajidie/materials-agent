@@ -14,8 +14,11 @@ from materialsagent.domain.ports.tool_registry import (
     RoutingCatalogEntry,
     RoutingCatalogSnapshot,
     ToolAction,
-    ToolDefinition,
+    ExecutionMode,
+    RegisteredTool,
     ToolRef,
+    ToolExecutionProfile,
+    PresentationMode,
     ToolStatus,
 )
 
@@ -87,19 +90,22 @@ def canonical_schema_hash(input_schema: Mapping[str, object]) -> str:
 class ToolRegistry:
     """Immutable, explicit process-local Tool registration boundary."""
 
-    def __init__(self, definitions: tuple[ToolDefinition, ...]) -> None:
-        if not definitions:
+    def __init__(self, registrations: tuple[RegisteredTool, ...]) -> None:
+        if not registrations:
             raise InvalidToolRegistrationError("At least one Tool definition is required.")
-        registrations: dict[str, ToolDefinition] = {}
-        for definition in definitions:
-            validated = self._validate(definition)
-            if validated.tool_id in registrations:
+        validated_registrations: dict[str, RegisteredTool] = {}
+        for registration in registrations:
+            validated = self._validate(registration)
+            if validated.tool_id in validated_registrations:
                 raise InvalidToolRegistrationError("Duplicate Tool registration.")
-            registrations[validated.tool_id] = validated
-        self._registrations = registrations
+            validated_registrations[validated.tool_id] = validated
+        self._registrations = validated_registrations
 
     @staticmethod
-    def _validate(definition: ToolDefinition) -> ToolDefinition:
+    def _validate(registration: RegisteredTool) -> RegisteredTool:
+        if not isinstance(registration, RegisteredTool):
+            raise InvalidToolRegistrationError("RegisteredTool is required.")
+        definition = registration.definition
         if not _TOOL_ID.fullmatch(definition.tool_id):
             raise InvalidToolRegistrationError("Tool ID is invalid.")
         if not isinstance(definition.version, str) or not definition.version.strip():
@@ -113,63 +119,108 @@ class ToolRegistry:
             raise InvalidToolRegistrationError("Tool lifecycle pair is invalid.")
         if definition.runtime_metadata.tool_id != definition.tool_id:
             raise InvalidToolRegistrationError("Runtime metadata Tool ID does not match.")
-        if definition.tool.metadata != definition.runtime_metadata:
+        target_metadata = getattr(registration.binding.execution_target, "metadata", None)
+        if (
+            definition.execution_profile is ToolExecutionProfile.MANAGED
+            and target_metadata != definition.runtime_metadata
+        ):
             raise InvalidToolRegistrationError("Tool runtime metadata must be Registry-owned.")
-        if definition.execution_policy is not ExecutionPolicy.NONE and not callable(definition.normalizer):
+        if (
+            definition.execution_profile is ToolExecutionProfile.MANAGED
+            and definition.execution_policy is not ExecutionPolicy.NONE
+            and not callable(registration.binding.normalizer)
+        ):
             raise InvalidToolRegistrationError("Executable Tool registration is incomplete.")
-        if definition.context_projector is not None and not callable(
-            definition.context_projector
+        if definition.execution_mode is ExecutionMode.ASYNC:
+            raise InvalidToolRegistrationError("ASYNC_TOOL_UNSUPPORTED")
+        policy = definition.tool_execution_policy
+        if (
+            definition.execution_profile is ToolExecutionProfile.SIDE_EFFECT
+            and (
+                not policy.confirmation_required
+                or not policy.idempotency_required
+                or not policy.audit_required
+                or not policy.required_permissions
+                or definition.confirmation_prompt is None
+            )
+        ):
+            raise InvalidToolRegistrationError(
+                "Side-effect Tool controls are incomplete."
+            )
+        if (
+            definition.execution_profile is not ToolExecutionProfile.MANAGED
+            and (
+                registration.binding.validator is None
+                or registration.binding.codec is None
+                or registration.binding.presenter is None
+            )
+        ):
+            raise InvalidToolRegistrationError("Standard Tool binding is incomplete.")
+        if (
+            definition.execution_profile is not ToolExecutionProfile.MANAGED
+            and definition.presentation_mode is PresentationMode.LLM_SUMMARY
+        ):
+            raise InvalidToolRegistrationError(
+                "Standard Tool presentation mode is not implemented."
+            )
+        if registration.binding.context_projector is not None and not callable(
+            registration.binding.context_projector
         ):
             raise InvalidToolRegistrationError("Tool context projector is invalid.")
         try:
             input_schema_bytes = _canonical_schema_bytes(definition.input_schema)
-            candidate_schema = definition.candidate_input_schema or {}
-            candidate_schema_bytes = _canonical_schema_bytes(candidate_schema)
+            proposal_schema_bytes = _canonical_schema_bytes(definition.proposal_schema or {})
+            output_schema_bytes = _canonical_schema_bytes(definition.output_schema)
             if len(input_schema_bytes) > MAX_SCHEMA_BYTES:
                 raise ValueError("Tool input schema exceeds the safe size limit.")
-            if len(candidate_schema_bytes) > MAX_SCHEMA_BYTES:
-                raise ValueError("Tool candidate schema exceeds the safe size limit.")
+            if len(proposal_schema_bytes) > MAX_SCHEMA_BYTES:
+                raise ValueError("Tool proposal schema exceeds the safe size limit.")
+            if len(output_schema_bytes) > MAX_SCHEMA_BYTES:
+                raise ValueError("Tool output schema exceeds the safe size limit.")
             schema_hash = hashlib.sha256(input_schema_bytes).hexdigest()
         except (TypeError, ValueError):
             raise InvalidToolRegistrationError("Tool input schema is invalid.") from None
-        return replace(definition, schema_hash=schema_hash)
+        return replace(
+            registration,
+            definition=replace(definition, schema_hash=schema_hash),
+        )
 
-    def resolve(self, tool_id: str, *, snapshot: RoutingCatalogSnapshot | None = None) -> ToolDefinition:
-        definition = self._registrations.get(tool_id)
-        if definition is None:
+    def resolve(self, tool_id: str, *, snapshot: RoutingCatalogSnapshot | None = None) -> RegisteredTool:
+        registration = self._registrations.get(tool_id)
+        if registration is None:
             raise UnknownToolError("Unknown Tool.")
         if snapshot is not None:
             matching = [entry for entry in snapshot.entries if entry.tool_id == tool_id]
-            if len(matching) != 1 or matching[0].ref != definition.ref:
+            if len(matching) != 1 or matching[0].ref != registration.ref:
                 raise UnknownToolError("Tool is not in the routing snapshot.")
-        return definition
+        return registration
 
-    def list_registered(self) -> tuple[ToolDefinition, ...]:
+    def list_registered(self) -> tuple[RegisteredTool, ...]:
         return tuple(self._registrations[tool_id] for tool_id in sorted(self._registrations))
 
     def routing_snapshot(self) -> RoutingCatalogSnapshot:
         return RoutingCatalogSnapshot(
             entries=tuple(
                 RoutingCatalogEntry(
-                    tool_id=definition.tool_id,
-                    version=definition.version,
-                    schema_hash=definition.schema_hash,
-                    display_name=definition.display_name,
-                    description=definition.description,
-                    input_schema=definition.input_schema,
-                    candidate_input_schema=definition.candidate_input_schema,
-                    supported_outputs=definition.supported_outputs,
+                    tool_id=registration.tool_id,
+                    version=registration.version,
+                    schema_hash=registration.schema_hash,
+                    display_name=registration.display_name,
+                    description=registration.description,
+                    input_schema=registration.input_schema,
+                    candidate_input_schema=registration.proposal_schema,
+                    supported_outputs=registration.supported_outputs,
                 )
-                for definition in self.list_registered()
-                if definition.status is ToolStatus.ACTIVE
-                and definition.execution_policy is ExecutionPolicy.ANY_TASK
+                for registration in self.list_registered()
+                if registration.status is ToolStatus.ACTIVE
+                and registration.execution_policy is ExecutionPolicy.ANY_TASK
             )
         )
 
     def authorize(
         self,
         *,
-        registration: ToolDefinition,
+        registration: RegisteredTool,
         action: ToolAction,
         bound_ref: ToolRef | None,
     ) -> AuthorizationDecision:

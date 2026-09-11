@@ -62,6 +62,17 @@ def _parents(engine: Engine) -> tuple[Conversation, Task]:
         )
         unit_of_work.conversations.add(conversation)
         unit_of_work.tasks.add(task)
+        unit_of_work.messages.add(
+            Message.user(
+                message_id=f"{task.task_id}_source_message",
+                conversation_id=conversation.conversation_id,
+                task_id=task.task_id,
+                actor_id=actor_id,
+                request_id=f"{task.task_id}_source_request",
+                content_text="source",
+                created_at=BASE_TIME,
+            )
+        )
         unit_of_work.commit()
     return conversation, task
 
@@ -91,6 +102,7 @@ def _call(
         llm_call_id=llm_call_id or _opaque("llm_call"),
         task_id=task.task_id,
         conversation_id=conversation.conversation_id,
+        source_message_id=f"{task.task_id}_source_message",
         request_id=request_id or _opaque("request"),
         purpose="CHAT_ORCHESTRATION",
         input_result_id=None,

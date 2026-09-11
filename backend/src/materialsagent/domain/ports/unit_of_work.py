@@ -18,6 +18,11 @@ from materialsagent.domain.models.task import Task
 from materialsagent.domain.models.task_input_revision import TaskInputRevision
 from materialsagent.domain.models.tool_result import ToolResult
 from materialsagent.domain.models.tool_run import ToolRun
+from materialsagent.domain.models.tool_invocation import (
+    InvocationResult,
+    InvocationRun,
+    InvocationStatus,
+)
 
 
 class PersistenceError(RuntimeError):
@@ -88,6 +93,8 @@ class MessageRepository(Protocol):
 
     def add(self, message: Message) -> None: ...
 
+    def bind_task(self, message_id: str, task_id: str) -> Message | None: ...
+
 
 class TaskRepository(Protocol):
     def get(self, task_id: str) -> Task | None: ...
@@ -138,6 +145,16 @@ class LLMCallRepository(Protocol):
         request_id: str | None = None,
     ) -> list[LLMCall]: ...
 
+    def list_for_source_message(self, source_message_id: str) -> list[LLMCall]: ...
+
+    def bind_task(
+        self,
+        llm_call_id: str,
+        task_id: str,
+        *,
+        expected_status: str,
+    ) -> LLMCall | None: ...
+
     def update(
         self,
         call: LLMCall,
@@ -168,6 +185,47 @@ class ToolRunRepository(Protocol):
         expected_status: str,
     ) -> ToolRun | None: ...
 
+
+class InvocationResultRepository(Protocol):
+    def get(self, invocation_result_id: str) -> InvocationResult | None: ...
+
+    def add(self, result: InvocationResult) -> None: ...
+
+
+class InvocationRunRepository(Protocol):
+    def get(self, invocation_run_id: str) -> InvocationRun | None: ...
+
+    def get_owned(self, invocation_run_id: str, actor_id: str) -> InvocationRun | None: ...
+
+    def get_owned_for_update(
+        self,
+        invocation_run_id: str,
+        actor_id: str,
+    ) -> InvocationRun | None: ...
+
+    def get_by_message(self, source_message_id: str) -> InvocationRun | None: ...
+
+    def get_by_idempotency(
+        self,
+        actor_id: str,
+        idempotency_key: str,
+    ) -> InvocationRun | None: ...
+
+    def list_for_conversation(
+        self,
+        conversation_id: str,
+        actor_id: str,
+    ) -> list[InvocationRun]: ...
+
+    def add(self, run: InvocationRun) -> None: ...
+
+    def update(
+        self,
+        run: InvocationRun,
+        *,
+        expected_status: InvocationStatus,
+        expected_claim_token: str | None = None,
+    ) -> InvocationRun | None: ...
 
 class AssetRepository(Protocol):
     def get(self, asset_id: str) -> Asset | None: ...
@@ -318,6 +376,8 @@ class UnitOfWork(Protocol):
     task_input_revisions: TaskInputRevisionRepository
     llm_calls: LLMCallRepository
     tool_runs: ToolRunRepository
+    invocation_runs: InvocationRunRepository
+    invocation_results: InvocationResultRepository
     assets: AssetRepository
     tool_results: ToolResultRepository
     result_asset_links: ResultAssetLinkRepository

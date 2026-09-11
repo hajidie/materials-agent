@@ -34,7 +34,7 @@ class IdempotencyRecordRow(Base):
             name="ck_idempotency_actor_id_not_blank",
         ),
         CheckConstraint(
-            "operation IN ('CONVERSATION_CREATE', 'TASK_CREATE', 'TASK_INPUT_SUPPLEMENT', "
+            "operation IN ('CONVERSATION_CREATE', 'MESSAGE_SUBMIT', 'TASK_CREATE', 'TASK_INPUT_SUPPLEMENT', "
             "'TOOL_RETRY', 'EXPLANATION_RETRY')",
             name="ck_idempotency_operation_allowed",
         ),
@@ -55,6 +55,10 @@ class IdempotencyRecordRow(Base):
         CheckConstraint(
             "(operation = 'CONVERSATION_CREATE' AND conversation_id IS NOT NULL "
             "AND task_id IS NULL AND message_id IS NULL "
+            "AND task_input_revision_id IS NULL AND tool_run_id IS NULL "
+            "AND explanation_id IS NULL) OR "
+            "(operation = 'MESSAGE_SUBMIT' AND conversation_id IS NOT NULL "
+            "AND task_id IS NULL AND message_id IS NOT NULL "
             "AND task_input_revision_id IS NULL AND tool_run_id IS NULL "
             "AND explanation_id IS NULL) OR "
             "(operation = 'TASK_CREATE' AND conversation_id IS NOT NULL "

@@ -30,6 +30,10 @@ from materialsagent.infrastructure.db.tool_result import (
     ToolResultRow,
 )
 from materialsagent.infrastructure.db.tool_run import ToolRunRow
+from materialsagent.infrastructure.db.tool_invocation import (
+    InvocationResultRow,
+    InvocationRunRow,
+)
 from materialsagent.infrastructure.db.session import (
     build_postgres_url,
     create_engine_from_settings,
@@ -52,6 +56,8 @@ _ = (
     TaskInputRevisionRow,
     TaskRow,
     ToolRunRow,
+    InvocationRunRow,
+    InvocationResultRow,
     ToolResultRow,
     ResultAssetLinkRow,
 )

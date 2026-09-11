@@ -16,10 +16,16 @@ from materialsagent.application.tools import ToolCatalogService
 from materialsagent.application.zta35g_tool import build_zta35g_tool_definition
 from materialsagent.domain.ports.tool_execution import ToolMetadata
 from materialsagent.domain.ports.tool_registry import (
+    ExecutionMode,
     ExecutionPolicy,
     MAX_SCHEMA_BYTES,
+    PresentationMode,
+    RegisteredTool,
     ToolAction,
     ToolDefinition,
+    ToolExecutionBinding,
+    ToolExecutionPolicy,
+    ToolExecutionProfile,
     NeedsInputNormalization,
     ReadyNormalization,
     ToolStatus,
@@ -40,7 +46,7 @@ class _Tool:
         return "AVAILABLE"
 
 
-def definition(**overrides: object) -> ToolDefinition:
+def definition(**overrides: object) -> RegisteredTool:
     tool_id = str(overrides.pop("tool_id", "fixture_tool"))
     metadata = ToolMetadata(
         tool_id=tool_id,
@@ -58,23 +64,45 @@ def definition(**overrides: object) -> ToolDefinition:
         output_summary=(),
         limitations=(),
     )
+    lifecycle_policy = overrides.pop("execution_policy", ExecutionPolicy.ANY_TASK)
+    proposal_schema = overrides.pop(
+        "candidate_input_schema",
+        {"type": "object", "properties": {"sample": {"type": "string"}}},
+    )
+    target = overrides.pop("tool", _Tool(metadata))
+    normalizer = overrides.pop("normalizer", lambda candidate, prior: None)
+    binding_values: dict[str, object] = {
+        "execution_target": target,
+        "normalizer": normalizer,
+        "health_probe": target.health_check,
+    }
     values: dict[str, object] = {
         "tool_id": tool_id,
         "version": "1",
         "status": ToolStatus.ACTIVE,
-        "execution_policy": ExecutionPolicy.ANY_TASK,
         "display_name": "Fixture Tool",
         "description": "Fixture description",
         "input_schema": {"type": "object", "properties": {"sample": {"type": "string"}}},
+        "proposal_schema": proposal_schema,
+        "output_schema": {"type": "object"},
         "runtime_metadata": metadata,
-        "tool": _Tool(metadata),
         "supported_outputs": ("fixture_output",),
         "supported_asset_types": (),
         "limitations": (),
-        "normalizer": lambda candidate, prior: None,
+        "execution_profile": ToolExecutionProfile.MANAGED,
+        "execution_mode": ExecutionMode.SYNC,
+        "executor_id": "managed_runtime",
+        "tool_execution_policy": ToolExecutionPolicy(
+            lifecycle_policy=lifecycle_policy,
+        ),
+        "presentation_mode": PresentationMode.DETERMINISTIC,
+        "presenter_id": "fixture",
     }
     values.update(overrides)
-    return ToolDefinition(**values)
+    return RegisteredTool(
+        definition=ToolDefinition(**values),
+        binding=ToolExecutionBinding(**binding_values),
+    )
 
 
 def _schema_with_canonical_size(size: int) -> dict[str, object]:
@@ -119,7 +147,7 @@ def test_schema_hash_uses_only_canonical_input_schema() -> None:
 
 
 def test_schema_hash_rejects_non_standard_json_number() -> None:
-    with pytest.raises(InvalidToolRegistrationError):
+    with pytest.raises(ValueError):
         ToolRegistry((definition(input_schema={"value": float("nan")}),))
 
 
@@ -152,13 +180,21 @@ def test_canonical_schema_hash_directly_requires_exact_text_key_type(
 def test_schema_hash_rejects_non_text_object_keys_at_every_depth(
     input_schema: dict[object, object],
 ) -> None:
-    with pytest.raises(InvalidToolRegistrationError):
+    with pytest.raises(ValueError):
         ToolRegistry((definition(input_schema=input_schema),))
 
 
 def test_candidate_schema_is_distinct_and_does_not_change_execution_schema_hash() -> None:
-    left = definition(candidate_input_schema={"type": "object", "required": ["left"]})
-    right = definition(candidate_input_schema={"type": "object", "required": ["right"]})
+    left = definition(
+        candidate_input_schema={"type": "object", "required": ["left"]},
+        output_schema={"type": "object", "required": ["old"]},
+        presenter_id="old_presenter",
+    )
+    right = definition(
+        candidate_input_schema={"type": "object", "required": ["right"]},
+        output_schema={"type": "object", "required": ["new"]},
+        presenter_id="new_presenter",
+    )
 
     left_registry = ToolRegistry((left,))
     right_registry = ToolRegistry((right,))
@@ -197,7 +233,7 @@ def test_registry_rejects_each_schema_over_canonical_size_limit_with_controlled_
     }
     schemas[schema_field] = _schema_with_canonical_size(MAX_SCHEMA_BYTES + 1)
 
-    with pytest.raises(InvalidToolRegistrationError, match="input schema is invalid"):
+    with pytest.raises(ValueError, match="schema exceeds the safe size limit"):
         ToolRegistry((definition(**schemas),))
 
 
@@ -316,29 +352,11 @@ def test_normalization_results_deep_freeze_caller_owned_json() -> None:
         result.normalized_input["new"] = "mutated"
 
 
-def test_tool_definition_preserves_legacy_positional_schema_hash_slot() -> None:
+def test_tool_definition_preserves_legacy_execution_policy_read_view() -> None:
     fixture = definition()
-    legacy_hash = "a" * 64
 
-    positional = ToolDefinition(
-        fixture.tool_id,
-        fixture.version,
-        fixture.status,
-        fixture.execution_policy,
-        fixture.display_name,
-        fixture.description,
-        fixture.input_schema,
-        fixture.runtime_metadata,
-        fixture.tool,
-        fixture.supported_outputs,
-        fixture.supported_asset_types,
-        fixture.limitations,
-        fixture.normalizer,
-        legacy_hash,
-    )
-
-    assert positional.schema_hash == legacy_hash
-    assert positional.candidate_input_schema == positional.input_schema
+    assert fixture.definition.execution_policy is ExecutionPolicy.ANY_TASK
+    assert fixture.definition.candidate_input_schema == fixture.definition.proposal_schema
 
 
 @pytest.mark.parametrize(
@@ -399,7 +417,13 @@ def test_disabled_catalog_entry_does_not_check_runtime_readiness() -> None:
     )
     disabled = replace(
         disabled,
-        tool=_DisabledTool(disabled.runtime_metadata),
+        binding=replace(
+            disabled.binding,
+            execution_target=_DisabledTool(disabled.runtime_metadata),
+            health_probe=lambda: (_ for _ in ()).throw(
+                AssertionError("Disabled Tools must not check Runtime readiness.")
+            ),
+        ),
     )
 
     entry = ToolCatalogService(ToolRegistry((disabled,))).get_entry("fixture_tool")
@@ -424,7 +448,7 @@ def test_catalog_legacy_enabled_matches_current_execution_policy(
 
     entry = ToolCatalogService(ToolRegistry((registered,))).get_entry("fixture_tool")
 
-    assert entry["enabled"] is expected_enabled
+    assert (entry["status"] != ToolStatus.DISABLED.value) is expected_enabled
 
 
 def test_registry_resolves_unique_registration_and_rejects_unknown_tool() -> None:
@@ -562,8 +586,13 @@ def test_authorize_rejects_a_registration_with_forged_current_policy() -> None:
     registry = ToolRegistry((definition(),))
     forged = replace(
         registry.resolve("fixture_tool"),
-        status=ToolStatus.DISABLED,
-        execution_policy=ExecutionPolicy.NONE,
+        definition=replace(
+            registry.resolve("fixture_tool").definition,
+            status=ToolStatus.DISABLED,
+            tool_execution_policy=ToolExecutionPolicy(
+                lifecycle_policy=ExecutionPolicy.NONE,
+            ),
+        ),
     )
 
     with pytest.raises(PermissionError) as raised:
@@ -581,9 +610,12 @@ def test_authorize_rejects_a_cloned_registration_with_forged_executor_boundary()
     current = registry.resolve("fixture_tool")
     forged = replace(
         current,
-        normalizer=lambda candidate, prior: ReadyNormalization(
-            {"value": "forged"},
-            ("fixture_output",),
+        binding=replace(
+            current.binding,
+            normalizer=lambda candidate, prior: ReadyNormalization(
+                {"value": "forged"},
+                ("fixture_output",),
+            ),
         ),
     )
 
@@ -605,7 +637,7 @@ def test_authorize_rejects_a_cloned_registration_with_forged_executor_boundary()
     ],
 )
 def test_registry_rejects_raw_lifecycle_strings(status, policy) -> None:
-    with pytest.raises(InvalidToolRegistrationError):
+    with pytest.raises(ValueError):
         ToolRegistry((definition(status=status, execution_policy=policy),))
 
 

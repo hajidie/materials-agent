@@ -4,6 +4,7 @@ import type { DeepReadonly } from "vue";
 import type { TimelineItem } from "../api/types";
 import AssistantMessageItem from "./AssistantMessageItem.vue";
 import ToolTaskCard from "./ToolTaskCard.vue";
+import ToolInvocationCard from "./ToolInvocationCard.vue";
 import UserMessageItem from "./UserMessageItem.vue";
 
 defineOptions({ name: "TimelineList" });
@@ -24,6 +25,8 @@ defineEmits<{
   ];
   "retry-tool": [taskId: string];
   "retry-explanation": [resultId: string];
+  "confirm-invocation": [invocationRunId: string];
+  "reject-invocation": [invocationRunId: string];
 }>();
 </script>
 
@@ -47,6 +50,17 @@ defineEmits<{
         <AssistantMessageItem :message="item.message" />
       </div>
       <div
+        v-else-if="item.item_type === 'TOOL_INVOCATION'"
+        :data-timeline-item="`${item.item_type}:${item.item_id}`"
+      >
+        <ToolInvocationCard
+          :invocation="item.invocation"
+          :mutation-busy="mutationBusy"
+          @confirm="$emit('confirm-invocation', $event)"
+          @reject="$emit('reject-invocation', $event)"
+        />
+      </div>
+      <div
         v-else
         :data-timeline-item="`${item.item_type}:${item.item_id}`"
       >
@@ -57,6 +71,8 @@ defineEmits<{
           @supplement="$emit('set-supplement-target', $event)"
           @retry-tool="$emit('retry-tool', $event)"
           @retry-explanation="$emit('retry-explanation', $event)"
+          @confirm-invocation="$emit('confirm-invocation', $event)"
+          @reject-invocation="$emit('reject-invocation', $event)"
         />
       </div>
     </template>

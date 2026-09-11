@@ -203,7 +203,7 @@ export interface TimelineTask {
 export interface TimelineUserMessageItem {
   item_type: "USER_MESSAGE";
   item_id: string;
-  task_id: string;
+  task_id: string | null;
   anchor_at: string;
   message: UserMessage;
 }
@@ -211,7 +211,7 @@ export interface TimelineUserMessageItem {
 export interface TimelineAssistantMessageItem {
   item_type: "ASSISTANT_MESSAGE";
   item_id: string;
-  task_id: string;
+  task_id: string | null;
   anchor_at: string;
   message: AssistantMessage;
 }
@@ -237,12 +237,64 @@ export interface TimelineToolTaskItem {
   latest_explanation_failure: ExplanationSummary | null;
   needs_input: TaskNeedsInput | null;
   errors: SafeError[];
+  invocation: ToolInvocation | null;
+}
+
+export type InvocationStatus =
+  | "PENDING"
+  | "PENDING_CONFIRMATION"
+  | "RUNNING"
+  | "SUCCEEDED"
+  | "FAILED"
+  | "DENIED"
+  | "REJECTED"
+  | "EXPIRED"
+  | "OUTCOME_UNKNOWN";
+
+export interface ToolInvocation {
+  invocation_run_id: string;
+  conversation_id: string;
+  source_message_id: string;
+  task_id: string | null;
+  status: InvocationStatus;
+  tool: {
+    tool_id: string;
+    version: string;
+    display_name: string;
+    execution_profile: "STANDARD" | "SIDE_EFFECT" | "MANAGED";
+    confirmation_required: boolean;
+    confirmation_prompt: string | null;
+  };
+  confirmation_required: boolean;
+  confirmation_expires_at: string | null;
+  confirmed_at: string | null;
+  rejected_at: string | null;
+  expired_at: string | null;
+  dispatch_started_at: string | null;
+  error_code: string | null;
+  safe_error_message: string | null;
+  result: {
+    data: Record<string, unknown>;
+    presentation: Record<string, unknown>;
+  } | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+}
+
+export interface TimelineToolInvocationItem {
+  item_type: "TOOL_INVOCATION";
+  item_id: string;
+  task_id: null;
+  anchor_at: string;
+  invocation: ToolInvocation;
 }
 
 export type TimelineItem =
   | TimelineUserMessageItem
   | TimelineAssistantMessageItem
-  | TimelineToolTaskItem;
+  | TimelineToolTaskItem
+  | TimelineToolInvocationItem;
 
 export interface TimelinePage {
   conversation: Pick<Conversation, "conversation_id" | "title">;
@@ -315,7 +367,8 @@ export interface MessageExplanation {
 export interface MessageSubmissionResponseData {
   conversation_id: string;
   user_message: UserMessage;
-  task: MessageTask;
+  task: MessageTask | null;
+  tool_invocation: ToolInvocation | null;
   assistant_message: AssistantMessage | null;
   needs_input: NeedsInput | null;
   result_summary: Omit<

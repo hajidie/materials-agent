@@ -67,7 +67,7 @@ def test_two_definition_registry_keeps_unrelated_contracts_and_hashes() -> None:
 def test_generic_candidate_validation_accepts_ml_training_fields() -> None:
     candidate = ToolCandidateProposal(
         tool_id="ml_training_test",
-        candidate_input_delta={
+        proposed_arguments={
             "dataset": "dataset_fixture_1",
             "task_type": "regression",
             "split_ratio": 0.8,
@@ -87,11 +87,12 @@ def test_generic_candidate_validation_accepts_ml_training_fields() -> None:
     }
 
 
-def test_production_composition_still_registers_only_zta35g() -> None:
+def test_production_composition_registers_managed_and_safe_standard_tools() -> None:
     registry = build_tool_registry()
 
     assert {definition.tool_id for definition in registry.list_registered()} == {
-        "zta35g_sem_virtual_lab"
+        "zta35g_sem_virtual_lab",
+        "materials_unit_conversion",
     }
 
 

@@ -96,7 +96,7 @@ def test_candidate_input_rejects_non_json_or_unbounded_values(unsafe: object) ->
         ({"route": "KNOWLEDGE_ANSWER", "answer_text": "安全答案。"}, KnowledgeAnswer),
         ({
             "route": "TOOL_CANDIDATES",
-            "candidates": [{"tool_id": "zta35g_sem_virtual_lab", "candidate_input_delta": {"material": "ZTA35G"}}],
+            "candidates": [{"tool_id": "zta35g_sem_virtual_lab", "proposed_arguments": {"material": "ZTA35G"}}],
         }, ToolCandidateSet),
     ],
 )

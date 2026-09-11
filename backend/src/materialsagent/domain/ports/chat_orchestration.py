@@ -12,6 +12,7 @@ from materialsagent.domain.ports.conversation_context import (
     ContextBudget,
     PromptContextWindow,
 )
+from materialsagent.domain.models.tool_invocation import ProposalOrigin
 from materialsagent.domain.ports.tool_registry import RoutingCatalogSnapshot
 
 
@@ -92,7 +93,7 @@ def _is_controlled_candidate_scalar(value: object) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class ChatOrchestrationInput:
-    task_id: str
+    task_id: str | None
     conversation_id: str
     request_id: str
     content_text: str
@@ -103,12 +104,13 @@ class ChatOrchestrationInput:
 
     def __post_init__(self) -> None:
         for field_name in (
-            "task_id",
             "conversation_id",
             "request_id",
             "content_text",
         ):
             _require_non_blank(getattr(self, field_name), field_name)
+        if self.task_id is not None:
+            _require_non_blank(self.task_id, "task_id")
         if not isinstance(
             self.routing_catalog,
             RoutingCatalogSnapshot,
@@ -171,14 +173,14 @@ class HistoryReference:
 @dataclass(frozen=True, slots=True)
 class ToolCandidateProposal:
     tool_id: str
-    candidate_input_delta: Mapping[str, object]
+    proposed_arguments: Mapping[str, object]
     history_reference: HistoryReference | None = None
 
     def __post_init__(self) -> None:
         _require_non_blank(self.tool_id, "tool_id")
-        if not isinstance(self.candidate_input_delta, Mapping):
-            raise ValueError("candidate_input_delta must be a JSON object.")
-        plain = _plain_candidate_json(self.candidate_input_delta)
+        if not isinstance(self.proposed_arguments, Mapping):
+            raise ValueError("proposed_arguments must be a JSON object.")
+        plain = _plain_candidate_json(self.proposed_arguments)
         encoded = json.dumps(
             plain,
             ensure_ascii=False,
@@ -187,7 +189,7 @@ class ToolCandidateProposal:
             sort_keys=True,
         ).encode("utf-8")
         if len(encoded) > 4096:
-            raise ValueError("candidate_input_delta exceeds the safe size limit.")
+            raise ValueError("proposed_arguments exceeds the safe size limit.")
         if self.history_reference is not None and not isinstance(
             self.history_reference,
             HistoryReference,
@@ -195,15 +197,14 @@ class ToolCandidateProposal:
             raise ValueError("history_reference must be a HistoryReference.")
         object.__setattr__(
             self,
-            "candidate_input_delta",
+            "proposed_arguments",
             _freeze_candidate_json(plain),
         )
 
     @property
     def candidate_input(self) -> Mapping[str, object]:
         """Read-only compatibility alias for pre-v6 internal callers."""
-        return self.candidate_input_delta
-
+        return self.proposed_arguments
 
 @dataclass(frozen=True, slots=True)
 class ToolCandidateSet:
@@ -225,8 +226,8 @@ class ToolCandidateSet:
             "candidates": [
                 {
                     "tool_id": item.tool_id,
-                    "candidate_input_delta": _plain_candidate_json(
-                        item.candidate_input_delta
+                    "proposed_arguments": _plain_candidate_json(
+                        item.proposed_arguments
                     ),
                     **(
                         {}
@@ -304,6 +305,8 @@ class ChatOrchestrationOutcome:
     result: ChatOrchestrationResult
     usage: Mapping[str, int] | None
     provider_request_id: str | None
+    proposal_origin: ProposalOrigin = ProposalOrigin.STRUCTURED
+    provider_tool_call_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(
@@ -321,6 +324,14 @@ class ChatOrchestrationOutcome:
             raise ValueError(
                 "provider_request_id must be a bounded controlled identifier."
             )
+        if not isinstance(self.proposal_origin, ProposalOrigin):
+            raise ValueError("proposal_origin is invalid.")
+        if (
+            self.provider_tool_call_id is not None
+            and PROVIDER_REQUEST_ID_PATTERN.fullmatch(self.provider_tool_call_id)
+            is None
+        ):
+            raise ValueError("provider_tool_call_id is invalid.")
         object.__setattr__(self, "usage", _controlled_usage(self.usage))
 
 

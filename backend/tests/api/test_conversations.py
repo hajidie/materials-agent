@@ -410,6 +410,7 @@ def test_new_task_submission_persists_orchestrated_facts_and_first_title(
         "result_summary",
         "explanation",
         "latest_explanation_failure",
+        "tool_invocation",
         "idempotency_replayed",
     }
     assert body["data"]["conversation_id"] == conversation.conversation_id
@@ -418,6 +419,7 @@ def test_new_task_submission_persists_orchestrated_facts_and_first_title(
     assert body["data"]["task"]["task_type"] == "KNOWLEDGE_QA"
     assert body["data"]["task"]["status"] == "SUCCEEDED"
     assert body["data"]["task"]["selected_tool_run_id"] is None
+    assert body["data"]["tool_invocation"] is None
     assert body["data"]["task"]["selected_result_id"] is None
     assert body["data"]["assistant_message"]["role"] == "ASSISTANT"
     assert body["data"]["assistant_message"]["content_text"]

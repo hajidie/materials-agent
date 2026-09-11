@@ -137,6 +137,7 @@ function toolTask(
           }
         : null,
     errors: [],
+    invocation: null,
   };
 }
 
@@ -210,6 +211,7 @@ function messageResponse(
     result_summary: null,
     explanation: null,
     latest_explanation_failure: null,
+    tool_invocation: null,
     idempotency_replayed: false,
   };
 }

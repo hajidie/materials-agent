@@ -149,7 +149,7 @@ def _persist_submission(
 
 
 def _tool_payload(**overrides: object) -> dict[str, object]:
-    candidate_input_delta: dict[str, object] = {
+    proposed_arguments: dict[str, object] = {
         "material": "ZTA35G",
         "solution_temperature": {"value": 1000, "unit": "°C"},
         "solution_time": {"value": 180, "unit": "min"},
@@ -157,13 +157,13 @@ def _tool_payload(**overrides: object) -> dict[str, object]:
         "aging_time": {"value": 3, "unit": "h"},
         "requested_outputs": ["sem_image"],
     }
-    candidate_input_delta.update(overrides)
+    proposed_arguments.update(overrides)
     return {
         "route": "TOOL_CANDIDATES",
         "candidates": [
             {
                 "tool_id": "zta35g_sem_virtual_lab",
-                "candidate_input_delta": candidate_input_delta,
+                "proposed_arguments": proposed_arguments,
             }
         ],
     }
@@ -302,7 +302,7 @@ def test_needs_input_and_tool_outcomes_persist_formal_revision_and_no_tool_table
     actor, submission = _persist_submission(migrated_database_engine)
     factory = _Factory(migrated_database_engine)
     parameters = dict(
-        _tool_payload()["candidates"][0]["candidate_input_delta"]
+        _tool_payload()["candidates"][0]["proposed_arguments"]
     )
     parameters["aging_temperature"] = None
     projection = _service(
@@ -312,7 +312,7 @@ def test_needs_input_and_tool_outcomes_persist_formal_revision_and_no_tool_table
             "candidates": [
                 {
                     "tool_id": "zta35g_sem_virtual_lab",
-                    "candidate_input_delta": parameters,
+                    "proposed_arguments": parameters,
                 }
             ],
         },

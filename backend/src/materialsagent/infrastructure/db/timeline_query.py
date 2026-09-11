@@ -58,6 +58,7 @@ from materialsagent.infrastructure.db.tool_run import (
     ToolRunRow,
     _from_row as _tool_run_from_row,
 )
+from materialsagent.infrastructure.db.tool_invocation import InvocationRunRow
 
 
 class SQLAlchemyTimelineQueryRepository:
@@ -287,10 +288,11 @@ class SQLAlchemyTimelineQueryRepository:
                 MessageRow.task_id.label("task_id"),
                 message_type.label("item_type"),
             )
-            .join(TaskRow, TaskRow.task_id == MessageRow.task_id)
+            .outerjoin(TaskRow, TaskRow.task_id == MessageRow.task_id)
             .where(
                 MessageRow.conversation_id == conversation_id,
                 or_(
+                    TaskRow.task_id.is_(None),
                     TaskRow.task_type.is_(None),
                     TaskRow.task_type != "TOOL_EXECUTION",
                 ),
@@ -318,7 +320,18 @@ class SQLAlchemyTimelineQueryRepository:
             TaskRow.conversation_id == conversation_id,
             TaskRow.task_type == "TOOL_EXECUTION",
         )
-        item_union = union_all(message_items, tool_items).subquery(
+        invocation_items = select(
+            InvocationRunRow.created_at.label("anchor_at"),
+            literal(25).label("item_type_rank"),
+            InvocationRunRow.invocation_run_id.label("item_id"),
+            InvocationRunRow.task_id.label("task_id"),
+            literal("TOOL_INVOCATION").label("item_type"),
+        ).where(
+            InvocationRunRow.conversation_id == conversation_id,
+            InvocationRunRow.actor_id == actor_id,
+            InvocationRunRow.execution_profile != "MANAGED",
+        )
+        item_union = union_all(message_items, invocation_items, tool_items).subquery(
             "timeline_items"
         )
         key_statement = select(item_union)
@@ -357,14 +370,14 @@ class SQLAlchemyTimelineQueryRepository:
         message_ids = [
             key.item_id
             for key in keys
-            if key.item_type != "TOOL_TASK"
+            if key.item_type in {"USER_MESSAGE", "ASSISTANT_MESSAGE"}
         ]
         tool_task_ids = [
             key.task_id
             for key in keys
             if key.item_type == "TOOL_TASK"
         ]
-        all_task_ids = sorted({key.task_id for key in keys})
+        all_task_ids = sorted({key.task_id for key in keys if key.task_id is not None})
         message_rows = session.scalars(
             select(MessageRow)
             .where(

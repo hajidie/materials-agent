@@ -151,6 +151,7 @@ function toolItem(
           }
         : null,
     errors: [],
+    invocation: null,
   };
 }
 
@@ -178,6 +179,7 @@ interface MutableAgentRefs {
   supplementTarget: ReturnType<typeof ref<SupplementTarget | null>>;
   pendingMutation: ReturnType<typeof ref<PendingMutationV1 | null>>;
   mutationStatus: ReturnType<typeof ref<MutationStatus>>;
+  invocationMutationBusy: ReturnType<typeof ref<boolean>>;
   conversationCreationUncertain: ReturnType<typeof ref<boolean>>;
   firstTurnDraft: ReturnType<typeof ref<string>>;
   globalError: ReturnType<typeof ref<UserVisibleError | null>>;
@@ -209,6 +211,7 @@ function buildAgent(): MaterialsAgentState {
     supplementTarget: ref(null),
     pendingMutation: ref(null),
     mutationStatus: ref("IDLE"),
+    invocationMutationBusy: ref(false),
     conversationCreationUncertain: ref(false),
     firstTurnDraft: ref(""),
     globalError: ref(null),
@@ -262,6 +265,8 @@ function buildAgent(): MaterialsAgentState {
     submitSupplement: vi.fn(() => Promise.resolve()),
     retryTool: vi.fn(() => Promise.resolve()),
     retryExplanation: vi.fn(() => Promise.resolve()),
+    confirmInvocation: vi.fn(() => Promise.resolve()),
+    rejectInvocation: vi.fn(() => Promise.resolve()),
     retryPendingMutation: vi.fn(() => Promise.resolve()),
     discardPendingMutation,
     startPolling: vi.fn(),

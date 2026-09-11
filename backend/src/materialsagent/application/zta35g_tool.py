@@ -15,10 +15,16 @@ from materialsagent.domain.ports.tool_execution import (
     ToolRequestContext,
 )
 from materialsagent.domain.ports.tool_registry import (
+    ExecutionMode,
     ExecutionPolicy,
     InvalidNormalization,
     NeedsInputNormalization,
+    PresentationMode,
     ReadyNormalization,
+    RegisteredTool,
+    ToolExecutionBinding,
+    ToolExecutionPolicy,
+    ToolExecutionProfile,
     ToolDefinition,
     ToolStatus,
 )
@@ -264,12 +270,12 @@ def _context_projection(value: Mapping[str, object]) -> Mapping[str, object]:
     }
 
 
-def build_zta35g_tool_definition(client: ToolClientPort | None = None) -> ToolDefinition:
+def build_zta35g_tool_definition(client: ToolClientPort | None = None) -> RegisteredTool:
     metadata = _zta35g_metadata()
     tool: MaterialTool = ZTA35GMaterialTool(metadata, client or _UnavailableToolClient())
-    return ToolDefinition(
+    definition = ToolDefinition(
         tool_id=ZTA35G_TOOL_ID, version="1", status=ToolStatus.ACTIVE,
-        execution_policy=ExecutionPolicy.ANY_TASK, display_name=metadata.display_name,
+        display_name=metadata.display_name,
         description=metadata.description,
         input_schema={
             "type": "object", "required": ["material", *PROCESS_FIELDS, "requested_outputs"],
@@ -282,10 +288,26 @@ def build_zta35g_tool_definition(client: ToolClientPort | None = None) -> ToolDe
                 "requested_outputs": {"enum": list(SUPPORTED_OUTPUTS)},
             },
         },
-        runtime_metadata=metadata, tool=tool, supported_outputs=SUPPORTED_OUTPUTS,
+        proposal_schema=_candidate_input_schema(),
+        output_schema={"type": "object"},
+        runtime_metadata=metadata, supported_outputs=SUPPORTED_OUTPUTS,
         supported_asset_types=metadata.supported_asset_types, limitations=metadata.limitations,
-        normalizer=_normalizer,
-        candidate_input_schema=_candidate_input_schema(),
-        context_projector=_context_projection,
+        execution_profile=ToolExecutionProfile.MANAGED,
+        execution_mode=ExecutionMode.SYNC,
+        executor_id="managed_runtime",
+        tool_execution_policy=ToolExecutionPolicy(
+            lifecycle_policy=ExecutionPolicy.ANY_TASK,
+        ),
+        presentation_mode=PresentationMode.CUSTOM,
+        presenter_id="zta35g_result",
         context_projection_version="zta35g-result-context-v1",
+    )
+    return RegisteredTool(
+        definition=definition,
+        binding=ToolExecutionBinding(
+            execution_target=tool,
+            normalizer=_normalizer,
+            context_projector=_context_projection,
+            health_probe=tool.health_check,
+        ),
     )

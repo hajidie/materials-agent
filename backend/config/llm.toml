@@ -14,6 +14,7 @@ supports_thinking_budget = false
 structured_output_reasoning_modes = ["disabled", "enabled"]
 supports_sampling_with_reasoning = false
 requires_streaming_for_reasoning = false
+supports_tool_calling = true
 
 [models.qwen_default]
 provider = "qwen"
@@ -28,11 +29,13 @@ supports_thinking_budget = true
 structured_output_reasoning_modes = ["disabled"]
 supports_sampling_with_reasoning = true
 requires_streaming_for_reasoning = true
+supports_tool_calling = true
 
 [defaults]
 timeout_seconds = 60
 
 [roles.chat_orchestration]
+tool_calling_mode = "structured"
 temperature = 0.0
 max_tokens = 1024
 reasoning_mode = "disabled"

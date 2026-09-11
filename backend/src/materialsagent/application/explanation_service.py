@@ -80,6 +80,7 @@ class _InitialExplanationSources:
     conversation_id: str
     tool_run: ToolRun
     projection: ExplanationInput
+    source_message_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -484,12 +485,16 @@ class ExplanationService:
                 ):
                     raise ExplanationNotRetryableError(task_id=task_id)
                 projection = self._projection(unit_of_work, result)
+                source_messages = unit_of_work.messages.list_for_task(task.task_id)
+                if not source_messages:
+                    raise ApplicationConflictError(task_id=task_id)
                 metadata = self._port.request_metadata(projection)
                 attempt_no = max(item.attempt_no for item in attempts) + 1
                 call = LLMCall(
                     llm_call_id=llm_call_id,
                     task_id=task.task_id,
                     conversation_id=conversation.conversation_id,
+                    source_message_id=source_messages[0].message_id,
                     request_id=request_id,
                     purpose="TOOL_RESULT_EXPLANATION",
                     input_result_id=result.result_id,
@@ -862,6 +867,10 @@ class ExplanationService:
             conversation_id=conversation.conversation_id,
             tool_run=tool_run,
             projection=self._projection(unit_of_work, result),
+            source_message_id=min(
+                unit_of_work.messages.list_for_task(task.task_id),
+                key=lambda item: (item.created_at, item.message_id),
+            ).message_id,
         )
 
     def _build_initial_pending_facts(
@@ -878,6 +887,7 @@ class ExplanationService:
             llm_call_id=llm_call_id,
             task_id=sources.task.task_id,
             conversation_id=sources.conversation_id,
+            source_message_id=sources.source_message_id,
             request_id=sources.tool_run.request_id,
             purpose="TOOL_RESULT_EXPLANATION",
             input_result_id=sources.result.result_id,

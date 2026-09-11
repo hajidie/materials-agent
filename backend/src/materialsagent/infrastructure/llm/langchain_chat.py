@@ -28,6 +28,8 @@ from materialsagent.domain.ports.chat_orchestration import (
     ToolCandidateSet,
 )
 from materialsagent.domain.ports.conversation_context import ContextBudget
+from materialsagent.domain.models.tool_invocation import ProposalOrigin
+from materialsagent.application.tool_projections import ToolProjectionService
 from materialsagent.infrastructure.llm.common import (
     PromptRenderCache,
     SAFE_MESSAGES,
@@ -55,7 +57,7 @@ class ProviderHistoryReference(BaseModel):
 class ProviderToolCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     tool_id: StrictStr
-    candidate_input_delta: dict[StrictStr, JsonValue]
+    proposed_arguments: dict[StrictStr, JsonValue]
     history_reference: ProviderHistoryReference | None = None
 
 
@@ -119,7 +121,7 @@ def _domain_result(
         tuple(
             ToolCandidateProposal(
                 candidate.tool_id,
-                candidate.candidate_input_delta,
+                candidate.proposed_arguments,
                 (
                     None
                     if candidate.history_reference is None
@@ -159,7 +161,12 @@ class LangChainChatOrchestrationAdapter:
             context_window_tokens=config.context_window_tokens,
             max_output_tokens=config.max_tokens or 1024,
         )
-        if structured_runnable is None:
+        self._chat_model = None
+        if config.tool_calling_mode == "native":
+            if structured_runnable is not None:
+                raise ValueError("Native Tool Calling does not use a structured runnable.")
+            self._chat_model = chat_model or create_chat_model(config)
+        elif structured_runnable is None:
             model = chat_model or create_chat_model(config)
             structured_runnable = model.with_structured_output(  # type: ignore[attr-defined]
                 ProviderChatResponse,
@@ -172,11 +179,16 @@ class LangChainChatOrchestrationAdapter:
         self,
         orchestration_input: ChatOrchestrationInput,
     ) -> int:
+        schema = (
+            ProviderChatResponse.model_json_schema()
+            if self._config.tool_calling_mode == "structured"
+            else {
+                "tools": self._native_tool_schemas(orchestration_input),
+            }
+        )
         return self._token_counter.count_messages(
             render_chat_orchestration_prompt(orchestration_input)
-        ) + self._token_counter.count_schema(
-            ProviderChatResponse.model_json_schema()
-        )
+        ) + self._token_counter.count_schema(schema)
 
     def request_metadata(
         self,
@@ -204,6 +216,8 @@ class LangChainChatOrchestrationAdapter:
         messages = self._prompt_cache.take(orchestration_input)
         if messages is None:
             messages = render_chat_orchestration_prompt(orchestration_input)
+        if self._config.tool_calling_mode == "native":
+            return self._orchestrate_native(orchestration_input, messages)
         try:
             envelope = self._structured_runnable.invoke(messages)  # type: ignore[attr-defined]
         except json.JSONDecodeError:
@@ -243,6 +257,86 @@ class LangChainChatOrchestrationAdapter:
             result=result,
             usage=controlled_usage(raw),
             provider_request_id=success_provider_request_id(raw),
+        )
+
+    @staticmethod
+    def _native_tool_schemas(
+        orchestration_input: ChatOrchestrationInput,
+    ) -> list[dict[str, object]]:
+        return [
+            ToolProjectionService.for_llm_snapshot_entry(
+                entry
+            ).to_langchain_schema()
+            for entry in orchestration_input.routing_catalog.entries
+        ]
+
+    def _orchestrate_native(
+        self,
+        orchestration_input: ChatOrchestrationInput,
+        messages: object,
+    ) -> ChatOrchestrationOutcome:
+        model = self._chat_model
+        if model is None:
+            self._raise_protocol("LLM_SCHEMA_MISMATCH")
+        try:
+            runnable = model.bind_tools(  # type: ignore[union-attr]
+                self._native_tool_schemas(orchestration_input),
+                parallel_tool_calls=False,
+            )
+            raw = runnable.invoke(messages)
+        except Exception as error:
+            failure = classify_provider_exception(error)
+            error_type = (
+                ChatOrchestrationTimeoutError
+                if failure.error_code == "LLM_TIMEOUT"
+                else ChatOrchestrationProviderError
+            )
+            raise error_type(
+                error_code=failure.error_code,
+                safe_error_message=failure.safe_error_message,
+                provider_request_id=failure.provider_request_id,
+            ) from None
+        tool_calls = getattr(raw, "tool_calls", None)
+        if tool_calls is None:
+            tool_calls = []
+        if not isinstance(tool_calls, list):
+            self._raise_protocol("LLM_SCHEMA_MISMATCH")
+        if len(tool_calls) > 1:
+            raise ChatOrchestrationProtocolError(
+                error_code="MULTIPLE_TOOL_CALLS_UNSUPPORTED",
+                safe_error_message="A model response may contain at most one executable Tool call.",
+            )
+        provider_tool_call_id: str | None = None
+        if tool_calls:
+            tool_call = tool_calls[0]
+            if not isinstance(tool_call, Mapping):
+                self._raise_protocol("LLM_SCHEMA_MISMATCH")
+            name = tool_call.get("name")
+            arguments = tool_call.get("args")
+            provider_tool_call_id = tool_call.get("id")
+            if (
+                type(name) is not str
+                or not isinstance(arguments, Mapping)
+                or (
+                    provider_tool_call_id is not None
+                    and type(provider_tool_call_id) is not str
+                )
+            ):
+                self._raise_protocol("LLM_SCHEMA_MISMATCH")
+            result = ToolCandidateSet(
+                (ToolCandidateProposal(name, arguments),)
+            )
+        else:
+            content = getattr(raw, "content", None)
+            if not isinstance(content, str) or not content.strip():
+                self._raise_protocol("LLM_EMPTY_RESPONSE")
+            result = KnowledgeAnswer(content.strip())
+        return ChatOrchestrationOutcome(
+            result=result,
+            usage=controlled_usage(raw),
+            provider_request_id=success_provider_request_id(raw),
+            proposal_origin=ProposalOrigin.NATIVE,
+            provider_tool_call_id=provider_tool_call_id,
         )
 
     @staticmethod

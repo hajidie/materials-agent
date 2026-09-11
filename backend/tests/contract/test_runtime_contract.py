@@ -204,18 +204,28 @@ def test_registry_is_only_version_source_and_unknown_tool_is_rejected() -> None:
         registry.resolve("unknown_tool")
 
     catalog = ToolCatalogService(registry).list_entries()
-    assert len(catalog) == 1
-    assert catalog[0]["version"] == "1"
-    assert len(catalog[0]["schema_hash"]) == 64
-    assert catalog[0]["tool_version"] == registered.metadata.tool_version
-    assert catalog[0]["schema_version"] == registered.metadata.schema_version
-    assert catalog[0]["material_scope"] == "ZTA35G"
-    assert catalog[0]["supported_outputs"] == [
+    assert len(catalog) == 2
+    zta_catalog = next(
+        item for item in catalog if item["tool_id"] == "zta35g_sem_virtual_lab"
+    )
+    assert set(zta_catalog) == {
+        "tool_id",
+        "display_name",
+        "description",
+        "status",
+        "execution_profile",
+        "confirmation_required",
+        "supported_outputs",
+        "limitations",
+        "availability",
+    }
+    assert zta_catalog["execution_profile"] == "MANAGED"
+    assert zta_catalog["supported_outputs"] == [
         "sem_image",
         "mechanical_properties",
     ]
-    assert "model_version" not in catalog[0]
-    assert "runtime_url" not in catalog[0]
+    assert "schema_hash" not in zta_catalog
+    assert "runtime_url" not in zta_catalog
 
 
 def test_material_tool_sends_only_allowed_runtime_fields_and_maps_output() -> None:

@@ -37,6 +37,8 @@ defineEmits<{
   "cancel-supplement-target": [];
   "retry-tool": [taskId: string];
   "retry-explanation": [resultId: string];
+  "confirm-invocation": [invocationRunId: string];
+  "reject-invocation": [invocationRunId: string];
   refresh: [];
 }>();
 
@@ -102,6 +104,8 @@ const title = computed(() => {
           @set-supplement-target="$emit('set-supplement-target', $event)"
           @retry-tool="$emit('retry-tool', $event)"
           @retry-explanation="$emit('retry-explanation', $event)"
+          @confirm-invocation="$emit('confirm-invocation', $event)"
+          @reject-invocation="$emit('reject-invocation', $event)"
         />
       </div>
 

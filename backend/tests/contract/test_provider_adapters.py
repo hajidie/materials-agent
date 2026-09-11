@@ -199,7 +199,7 @@ class FakeRunnable:
                 "candidates": [
                     {
                         "tool_id": "safe_tool",
-                        "candidate_input_delta": {"value": 3},
+                        "proposed_arguments": {"value": 3},
                     }
                 ],
             },
@@ -300,6 +300,7 @@ def test_chat_prompt_metadata_matches_the_single_render_sent(
     assert render_calls == 1
     assert metadata.prompt_template_version == "6"
     assert metadata.generation_parameters["schema_version"] == 1
+    assert metadata.generation_parameters["tool_calling_mode"] == "structured"
     assert metadata.prompt_digest == canonical_prompt_digest(
         template_id=metadata.prompt_template_id,
         template_version=metadata.prompt_template_version,
@@ -307,6 +308,10 @@ def test_chat_prompt_metadata_matches_the_single_render_sent(
     )
     rendered = str(model.messages)
     assert "safe_tool" in rendered
+    assert "proposal_schema" in rendered
+    assert "candidate_input_schema" not in rendered
+    assert "schema_hash" not in rendered
+    assert "required_permissions" not in rendered
     assert "Runtime URL" not in rendered
 
 
