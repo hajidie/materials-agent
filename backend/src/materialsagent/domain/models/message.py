@@ -11,7 +11,7 @@ LLM: Final = "LLM"
 TEMPLATE: Final = "TEMPLATE"
 
 MESSAGE_ROLES: Final = frozenset({USER, ASSISTANT})
-GENERATION_SOURCES: Final = frozenset({USER, LLM, TEMPLATE})
+GENERATION_SOURCES: Final = frozenset({USER, LLM, TEMPLATE, "AGENT"})
 
 
 def _require_non_blank(value: str, field_name: str) -> None:
@@ -81,6 +81,8 @@ class Message:
             raise ValueError(
                 "TEMPLATE generation is only valid for ASSISTANT messages."
             )
+        if self.generation_source == "AGENT" and self.role != ASSISTANT:
+            raise ValueError("AGENT generation requires an assistant message.")
         _require_utc(self.created_at, "created_at")
 
     @classmethod

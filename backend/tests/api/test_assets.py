@@ -32,7 +32,7 @@ from materialsagent.infrastructure.db.conversation_task import (
 )
 from materialsagent.infrastructure.db.session import create_session_factory
 from materialsagent.infrastructure.db.tool_run import ToolRunRow
-from materialsagent.infrastructure.llm.mock import MockChatOrchestrationAdapter
+from materialsagent.infrastructure.llm.agent_model import MockAgentModel
 
 
 BASE = datetime(2026, 7, 22, 1, 0, tzinfo=timezone.utc)
@@ -122,7 +122,7 @@ class _ToolClient:
             requested_outputs=tuple(validated_input.requested_outputs),
             completed_outputs=tuple(validated_input.requested_outputs),
             failed_outputs=(),
-            data={"mechanical_properties": {"yield_strength_mpa": 1000.0}},
+            data={"yield_strength": {"value": 1000.0, "unit": "MPa"}, "elongation": {"value": 8.2, "unit": "%"}},
             images=(_valid_image(),),
             warnings=(),
             diagnostics=(),
@@ -165,43 +165,26 @@ def _settings(api_harness):
     )
 
 
-def _create_valid_revision(client, api_harness) -> tuple[str, str]:
-    conversation = client.post(
-        "/api/v1/conversations",
-        headers={"Idempotency-Key": "asset-conversation-create"},
-        json={},
-    )
-    assert conversation.status_code == 201
-    message = client.post(
-        f"/api/v1/conversations/{conversation.json()['data']['conversation_id']}/messages",
-        headers={"Idempotency-Key": "asset-valid-revision"},
-        json={
-            "submission_mode": "NEW_TASK",
-            "content_text": "完整合法 Tool 请求",
-        },
-    )
-    assert message.status_code == 200, message.text
-    task_id = message.json()["data"]["task"]["task_id"]
+def _execute_asset(client, api_harness):
+    conversation = client.post("/api/v1/conversations", headers={"Idempotency-Key": "asset-conversation-create"}, json={}).json()["data"]
+    arguments = {"material": "ZTA35G", "solution_temperature": {"value": 1000, "unit": "°C"},
+        "solution_time": {"value": 2, "unit": "h"}, "aging_temperature": {"value": 730, "unit": "°C"},
+        "aging_time": {"value": 2, "unit": "h"}, "requested_outputs": ["sem_image", "mechanical_properties"]}
+    def respond(role, payload):
+        if role == "final_answer": return "已生成结果。"
+        return {"type": "Finish", "answer": "已生成结果。"} if payload["observations"] else {
+            "type": "CallTool", "tool_name": "zta35g_sem_virtual_lab", "arguments": arguments}
+    client.app.state.agent_runtime.model = MockAgentModel(respond)
+    run = client.post(f"/api/v1/conversations/{conversation['conversation_id']}/messages",
+        headers={"Idempotency-Key": "asset-valid-run"}, json={"mode": "NEW_RUN", "content_text": "生成图像和性能"}).json()["data"]["agent_run"]
+    observation = next(o for o in run["observations"] if o["kind"] == "TOOL_RESULT")
+    assert observation["artifacts"], run
+    tool_run_id = observation["tool_run_id"]
     with create_session_factory(api_harness.engine)() as session:
-        revision = session.scalar(
-            select(TaskInputRevisionRow).where(
-                TaskInputRevisionRow.task_id == task_id
-            )
-        )
-        assert revision is not None
-        return task_id, revision.task_input_revision_id
-
-
-def _execute_asset(client, api_harness) -> tuple[str, str, dict[str, object]]:
-    task_id, revision_id = _create_valid_revision(client, api_harness)
-    response = client.post(
-        f"/api/v1/dev/tasks/{task_id}/tool-runs",
-        json={"task_input_revision_id": revision_id},
-    )
-    assert response.status_code == 201, response.text
-    data = response.json()["data"]
-    assert len(data["asset_ids"]) == 1
-    return task_id, data["asset_ids"][0], data
+        tool_run = session.get(ToolRunRow, tool_run_id)
+        data = {"tool_run_id": tool_run_id, "task_id": observation["task_id"], "status": tool_run.current_status,
+            "output_summary": tool_run.output_summary, "asset_ids": [a["asset_id"] for a in observation["artifacts"]]}
+    return observation["task_id"], data["asset_ids"][0], data
 
 
 def test_asset_owner_metadata_inline_attachment_and_other_actor_404(
@@ -239,7 +222,7 @@ def test_asset_owner_metadata_inline_attachment_and_other_actor_404(
         hidden = other.get(f"/api/v1/assets/{asset_id}")
 
     assert tool_client.calls == 1
-    assert run_data["status"] == "RUNNING"
+    assert run_data["status"] in {"SUCCEEDED", "PARTIALLY_SUCCEEDED"}
     assert metadata.status_code == 200
     body = metadata.json()["data"]
     assert body["status"] == "AVAILABLE"
@@ -290,7 +273,6 @@ def test_conversation_delete_snapshots_real_asset_and_cleans_storage_after_commi
         settings=settings,
         tool_registry=registry,
         storage_service=storage,
-        chat_orchestration_port=MockChatOrchestrationAdapter(responder),
     ) as client:
         task_id, asset_id, run_data = _execute_asset(client, api_harness)
         object_key = next(iter(storage.objects))
@@ -442,7 +424,7 @@ def test_partial_success_persists_safe_summary_and_available_asset(
         "retryable": False,
     }
     assert tool_client.calls == 1
-    assert run_data["status"] == "RUNNING"
+    assert run_data["status"] in {"SUCCEEDED", "PARTIALLY_SUCCEEDED"}
     assert run_data["output_summary"]["runtime_status"] == (
         "PARTIALLY_SUCCEEDED"
     )
@@ -451,19 +433,14 @@ def test_partial_success_persists_safe_summary_and_available_asset(
     assert metadata.json()["data"]["status"] == "AVAILABLE"
     assert content.status_code == 200
     assert content.headers["content-type"] == "image/png"
-    assert task.status_code == 200
-    task_data = task.json()["data"]
-    assert task_data["status"] == "RUNNING"
-    assert task_data["error_code"] is None
-    assert task_data["selected_tool_run_id"] is None
-    assert task_data["selected_result_id"] is None
+    assert task.status_code == 404  # Managed state is exposed under AgentRun.
 
     with create_session_factory(api_harness.engine)() as session:
         stored_run = session.get(ToolRunRow, run_data["tool_run_id"])
         stored_task = session.get(TaskRow, task_id)
         stored_asset = session.get(AssetRow, asset_id)
         assert stored_run is not None
-        assert stored_run.current_status == "RUNNING"
+        assert stored_run.current_status == "PARTIALLY_SUCCEEDED"
         assert stored_run.output_summary["error"] == expected_error
         persisted_summary = json.dumps(
             stored_run.output_summary,
@@ -474,10 +451,10 @@ def test_partial_success_persists_safe_summary_and_available_asset(
         assert "runtime_predictor" not in persisted_summary
         assert "runtime-controlled traceback" not in persisted_summary
         assert stored_task is not None
-        assert stored_task.current_status == "RUNNING"
-        assert stored_task.error_code is None
-        assert stored_task.selected_tool_run_id is None
-        assert stored_task.selected_result_id is None
+        assert stored_task.current_status == "PARTIALLY_SUCCEEDED"
+        assert stored_task.error_code == "MECHANICAL_PROPERTY_PREDICTION_FAILED"
+        assert stored_task.selected_tool_run_id == run_data["tool_run_id"]
+        assert stored_task.selected_result_id is not None
         assert stored_asset is not None
         assert stored_asset.current_status == "AVAILABLE"
 
@@ -485,7 +462,7 @@ def test_partial_success_persists_safe_summary_and_available_asset(
         assert connection.scalar(text("SELECT count(*) FROM asset")) == 1
         assert connection.scalar(
             text("SELECT count(*) FROM tool_result")
-        ) == 0
+        ) == 1
         assert connection.scalar(
             text("SELECT count(*) FROM natural_language_explanation")
         ) == 0

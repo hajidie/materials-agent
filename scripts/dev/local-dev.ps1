@@ -260,7 +260,7 @@ function New-LaunchProfile {
         MINIO_ENDPOINT = 'http://127.0.0.1:9000'
         LLM_ADAPTER = $Llm.ToLowerInvariant()
         ZTA35G_RUNTIME_URL = 'http://127.0.0.1:8100'
-        ZTA35G_RUNTIME_TIMEOUT_SECONDS = $(if ($Runtime -eq 'Real') { '900' } else { '10' })
+        ZTA35G_RUNTIME_TIMEOUT_SECONDS = '1200'
         ZTA35G_RUNTIME_TOKEN = $RuntimeToken
     }
     if ($Llm -eq 'Mock') {
@@ -833,7 +833,13 @@ function Test-ProcessSnapshotMatch {
     )
 
     try {
-        $expectedStart = [DateTime]::Parse([string]$Record.process_start_time).ToUniversalTime()
+        # PowerShell 7 may deserialize ISO JSON timestamps into UTC DateTime values.
+        # String-casting them discards the zone and can shift ownership checks by hours.
+        $expectedStart = if ($Record.process_start_time -is [DateTime]) {
+            $Record.process_start_time.ToUniversalTime()
+        } else {
+            [DateTime]::Parse([string]$Record.process_start_time).ToUniversalTime()
+        }
         $actualStart = ([DateTime]$Snapshot.start_time).ToUniversalTime()
         return (
             [int]$Record.pid -eq [int]$Snapshot.pid -and

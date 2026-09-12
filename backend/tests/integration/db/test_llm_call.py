@@ -446,7 +446,13 @@ def test_database_enforces_status_and_time_checks(
     constraint_name: str,
 ) -> None:
     conversation, task = _parents(migrated_database_engine)
+    message_id = _opaque("source")
+    with _factory(migrated_database_engine)() as uow:
+        uow.messages.add(Message.user(message_id=message_id, conversation_id=conversation.conversation_id,
+            task_id=task.task_id, actor_id=conversation.actor_id, request_id="fixture", content_text="fixture", created_at=BASE_TIME))
+        uow.commit()
     values = {
+        "source_message_id": message_id,
         "llm_call_id": _opaque("llm_call"),
         "task_id": task.task_id,
         "conversation_id": conversation.conversation_id,

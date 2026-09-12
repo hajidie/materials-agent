@@ -216,6 +216,7 @@ class InvocationRun:
     created_at: datetime
     updated_at: datetime
     completed_at: datetime | None
+    version: int = 0
 
     def __post_init__(self) -> None:
         for field_name in (

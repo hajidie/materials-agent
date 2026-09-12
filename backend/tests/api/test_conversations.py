@@ -379,159 +379,30 @@ def test_list_conversations_rejects_invalid_pagination(
     assert response.json()["error"]["code"] == "VALIDATION_FAILED"
 
 
-def test_new_task_submission_persists_orchestrated_facts_and_first_title(
-    api_harness,
-) -> None:
-    actor_id = "actor_local"
-    foreign_actor_id = "actor_foreign"
-    api_harness.persist_actor(actor_id)
-    api_harness.persist_actor(foreign_actor_id)
-    conversation = api_harness.persist_conversation(actor_id)
-
-    with api_harness.create_client(actor_id) as client:
-        response = client.post(
-            f"/api/v1/conversations/{conversation.conversation_id}/messages",
-            json={
-                "submission_mode": "NEW_TASK",
-                "content_text": "  请帮我分析这一材料问题。  ",
-            },
-            headers=_message_headers(**{"X-Actor-Id": foreign_actor_id}),
-        )
-
-    assert response.status_code == 200
-    body = response.json()
-    assert set(body) == {"request_id", "data"}
-    assert set(body["data"]) == {
-        "conversation_id",
-        "user_message",
-        "task",
-        "assistant_message",
-        "needs_input",
-        "result_summary",
-        "explanation",
-        "latest_explanation_failure",
-        "tool_invocation",
-        "idempotency_replayed",
-    }
-    assert body["data"]["conversation_id"] == conversation.conversation_id
-    assert body["data"]["user_message"]["role"] == "USER"
-    assert body["data"]["user_message"]["content_text"] == "请帮我分析这一材料问题。"
-    assert body["data"]["task"]["task_type"] == "KNOWLEDGE_QA"
-    assert body["data"]["task"]["status"] == "SUCCEEDED"
-    assert body["data"]["task"]["selected_tool_run_id"] is None
-    assert body["data"]["tool_invocation"] is None
-    assert body["data"]["task"]["selected_result_id"] is None
-    assert body["data"]["assistant_message"]["role"] == "ASSISTANT"
-    assert body["data"]["assistant_message"]["content_text"]
-    assert body["data"]["needs_input"] is None
-    assert body["data"]["result_summary"] is None
-    assert body["data"]["explanation"] is None
-    assert body["data"]["idempotency_replayed"] is False
-    assert "actor_id" not in response.text
-    counts = api_harness.counts()
-    assert counts == {
-        "conversation": 1,
-        "message": 2,
-        "task": 1,
-        "task_input_revision": 0,
-    }
-    message = next(
-        row for row in api_harness.message_rows() if row.role == "USER"
-    )
-    task = api_harness.task_rows()[0]
-    updated = api_harness.conversation_row(conversation.conversation_id)
-    assert updated is not None
-    assert message.actor_id == task.actor_id == updated.actor_id == actor_id
-    assert message.conversation_id == task.conversation_id == conversation.conversation_id
-    assert message.task_id == task.task_id
-    assert message.request_id == body["request_id"]
-    assert updated.updated_at > BASE_TIME
-    assert updated.title == "请帮我分析这一材料问题。"
 
 
-def test_new_task_submission_keeps_conversation_updated_at_monotonic(
-    api_harness,
-) -> None:
-    actor_id = "actor_local"
-    api_harness.persist_actor(actor_id)
-    newer_time = BASE_TIME + timedelta(hours=2)
-    conversation = api_harness.persist_conversation(
-        actor_id,
-        updated_at=newer_time,
-    )
-
-    with api_harness.create_client(actor_id) as client:
-        response = client.post(
-            f"/api/v1/conversations/{conversation.conversation_id}/messages",
-            headers=_message_headers(),
-            json={"submission_mode": "NEW_TASK", "content_text": "旧时钟标题"},
-        )
-
-    assert response.status_code == 200
-    assert api_harness.counts() == {
-        "conversation": 1,
-        "message": 2,
-        "task": 1,
-        "task_input_revision": 0,
-    }
-    updated = api_harness.conversation_row(conversation.conversation_id)
-    assert updated is not None
-    assert updated.updated_at == newer_time
-    assert updated.title == "旧时钟标题"
 
 
-def test_second_message_and_explicit_title_are_never_overwritten(
-    api_harness,
-) -> None:
-    actor_id = "actor_local"
-    api_harness.persist_actor(actor_id)
-    automatic = api_harness.persist_conversation(actor_id)
-    explicit = api_harness.persist_conversation(actor_id, title="显式标题")
-
-    with api_harness.create_client(actor_id) as client:
-        first = client.post(
-            f"/api/v1/conversations/{automatic.conversation_id}/messages",
-            headers=_message_headers(),
-            json={"submission_mode": "NEW_TASK", "content_text": "第一条消息"},
-        )
-        second = client.post(
-            f"/api/v1/conversations/{automatic.conversation_id}/messages",
-            headers=_message_headers(),
-            json={"submission_mode": "NEW_TASK", "content_text": "第二条消息"},
-        )
-        explicit_response = client.post(
-            f"/api/v1/conversations/{explicit.conversation_id}/messages",
-            headers=_message_headers(),
-            json={"submission_mode": "NEW_TASK", "content_text": "不会覆盖"},
-        )
-
-    assert [first.status_code, second.status_code, explicit_response.status_code] == [
-        200,
-        200,
-        200,
-    ]
-    assert api_harness.conversation_row(automatic.conversation_id).title == "第一条消息"
-    assert api_harness.conversation_row(explicit.conversation_id).title == "显式标题"
 
 
 @pytest.mark.parametrize(
     "payload",
     [
-        {"submission_mode": "NEW_TASK", "content_text": "   "},
-        {"submission_mode": "NEW_TASK", "content_text": 123},
+        {"mode": "NEW_RUN", "content_text": "   "},
+        {"mode": "NEW_RUN", "content_text": 123},
         {
-            "submission_mode": "NEW_TASK",
+            "mode": "NEW_RUN",
             "content_text": "valid",
             "target_task_id": "task_client",
         },
         {"submission_mode": "SUPPLEMENT_TASK", "content_text": "valid"},
         {
-            "submission_mode": "NEW_TASK",
+            "mode": "NEW_RUN",
             "content_text": "valid",
             "actor_id": "actor_client",
         },
         {
-            "submission_mode": "NEW_TASK",
+            "mode": "NEW_RUN",
             "content_text": "valid",
             "conversation_id": "conv_client",
         },
@@ -570,7 +441,7 @@ def test_foreign_and_missing_conversation_have_indistinguishable_safe_404(
     api_harness.persist_actor(actor_id)
     api_harness.persist_actor(foreign_actor_id)
     foreign = api_harness.persist_conversation(foreign_actor_id)
-    payload = {"submission_mode": "NEW_TASK", "content_text": "valid"}
+    payload = {"mode": "NEW_RUN", "content_text": "valid"}
 
     with api_harness.create_client(actor_id) as client:
         foreign_response = client.post(
@@ -586,35 +457,13 @@ def test_foreign_and_missing_conversation_have_indistinguishable_safe_404(
 
     for response in (foreign_response, missing_response):
         assert response.status_code == 404
-        assert response.json()["error"]["code"] == "RESOURCE_NOT_FOUND"
+        assert response.json()["error"]["code"] == "CONVERSATION_NOT_FOUND"
         assert response.json()["error"]["details"] == []
     assert foreign_response.json()["error"] == missing_response.json()["error"]
     assert api_harness.counts()["message"] == 0
     assert api_harness.counts()["task"] == 0
 
 
-def test_title_generator_failure_does_not_rollback_message_or_task(
-    api_harness,
-) -> None:
-    actor_id = "actor_local"
-    api_harness.persist_actor(actor_id)
-    conversation = api_harness.persist_conversation(actor_id)
-
-    def fail_title(_: str) -> str:
-        raise RuntimeError("private title detail")
-
-    with api_harness.create_client(actor_id, title_generator=fail_title) as client:
-        response = client.post(
-            f"/api/v1/conversations/{conversation.conversation_id}/messages",
-            headers=_message_headers(),
-            json={"submission_mode": "NEW_TASK", "content_text": "valid"},
-        )
-
-    assert response.status_code == 200
-    assert api_harness.counts()["message"] == 2
-    assert api_harness.counts()["task"] == 1
-    assert api_harness.conversation_row(conversation.conversation_id).title is None
-    assert "private title detail" not in response.text
 
 
 class _CommitFailureUnitOfWork(SQLAlchemyUnitOfWork):
@@ -696,31 +545,6 @@ def test_lifespan_recovers_process_state_and_drains_before_requests(
         assert client.get("/api/v1/health/live").status_code == 200
 
 
-def test_title_persistence_failure_does_not_rollback_message_or_task(
-    api_harness,
-) -> None:
-    actor_id = "actor_local"
-    api_harness.persist_actor(actor_id)
-    conversation = api_harness.persist_conversation(actor_id)
-    failure_factory = _SelectiveFailureFactory(api_harness.engine, {2})
-
-    with api_harness.create_client(
-        actor_id,
-        unit_of_work_factory=failure_factory,
-        conversation_cleanup_service=_NoopConversationCleanupService(),
-    ) as client:
-        response = client.post(
-            f"/api/v1/conversations/{conversation.conversation_id}/messages",
-            headers=_message_headers(),
-            json={"submission_mode": "NEW_TASK", "content_text": "valid"},
-        )
-
-    assert response.status_code == 200
-    assert api_harness.counts()["message"] == 2
-    assert api_harness.counts()["task"] == 1
-    assert api_harness.conversation_row(conversation.conversation_id).title is None
-    assert failure_factory.call_count == 8
-    assert all(unit_of_work.session is None for unit_of_work in failure_factory.instances)
 
 
 def test_conversation_create_recovers_its_committed_result_after_uncertain_commit(
@@ -738,6 +562,7 @@ def test_conversation_create_recovers_its_committed_result_after_uncertain_commi
         actor_id,
         unit_of_work_factory=factory,
         conversation_cleanup_service=_NoopConversationCleanupService(),
+        agent_store=object(),
     ) as client:
         recovered = client.post(
             "/api/v1/conversations",
@@ -825,77 +650,8 @@ def test_stale_repository_update_keeps_newer_database_updated_at(
     assert row.updated_at == newer_time
 
 
-def test_real_database_commit_failure_rolls_back_all_and_closes_session(
-    api_harness,
-) -> None:
-    actor_id = "actor_local"
-    api_harness.persist_actor(actor_id)
-    conversation = api_harness.persist_conversation(actor_id)
-    original_updated_at = conversation.updated_at
-    failure_factory = _SelectiveFailureFactory(api_harness.engine, {1})
-
-    with api_harness.create_client(
-        actor_id,
-        unit_of_work_factory=failure_factory,
-        conversation_cleanup_service=_NoopConversationCleanupService(),
-    ) as client:
-        failed = client.post(
-            f"/api/v1/conversations/{conversation.conversation_id}/messages",
-            headers=_message_headers(),
-            json={"submission_mode": "NEW_TASK", "content_text": "valid"},
-        )
-
-    assert failed.status_code == 503
-    assert failed.json()["error"]["code"] == "DEPENDENCY_UNAVAILABLE"
-    counts = api_harness.counts()
-    assert counts["message"] == counts["task"] == 0
-    assert (
-        api_harness.conversation_row(conversation.conversation_id).updated_at
-        == original_updated_at
-    )
-    assert all(unit_of_work.session is None for unit_of_work in failure_factory.instances)
-
-    with api_harness.create_client(actor_id) as healthy_client:
-        recovered = healthy_client.post(
-            f"/api/v1/conversations/{conversation.conversation_id}/messages",
-            headers=_message_headers(),
-            json={"submission_mode": "NEW_TASK", "content_text": "recovered"},
-        )
-    assert recovered.status_code == 200
 
 
-def test_generic_persistence_failure_returns_safe_internal_error(
-    api_harness,
-) -> None:
-    actor_id = "actor_local"
-    api_harness.persist_actor(actor_id)
-    conversation = api_harness.persist_conversation(actor_id)
-    failure_factory = _SelectiveFailureFactory(
-        api_harness.engine,
-        {1},
-        _InternalCommitFailureUnitOfWork,
-    )
-
-    with api_harness.create_client(
-        actor_id,
-        unit_of_work_factory=failure_factory,
-        conversation_cleanup_service=_NoopConversationCleanupService(),
-    ) as client:
-        response = client.post(
-            f"/api/v1/conversations/{conversation.conversation_id}/messages",
-            headers=_message_headers(),
-            json={"submission_mode": "NEW_TASK", "content_text": "valid"},
-        )
-
-    assert response.status_code == 500
-    assert response.json()["error"] == {
-        "code": "INTERNAL_ERROR",
-        "message": "内部处理失败。",
-        "details": [],
-    }
-    assert api_harness.counts()["message"] == 0
-    assert api_harness.counts()["task"] == 0
-    assert all(unit_of_work.session is None for unit_of_work in failure_factory.instances)
 
 
 def test_invalid_json_uses_safe_400_without_echoing_body(
@@ -959,11 +715,11 @@ def test_imports_and_create_app_have_no_external_or_database_side_effects(
         "materialsagent.application.context",
         "materialsagent.application.errors",
         "materialsagent.application.conversations",
-        "materialsagent.application.messages",
-        "materialsagent.application.tasks",
+        "materialsagent.application.agent_runtime",
+        "materialsagent.application.agent_tools",
         "materialsagent.api.dependencies",
         "materialsagent.api.routes.conversations",
-        "materialsagent.api.routes.tasks",
+        "materialsagent.api.routes.agent_runs",
         "materialsagent.main",
     ):
         importlib.import_module(module_name)
@@ -1014,6 +770,7 @@ def test_create_app_disposes_only_its_owned_business_engine(
             object_storage_probe=lambda: True,
         ),
         conversation_cleanup_service=_NoopConversationCleanupService(),
+        agent_store=object(),
     )
     assert fake_engine.disposed is False
 

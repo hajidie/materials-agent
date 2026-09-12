@@ -25,7 +25,7 @@ def _role(provider: str, role: str, **overrides: object) -> ConfiguredRole:
         "reasoning_effort": None,
         "thinking_budget": None,
         "response_format": (
-            "text" if role == "tool_result_explanation" else "json_object"
+            "text" if role == "final_answer" else "json_object"
         ),
         "streaming": False,
         "context_window_tokens": 1_000_000,
@@ -48,7 +48,7 @@ def test_deepseek_factory_receives_only_controlled_parameters() -> None:
 
     config = _role(
         "deepseek",
-        "chat_orchestration",
+        "agent_decision",
         top_p=0.8,
         reasoning_mode="disabled",
     )
@@ -83,7 +83,7 @@ def test_qwen_reasoning_extensions_and_streaming_are_controlled() -> None:
 
     config = _role(
         "qwen",
-        "tool_result_explanation",
+        "final_answer",
         temperature=None,
         top_p=0.9,
         top_k=20,
@@ -120,11 +120,11 @@ def test_three_roles_create_independent_model_instances() -> None:
         return instance
 
     roles = (
-        _role("deepseek", "chat_orchestration"),
-        _role("deepseek", "tool_input_extraction"),
+        _role("deepseek", "agent_decision"),
+        _role("deepseek", "tool_arg_resolution"),
         _role(
             "deepseek",
-            "tool_result_explanation",
+            "final_answer",
             max_tokens=768,
         ),
     )

@@ -18,6 +18,8 @@ def provider_client_kwargs(config: ConfiguredRole) -> dict[str, object]:
         "include_response_headers": True,
         "streaming": config.streaming,
     }
+    if config.streaming:
+        kwargs["stream_usage"] = True
     for name in ("temperature", "top_p", "max_tokens"):
         value = getattr(config, name)
         if value is not None:

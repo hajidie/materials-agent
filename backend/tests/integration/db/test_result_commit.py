@@ -7,7 +7,6 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-from materialsagent.application.explanation_service import ExplanationService
 from materialsagent.application.errors import ApplicationConflictError
 from materialsagent.application.context import ActorContext
 from materialsagent.application.result_service import (
@@ -18,7 +17,7 @@ from materialsagent.application.tool_execution import (
     ToolExecutionReceipt,
     normalize_tool_output_summary,
 )
-from materialsagent.application.tool_workflow import ToolWorkflowService
+from materialsagent.application.agent_tools import ManagedToolWorkflow as ToolWorkflowService
 from materialsagent.domain.models.actor import Actor
 from materialsagent.domain.models.asset import Asset
 from materialsagent.domain.models.conversation import Conversation
@@ -35,9 +34,7 @@ from materialsagent.domain.ports.tool_registry import ExecutionPolicy
 from materialsagent.domain.ports.unit_of_work import PersistenceError
 from materialsagent.infrastructure.db.session import create_session_factory
 from materialsagent.infrastructure.db.unit_of_work import SQLAlchemyUnitOfWork
-from materialsagent.infrastructure.llm.mock_explanation import (
-    MockExplanationAdapter,
-)
+
 
 
 BASE = datetime(2026, 7, 23, 1, 0, tzinfo=timezone.utc)
@@ -666,14 +663,14 @@ def _seed_retry_result(
             ("sem_image", "mechanical_properties"),
             (),
             "SUCCEEDED",
-            "RUNNING",
+            "SUCCEEDED",
         ),
         (
             ("sem_image",),
             ("sem_image",),
             (),
             "SUCCEEDED",
-            "RUNNING",
+            "SUCCEEDED",
         ),
         (
             ("sem_image", "mechanical_properties"),
@@ -687,7 +684,7 @@ def _seed_retry_result(
             ("mechanical_properties",),
             (),
             "SUCCEEDED",
-            "RUNNING",
+            "SUCCEEDED",
         ),
         (
             ("mechanical_properties",),
@@ -718,7 +715,7 @@ def test_result_commit_is_atomic_and_mechanically_terminalizes_sources(
         id_factory=lambda: "result_1",
     )
 
-    result = service.commit_result(ACTOR, receipt=receipt, assets=assets)
+    result = service.commit_initial_result(ACTOR, receipt=receipt, assets=assets)
 
     assert result.status == expected_status
     assert result.data == receipt.output.data
@@ -799,7 +796,7 @@ def test_result_commit_rejects_untrusted_task_input_revision_sources(
     )
 
     with pytest.raises(ApplicationConflictError):
-        service.commit_result(ACTOR, receipt=receipt, assets=assets)
+        service.commit_initial_result(ACTOR, receipt=receipt, assets=assets)
 
     assert case
     assert factory.created[0].revisions.requested_ids == ["revision_1"]
@@ -865,7 +862,7 @@ def test_result_commit_rejects_inconsistent_revision_and_tool_run_sources(
     )
 
     with pytest.raises(ApplicationConflictError):
-        service.commit_result(ACTOR, receipt=receipt, assets=assets)
+        service.commit_initial_result(ACTOR, receipt=receipt, assets=assets)
 
     assert case
     with _factory(migrated_database_engine)() as unit_of_work:
@@ -898,10 +895,10 @@ def test_result_commit_rejects_duplicate_and_non_available_or_foreign_assets(
         clock=lambda: BASE + timedelta(seconds=5),
         id_factory=lambda: "result_1",
     )
-    service.commit_result(ACTOR, receipt=receipt, assets=assets)
+    service.commit_initial_result(ACTOR, receipt=receipt, assets=assets)
 
     with pytest.raises(ApplicationConflictError):
-        service.commit_result(ACTOR, receipt=receipt, assets=assets)
+        service.commit_initial_result(ACTOR, receipt=receipt, assets=assets)
 
 
 @pytest.mark.parametrize(
@@ -930,7 +927,7 @@ def test_result_commit_rejects_cross_actor_task_or_tool_run_asset(
     )
 
     with pytest.raises(ApplicationConflictError):
-        service.commit_result(ACTOR, receipt=receipt, assets=assets)
+        service.commit_initial_result(ACTOR, receipt=receipt, assets=assets)
 
     with _factory(migrated_database_engine)() as unit_of_work:
         assert unit_of_work.tool_results.get("result_1") is None
@@ -953,7 +950,7 @@ def test_result_commit_rejects_non_available_asset(
     )
 
     with pytest.raises(ApplicationConflictError):
-        service.commit_result(ACTOR, receipt=receipt, assets=assets)
+        service.commit_initial_result(ACTOR, receipt=receipt, assets=assets)
 
     with _factory(migrated_database_engine)() as unit_of_work:
         assert unit_of_work.tool_results.get("result_1") is None
@@ -979,7 +976,7 @@ def test_result_commit_rejects_mechanical_success_without_available_sem_source(
     )
 
     with pytest.raises(ApplicationConflictError):
-        service.commit_result(ACTOR, receipt=receipt, assets=assets)
+        service.commit_initial_result(ACTOR, receipt=receipt, assets=assets)
 
     with _factory(migrated_database_engine)() as unit_of_work:
         assert unit_of_work.tool_results.get("result_1") is None
@@ -1002,7 +999,7 @@ def test_result_commit_rejects_post_receipt_scientific_value_mutation(
     )
 
     with pytest.raises(ApplicationConflictError):
-        service.commit_result(ACTOR, receipt=receipt, assets=assets)
+        service.commit_initial_result(ACTOR, receipt=receipt, assets=assets)
 
     with _factory(migrated_database_engine)() as unit_of_work:
         assert unit_of_work.tool_results.get("result_1") is None
@@ -1024,7 +1021,7 @@ def test_result_commit_rejects_version_and_selected_reference_mismatches(
     )
 
     with pytest.raises(ApplicationConflictError):
-        service.commit_result(
+        service.commit_initial_result(
             ACTOR,
             receipt=replace(
                 receipt,
@@ -1050,7 +1047,7 @@ def test_result_commit_rejects_version_and_selected_reference_mismatches(
         unit_of_work.commit()
 
     with pytest.raises(ApplicationConflictError):
-        service.commit_result(ACTOR, receipt=receipt, assets=assets)
+        service.commit_initial_result(ACTOR, receipt=receipt, assets=assets)
 
 
 @pytest.mark.parametrize(
@@ -1181,31 +1178,23 @@ def _workflow_for_result_failure(
     ToolWorkflowService,
     _StaticExecutionService,
     _StaticAssetService,
-    MockExplanationAdapter,
 ]:
     execution = _StaticExecutionService(receipt)
     asset_service = _StaticAssetService(assets)
-    explanation_adapter = MockExplanationAdapter(mode="success")
     normal_factory = _factory(engine)
     result_service = ResultService(
         _FailFirstCommitFactory(engine),
         clock=lambda: BASE + timedelta(seconds=5),
         id_factory=lambda: "result_1",
     )
-    explanation_service = ExplanationService(
-        normal_factory,
-        explanation_adapter,
-        clock=lambda: BASE + timedelta(seconds=6),
-    )
     workflow = ToolWorkflowService(
         terminalization_factory or normal_factory,
         execution,
         asset_service,
         result_service,
-        explanation_service,
         clock=lambda: BASE + timedelta(seconds=6),
     )
-    return workflow, execution, asset_service, explanation_adapter
+    return workflow, execution, asset_service
 
 
 def test_result_commit_failure_rolls_back_and_returns_no_memory_result(
@@ -1217,7 +1206,7 @@ def test_result_commit_failure_rolls_back_and_returns_no_memory_result(
         completed=("sem_image",),
         failed=(),
     )
-    workflow, execution, asset_service, explanation_adapter = (
+    workflow, execution, asset_service = (
         _workflow_for_result_failure(
             migrated_database_engine,
             receipt,
@@ -1262,10 +1251,9 @@ def test_result_commit_failure_rolls_back_and_returns_no_memory_result(
         ) == 0
     assert execution.calls == 1
     assert asset_service.calls == 1
-    assert explanation_adapter.call_count == 0
 
 
-def test_uncertain_initial_result_commit_recovers_and_continues_explanation(
+def test_uncertain_initial_result_commit_recovers_trusted_result_without_generation(
     migrated_database_engine: Engine,
 ) -> None:
     receipt, assets = _seed(
@@ -1277,7 +1265,6 @@ def test_uncertain_initial_result_commit_recovers_and_continues_explanation(
     normal_factory = _factory(migrated_database_engine)
     execution = _StaticExecutionService(receipt)
     asset_service = _StaticAssetService(assets)
-    explanation_adapter = MockExplanationAdapter(mode="success")
     result_service = ResultService(
         _CommitThenReportFailureFactory(migrated_database_engine),
         clock=lambda: BASE + timedelta(seconds=5),
@@ -1288,11 +1275,6 @@ def test_uncertain_initial_result_commit_recovers_and_continues_explanation(
         execution,
         asset_service,
         result_service,
-        ExplanationService(
-            normal_factory,
-            explanation_adapter,
-            clock=lambda: BASE + timedelta(seconds=6),
-        ),
         clock=lambda: BASE + timedelta(seconds=6),
     )
 
@@ -1320,12 +1302,11 @@ def test_uncertain_initial_result_commit_recovers_and_continues_explanation(
         assert run.error_code is None
         assert len(
             unit_of_work.explanations.list_for_result("result_1")
-        ) == 1
+        ) == 0
     assert projection.result.result_id == "result_1"
     assert projection.task.current_status == "SUCCEEDED"
     assert execution.calls == 1
     assert asset_service.calls == 1
-    assert explanation_adapter.call_count == 1
 
 
 def test_result_failure_terminalization_commit_failure_preserves_real_state(
@@ -1340,7 +1321,7 @@ def test_result_failure_terminalization_commit_failure_preserves_real_state(
     terminalization_factory = _FailFirstCommitFactory(
         migrated_database_engine
     )
-    workflow, execution, asset_service, explanation_adapter = (
+    workflow, execution, asset_service = (
         _workflow_for_result_failure(
             migrated_database_engine,
             receipt,
@@ -1386,4 +1367,3 @@ def test_result_failure_terminalization_commit_failure_preserves_real_state(
         ) == 0
     assert execution.calls == 1
     assert asset_service.calls == 1
-    assert explanation_adapter.call_count == 0

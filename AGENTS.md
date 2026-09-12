@@ -23,7 +23,7 @@
 | 路径 | Agent 应在这里查找什么 |
 |---|---|
 | `backend/src/materialsagent/api/` | FastAPI 路由、依赖注入和公共 schema |
-| `backend/src/materialsagent/application/` | 用例编排、Tool Registry、任务、执行、结果和解释服务 |
+| `backend/src/materialsagent/application/` | Agent Runtime、Tool Registry、参数解析、任务、执行与最终回答 |
 | `backend/src/materialsagent/domain/` | 领域模型、状态约束和端口合同 |
 | `backend/src/materialsagent/infrastructure/` | PostgreSQL、MinIO、LLM 和 Runtime 适配器 |
 | `backend/alembic/versions/` | 数据库迁移；持久化结构变化必须与领域和测试一起核对 |
@@ -65,8 +65,11 @@
 - 固定推理参数 `num_samples=1`、`guide_scale=2.0`、`timesteps=1000` 属于 Runtime 合同。
   变更时必须同步合同、实现和测试，不得仅开放为环境变量。
 - 不混合不同 ToolRun 的图片、性能结果或解释来源。Backend 不自动重试 Runtime execute；
-  显式重试必须重新授权并创建新的 ToolRun、attempt 和 seed。
-- 外部 LLM、Runtime 和 MinIO 调用不得置于数据库长事务中。
+  显式失败重试创建新 AgentRun、Invocation、ToolRun、attempt 和 seed，重新授权。
+  Answer Regeneration 走受限 AgentRun，必须向 DecisionEngine 注入空工具集合，并在执行边界禁止 Tool。
+- 外部 LLM、Runtime 和 MinIO 调用不得置于数据库长事务中；通过 version、claim 和短事务 CAS
+  取得推进权，已派发动作不得因 lease、轮询或 HTTP 断开而重新派发。
+- ToolResult 与 Observation 分段落库时，必须通过确定性一致性门禁后才能继续决策。
 
 更完整的机制说明在 `docs/project-context.md`；以上条目保留在规则层，是因为 Agent 在修改相关
 代码前必须直接看到这些边界。
@@ -75,8 +78,10 @@
 
 当前版本是单用户、本地运行的模块化单体 MVP，默认应用组合注册
 `materials_unit_conversion` Standard Tool 与 `zta35g_sem_virtual_lab` Managed Tool。单一
-Tool Registry、LangChain Adapter 和 ExecutorRouter 是显式扩展底座；每条用户消息最多形成
-一个自动执行 Invocation，生产 Catalog 禁止 Side-effect Tool。
+Tool Registry、LangChain Adapter 和 ExecutorRouter 是显式扩展底座；每个 AgentRun 通过有界循环形成多个有序 Invocation，生产 Catalog 禁止 Side-effect Tool。
+
+Agent Runtime 是唯一执行入口；不得恢复旧 Router、固定 Explanation、旧补参或 Native Tool Calling 独立执行路径。
+FinalAnswer 成功持久化后 Run 才能 SUCCEEDED，HTTP 发送结果不改变已提交业务状态。
 
 当前不包含 Redis、后台 Worker、SSE、WebSocket、登录、多用户隔离、真实 SEM 上传、EBSD
 输入、ML Training、Planner、多 Agent、动态插件上传或生产部署。增加这些能力属于产品或

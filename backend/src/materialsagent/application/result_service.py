@@ -185,20 +185,6 @@ class ResultService:
             selection_policy="RETRY",
         )
 
-    def commit_result(
-        self,
-        actor: ActorContext,
-        *,
-        receipt: ToolExecutionReceipt,
-        assets: list[Asset],
-    ) -> ToolResult:
-        """Compatibility name for the explicit initial-result entry."""
-        return self.commit_initial_result(
-            actor,
-            receipt=receipt,
-            assets=assets,
-        )
-
     def _commit_result(
         self,
         actor: ActorContext,
@@ -779,9 +765,7 @@ class ResultService:
         return _ResultTerminalFacts(
             error_code=error_code,
             safe_error_message=safe_error_message,
-            task_status=(
-                "RUNNING" if result.status == "SUCCEEDED" else result.status
-            ),
+            task_status=result.status,
         )
 
     @staticmethod

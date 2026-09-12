@@ -28,6 +28,8 @@ export default defineConfig(({ mode }) => {
       proxy: {
         "/api": {
           target: backendOrigin,
+          timeout: 3_660_000,
+          proxyTimeout: 3_660_000,
         },
       },
     },

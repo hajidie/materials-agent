@@ -402,7 +402,6 @@ class ToolExecutionService:
                     or revision.missing_fields
                     or revision.ambiguous_fields
                     or revision.validation_errors
-                    or revision.source_llm_call_id is None
                 ):
                     raise TaskNotRetryableError(task_id=task_id)
                 selected_run = (
@@ -491,11 +490,6 @@ class ToolExecutionService:
                         != revision.task_input_revision_id
                     )
                 ):
-                    raise TaskNotRetryableError(task_id=task_id)
-                llm_call = unit_of_work.llm_calls.get(
-                    revision.source_llm_call_id
-                )
-                if llm_call is None or llm_call.status != "SUCCEEDED":
                     raise TaskNotRetryableError(task_id=task_id)
                 bound_ref = task.bound_tool_ref
                 if bound_ref is None:
@@ -857,7 +851,6 @@ class ToolExecutionService:
                     or revision.missing_fields
                     or revision.ambiguous_fields
                     or revision.validation_errors
-                    or revision.source_llm_call_id is None
                 ):
                     raise ResourceNotFoundError(task_id=task_id)
                 activated_chain = (
@@ -878,28 +871,8 @@ class ToolExecutionService:
                 )
                 if ready_activation:
                     original_ready_task = task
-                legacy_activation = (
-                    task.task_type == "TOOL_EXECUTION"
-                    and task.current_status == "FAILED"
-                    and task.error_code == "TOOL_UNAVAILABLE"
-                    and task.selected_tool_run_id is None
-                    and task.selected_result_id is None
-                )
-                if not (
-                    activated_chain
-                    or ready_activation
-                    or legacy_activation
-                ):
+                if not (activated_chain or ready_activation):
                     raise ApplicationConflictError(task_id=task_id)
-                llm_call = unit_of_work.llm_calls.get(
-                    revision.source_llm_call_id
-                )
-                if (
-                    llm_call is None
-                    or llm_call.task_id != task_id
-                    or llm_call.status != "SUCCEEDED"
-                ):
-                    raise ResourceNotFoundError(task_id=task_id)
                 bound_ref = task.bound_tool_ref
                 if bound_ref is None:
                     raise ResourceNotFoundError(task_id=task_id)

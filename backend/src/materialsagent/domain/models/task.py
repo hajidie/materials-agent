@@ -227,6 +227,7 @@ class Task:
                 self.bound_tool_ref is not None
                 and not latest_revision.missing_fields
                 and not latest_revision.ambiguous_fields
+                and not latest_revision.validation_errors
             ):
                 raise TaskRoutingStateError(
                     self.task_id,

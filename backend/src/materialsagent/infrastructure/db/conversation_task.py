@@ -251,7 +251,7 @@ class MessageRow(Base):
             name="ck_message_role_allowed",
         ),
         CheckConstraint(
-            "generation_source IN ('USER', 'LLM', 'TEMPLATE')",
+            "generation_source IN ('USER', 'LLM', 'TEMPLATE', 'AGENT')",
             name="ck_message_generation_source_allowed",
         ),
         CheckConstraint(
@@ -280,6 +280,7 @@ class MessageRow(Base):
             "generation_source <> 'TEMPLATE' OR role = 'ASSISTANT'",
             name="ck_message_template_source_role",
         ),
+        CheckConstraint("generation_source <> 'AGENT' OR role = 'ASSISTANT'", name="ck_message_agent_source_role"),
         UniqueConstraint("llm_call_id", name="uq_message_llm_call_id"),
         UniqueConstraint(
             "message_id",

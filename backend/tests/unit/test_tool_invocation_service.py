@@ -454,246 +454,16 @@ def test_fake_side_effect_confirmation_rejection_and_sink_are_idempotent() -> No
         rejected_service.confirm(ACTOR, rejected.run.invocation_run_id)
 
 
-def test_confirmed_pending_resume_and_confirmation_expiry() -> None:
-    sink = FakeSideEffectSink()
-    registration = ToolRegistry(
-        (build_fake_side_effect_registered_tool(sink),)
-    ).resolve("dev_fake_side_effect")
-    store = _store()
-    clock = _Clock()
-    service = _service(store, (registration,), clock)
-    pending = _running(
-        registration,
-        clock=clock,
-        dispatch_started=False,
-        confirmed=True,
-    )
-    pending = replace(
-        pending,
-        status=InvocationStatus.PENDING,
-        execution_claim_token=None,
-        execution_lease_expires_at=None,
-        execution_attempt_count=0,
-    )
-    store.runs[pending.invocation_run_id] = pending
-
-    assert service.confirm(ACTOR, pending.invocation_run_id).run.status is InvocationStatus.SUCCEEDED
-    assert sink.write_count == 1
-
-    expiring_store = _store()
-    expiring_service = _service(expiring_store, (registration,), clock)
-    proposed = expiring_service.create_from_proposal(
-        ACTOR,
-        _resolved(registration, {"message": "expire"}),
-        request_id="request_expire",
-        idempotency_key="idem_expire",
-    )
-    clock.current = BASE + timedelta(minutes=16)
-    expired = expiring_service.get(ACTOR, proposed.run.invocation_run_id)
-    assert expired.run.status is InvocationStatus.EXPIRED
-    assert sink.write_count == 1
-
-    reject_store = _store()
-    reject_service = _service(reject_store, (registration,), clock)
-    reject_pending = reject_service.create_from_proposal(
-        ACTOR,
-        _resolved(registration, {"message": "expire before reject"}),
-        request_id="request_expire_reject",
-        idempotency_key="idem_expire_reject",
-    )
-    clock.current += timedelta(minutes=16)
-    rejected_after_ttl = reject_service.reject(
-        ACTOR,
-        reject_pending.run.invocation_run_id,
-    )
-    assert rejected_after_ttl.run.status is InvocationStatus.EXPIRED
-    with pytest.raises(ApplicationConflictError):
-        reject_service.confirm(ACTOR, reject_pending.run.invocation_run_id)
 
 
-def test_standard_crash_windows_replay_but_active_lease_does_not() -> None:
-    registration = ToolRegistry(
-        (build_unit_conversion_registered_tool(),)
-    ).resolve("materials_unit_conversion")
-    clock = _Clock()
-
-    for dispatch_started in (False, True):
-        store = _store()
-        run = _running(
-            registration,
-            clock=clock,
-            dispatch_started=dispatch_started,
-        )
-        store.runs[run.invocation_run_id] = run
-        recovered = _service(store, (registration,), clock).get(
-            ACTOR,
-            run.invocation_run_id,
-        )
-        assert recovered.run.status is InvocationStatus.SUCCEEDED
-        assert recovered.run.execution_attempt_count == 2
-
-    active_store = _store()
-    active = replace(
-        _running(registration, clock=clock, dispatch_started=False),
-        execution_lease_expires_at=clock.current + timedelta(seconds=30),
-    )
-    active_store.runs[active.invocation_run_id] = active
-    unchanged = _service(active_store, (registration,), clock).get(
-        ACTOR,
-        active.invocation_run_id,
-    )
-    assert unchanged.run.status is InvocationStatus.RUNNING
-    assert unchanged.run.execution_attempt_count == 1
 
 
-def test_side_effect_dispatch_marker_recovers_to_outcome_unknown_without_retry() -> None:
-    sink = FakeSideEffectSink()
-    registration = ToolRegistry(
-        (build_fake_side_effect_registered_tool(sink),)
-    ).resolve("dev_fake_side_effect")
-    store = _store()
-    clock = _Clock()
-    run = _running(
-        registration,
-        clock=clock,
-        dispatch_started=True,
-        confirmed=True,
-    )
-    store.runs[run.invocation_run_id] = run
-
-    recovered = _service(store, (registration,), clock).get(
-        ACTOR,
-        run.invocation_run_id,
-    )
-
-    assert recovered.run.status is InvocationStatus.OUTCOME_UNKNOWN
-    assert recovered.run.error_code == "SIDE_EFFECT_OUTCOME_UNKNOWN"
-    assert sink.write_count == 0
 
 
-def test_side_effect_returned_result_crash_stays_unknown_and_does_not_redispatch() -> None:
-    sink = FakeSideEffectSink()
-    registration = ToolRegistry(
-        (build_fake_side_effect_registered_tool(sink),)
-    ).resolve("dev_fake_side_effect")
-    store = _store()
-    clock = _Clock()
-    run = _running(
-        registration,
-        clock=clock,
-        dispatch_started=True,
-        confirmed=True,
-    )
-    sink.write_once(run.idempotency_key, run.proposed_arguments)
-    store.runs[run.invocation_run_id] = run
-
-    recovered = _service(store, (registration,), clock).get(
-        ACTOR,
-        run.invocation_run_id,
-    )
-
-    assert recovered.run.status is InvocationStatus.OUTCOME_UNKNOWN
-    assert sink.write_count == 1
 
 
-def test_managed_dispatch_marker_is_reconciled_without_runtime_replay() -> None:
-    registration = ToolRegistry(
-        (build_zta35g_tool_definition(),)
-    ).resolve("zta35g_sem_virtual_lab")
-    store = _store(task_id="task_1")
-    store.tasks["task_1"] = Task(
-        task_id="task_1",
-        conversation_id="conversation_1",
-        actor_id=ACTOR.actor_id,
-        task_type="TOOL_EXECUTION",
-        current_status="RUNNING",
-        selected_tool_run_id=None,
-        selected_result_id=None,
-        created_at=BASE - timedelta(minutes=5),
-        started_at=BASE - timedelta(minutes=2),
-        updated_at=BASE - timedelta(minutes=1),
-        completed_at=None,
-        error_code=None,
-        safe_error_message=None,
-        tool_id=registration.tool_id,
-        bound_tool_version=registration.version,
-        bound_schema_hash=registration.schema_hash,
-    )
-    clock = _Clock()
-    run = _running(
-        registration,
-        clock=clock,
-        dispatch_started=True,
-        task_id="task_1",
-    )
-    store.runs[run.invocation_run_id] = run
-
-    class _ForbiddenWorkflow:
-        def execute(self, *_args, **_kwargs):
-            pytest.fail("Managed Runtime must not be replayed after dispatch started.")
-
-    recovered = _service(
-        store,
-        (registration,),
-        clock,
-        managed_workflow_service=_ForbiddenWorkflow(),
-    ).get(ACTOR, run.invocation_run_id)
-
-    assert recovered.run.status is InvocationStatus.FAILED
-    assert recovered.run.error_code == "MANAGED_EXECUTION_INTERRUPTED"
 
 
-def test_managed_persisted_result_is_projected_after_terminal_commit_crash() -> None:
-    registration = ToolRegistry(
-        (build_zta35g_tool_definition(),)
-    ).resolve("zta35g_sem_virtual_lab")
-    store = _store(task_id="task_1")
-    store.tasks["task_1"] = Task(
-        task_id="task_1",
-        conversation_id="conversation_1",
-        actor_id=ACTOR.actor_id,
-        task_type="TOOL_EXECUTION",
-        current_status="SUCCEEDED",
-        selected_tool_run_id="tool_run_persisted",
-        selected_result_id="result_persisted",
-        created_at=BASE - timedelta(minutes=5),
-        started_at=BASE - timedelta(minutes=2),
-        updated_at=BASE - timedelta(minutes=1),
-        completed_at=BASE - timedelta(minutes=1),
-        error_code=None,
-        safe_error_message=None,
-        tool_id=registration.tool_id,
-        bound_tool_version=registration.version,
-        bound_schema_hash=registration.schema_hash,
-    )
-    store.tool_runs["tool_run_persisted"] = SimpleNamespace(
-        tool_run_id="tool_run_persisted",
-        task_id="task_1",
-        actor_id=ACTOR.actor_id,
-        created_at=BASE - timedelta(minutes=1),
-    )
-    clock = _Clock()
-    run = _running(
-        registration,
-        clock=clock,
-        dispatch_started=True,
-        task_id="task_1",
-    )
-    store.runs[run.invocation_run_id] = run
-
-    class _ForbiddenWorkflow:
-        def execute(self, *_args, **_kwargs):
-            pytest.fail("Persisted Managed results must be reconciled, not replayed.")
-
-    recovered = _service(
-        store,
-        (registration,),
-        clock,
-        managed_workflow_service=_ForbiddenWorkflow(),
-    ).get(ACTOR, run.invocation_run_id)
-
-    assert recovered.run.status is InvocationStatus.SUCCEEDED
-    assert recovered.run.managed_tool_run_id == "tool_run_persisted"
 
 
 def test_explicit_managed_retry_creates_linked_invocation_and_reuses_idempotency() -> None:
@@ -793,3 +563,14 @@ def test_explicit_managed_retry_creates_linked_invocation_and_reuses_idempotency
     assert first.run.managed_tool_run_id == "tool_run_retry"
     assert replay.run.invocation_run_id == first.run.invocation_run_id
     assert workflow.calls == 1
+
+
+def test_queries_never_resume_dispatched_managed_invocation():
+    registration = ToolRegistry((build_zta35g_tool_definition(),)).resolve("zta35g_sem_virtual_lab")
+    store = _store(task_id="task_1")
+    clock = _Clock()
+    run = _running(registration, clock=clock, dispatch_started=True, task_id="task_1")
+    store.runs[run.invocation_run_id] = run
+    service = _service(store, (registration,), clock)
+    for _ in range(3):
+        assert service.get(ACTOR, run.invocation_run_id).run == run

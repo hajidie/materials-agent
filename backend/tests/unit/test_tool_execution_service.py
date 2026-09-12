@@ -390,7 +390,7 @@ def _service(
     seed_factory=None,
 ):
     store = _Store(
-        tasks={"task_1": task or _task()},
+        tasks={"task_1": task or _ready_task()},
         revisions={"revision_1": _revision()},
         llm_calls={"llm_1": _llm_call()},
         tool_runs={},
@@ -1160,7 +1160,7 @@ def test_success_records_safe_pending_output_without_terminalizing_task() -> Non
     }
     assert "must-not-be-persisted" not in repr(run)
     task = store.tasks["task_1"]
-    assert (task.current_status, task.error_code) == ("FAILED", "TOOL_UNAVAILABLE")
+    assert (task.current_status, task.error_code) == ("RUNNING", None)
     assert task.selected_tool_run_id is None
     assert task.selected_result_id is None
 
@@ -1325,7 +1325,7 @@ def test_failure_is_persisted_once_and_mapped_safely(
     assert run.current_status == "FAILED"
     assert run.failed_outputs == ["sem_image", "mechanical_properties"]
     assert run.error_code == expected_code
-    assert store.tasks["task_1"].error_code == "TOOL_UNAVAILABLE"
+    assert store.tasks["task_1"].error_code is None
 
 
 def test_failure_commit_error_returns_internal_error_and_leaves_run_running() -> None:

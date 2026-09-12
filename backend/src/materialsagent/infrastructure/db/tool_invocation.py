@@ -82,6 +82,7 @@ class InvocationResultRow(Base):
 
 
 class InvocationRunRow(Base):
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     __tablename__ = "invocation_run"
     __table_args__ = (
         CheckConstraint(
@@ -189,12 +190,6 @@ class InvocationRunRow(Base):
         ),
         UniqueConstraint("invocation_result_id", name="uq_invocation_result"),
         UniqueConstraint("actor_id", "idempotency_key", name="uq_invocation_actor_idempotency"),
-        Index(
-            "uq_invocation_message_proposal",
-            "source_message_id",
-            unique=True,
-            postgresql_where=text("trigger = 'MESSAGE_PROPOSAL'"),
-        ),
         Index(
             "ix_invocation_conversation_created",
             "conversation_id",
@@ -321,6 +316,7 @@ def _run_from_row(row: InvocationRunRow) -> InvocationRun:
         created_at=row.created_at,
         updated_at=row.updated_at,
         completed_at=row.completed_at,
+        version=row.version,
     )
 
 
@@ -450,6 +446,7 @@ class SQLAlchemyInvocationRunRepository:
         predicates = [
             InvocationRunRow.invocation_run_id == run.invocation_run_id,
             InvocationRunRow.status == expected_status.value,
+            InvocationRunRow.version == run.version,
         ]
         if expected_claim_token is not None:
             predicates.append(InvocationRunRow.execution_claim_token == expected_claim_token)
@@ -457,7 +454,7 @@ class SQLAlchemyInvocationRunRepository:
             row = self._session.scalar(
                 update(InvocationRunRow)
                 .where(*predicates)
-                .values(**_run_values(run, include_identity=False))
+                .values(**{**_run_values(run, include_identity=False), "version": run.version + 1})
                 .returning(InvocationRunRow)
             )
             return None if row is None else _run_from_row(row)
@@ -467,6 +464,7 @@ class SQLAlchemyInvocationRunRepository:
 
 def _run_values(run: InvocationRun, *, include_identity: bool = True) -> dict[str, object]:
     values: dict[str, object] = {
+        "version": run.version,
         "actor_id": run.actor_id,
         "conversation_id": run.conversation_id,
         "source_message_id": run.source_message_id,

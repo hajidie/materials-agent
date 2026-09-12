@@ -8,64 +8,27 @@ from uuid import uuid4
 from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from sqlalchemy.engine import Engine
 
 from materialsagent.api.routes.conversations import (
     router as conversations_router,
 )
 from materialsagent.api.routes.assets import router as assets_router
 from materialsagent.api.routes.health import router as health_router
-from materialsagent.api.routes.tasks import router as tasks_router
-from materialsagent.api.routes.timeline import router as timeline_router
 from materialsagent.api.routes.tools import router as tools_router
 from materialsagent.api.routes.tool_results import (
     router as tool_results_router,
-)
-from materialsagent.api.routes.tool_invocations import (
-    router as tool_invocations_router,
 )
 from materialsagent.application.context import ActorContext
 from materialsagent.application.conversation_cleanup import ConversationCleanupService
 from materialsagent.application.asset_service import AssetService
 from materialsagent.application.bootstrap import ensure_object_storage_bucket
-from materialsagent.application.chat_orchestration import (
-    ChatOrchestrationService,
-)
-from materialsagent.application.conversations import (
-    ConversationService,
-    IdFactory,
-)
-from materialsagent.application.errors import (
-    ApplicationConflictError,
-    ApplicationError,
-    ApplicationInternalError,
-    ApplicationValidationError,
-    DependencyUnavailableError,
-    InvalidCursorError,
-    ResourceNotFoundError,
-)
-from materialsagent.application.messages import (
-    MessageSubmissionService,
-    TitleGenerator,
-)
-from materialsagent.application.readiness import (
-    ReadinessService,
-    build_readiness_service,
-)
-from materialsagent.application.tasks import TaskQueryService
-from materialsagent.application.timeline import TimelineQueryService
-from materialsagent.application.timeline_cursor import TimelineCursorCodec
-from materialsagent.application.retries import (
-    ExplanationRetryService,
-    ToolRetryService,
-)
+from materialsagent.application.conversations import ConversationService
+from materialsagent.application.errors import ApplicationError, ApplicationInternalError
+from materialsagent.application.readiness import build_readiness_service
 from materialsagent.application.result_service import (
     ResultService,
     ToolResultQueryService,
 )
-from materialsagent.application.explanation_service import ExplanationService
-from materialsagent.application.tool_workflow import ToolWorkflowService
-from materialsagent.domain.ports.explanation import ExplanationPort
 from materialsagent.application.tool_execution import (
     ToolExecutionService,
     ToolRunQueryService,
@@ -74,7 +37,6 @@ from materialsagent.application.tools import (
     ToolCatalogService,
     build_tool_registry,
 )
-from materialsagent.application.tool_registry import ToolRegistry
 from materialsagent.application.tool_invocations import (
     ExecutorRouter,
     InvocationService,
@@ -88,16 +50,8 @@ from materialsagent.domain.ports.tool_authorization import (
     EmptyPermissionAuthorizationService,
     ExactPermissionAuthorizationService,
 )
-from materialsagent.domain.ports.chat_orchestration import ChatOrchestrationPort
-from materialsagent.domain.ports.tool_input_extraction import (
-    ToolInputExtractionPort,
-)
 from materialsagent.domain.ports.tool_registry import ToolExecutionProfile
-from materialsagent.domain.ports.storage import (
-    StoredObjectMetadata,
-    StorageService,
-)
-from materialsagent.domain.ports.unit_of_work import UnitOfWorkFactory
+from materialsagent.domain.ports.storage import StoredObjectMetadata
 from materialsagent.infrastructure.config import (
     AppSettings,
     ConfigurationError,
@@ -110,21 +64,7 @@ from materialsagent.infrastructure.db.session import (
     create_session_factory,
 )
 from materialsagent.infrastructure.db.unit_of_work import SQLAlchemyUnitOfWork
-from materialsagent.infrastructure.db.timeline_query import (
-    SQLAlchemyTimelineQueryRepository,
-)
 from materialsagent.infrastructure.logging import configure_logging
-from materialsagent.infrastructure.llm.mock import (
-    MockChatOrchestrationAdapter,
-    default_mock_responder,
-)
-from materialsagent.infrastructure.llm.mock_tool_input import (
-    MockToolInputExtractionAdapter,
-    default_mock_tool_input_responder,
-)
-from materialsagent.infrastructure.llm.mock_explanation import (
-    MockExplanationAdapter,
-)
 from materialsagent.infrastructure.tool_clients.local_zta35g import (
     LocalZTA35GToolClientAdapter,
 )
@@ -310,381 +250,112 @@ async def _internal_error_handler(
 
 
 def create_app(
-    *,
-    settings: AppSettings | None = None,
-    readiness_service: ReadinessService | None = None,
-    unit_of_work_factory: UnitOfWorkFactory | None = None,
-    actor_context: ActorContext | None = None,
-    clock: Clock | None = None,
-    id_factory: IdFactory | None = None,
-    title_generator: TitleGenerator | None = None,
-    conversation_service: ConversationService | None = None,
-    message_submission_service: MessageSubmissionService | None = None,
-    chat_orchestration_port: ChatOrchestrationPort | None = None,
-    tool_input_extraction_port: ToolInputExtractionPort | None = None,
-    chat_orchestration_service: ChatOrchestrationService | None = None,
-    task_query_service: TaskQueryService | None = None,
-    timeline_query_service: TimelineQueryService | None = None,
-    tool_registry: ToolRegistry | None = None,
-    tool_catalog_service: ToolCatalogService | None = None,
-    tool_execution_service: ToolExecutionService | None = None,
-    tool_run_query_service: ToolRunQueryService | None = None,
-    storage_service: StorageService | None = None,
-    asset_service: AssetService | None = None,
-    tool_result_query_service: ToolResultQueryService | None = None,
-    result_service: ResultService | None = None,
-    explanation_port: ExplanationPort | None = None,
-    explanation_service: ExplanationService | None = None,
-    tool_workflow_service: ToolWorkflowService | None = None,
-    tool_retry_service: ToolRetryService | None = None,
-    explanation_retry_service: ExplanationRetryService | None = None,
-    conversation_cleanup_service: ConversationCleanupService | None = None,
-    invocation_service: InvocationService | None = None,
-    m7_tool_chain_enabled: bool | None = None,
+    *, settings=None, readiness_service=None, unit_of_work_factory=None,
+    actor_context=None, clock=None, id_factory=None, conversation_service=None,
+    tool_registry=None,
+    tool_catalog_service=None, tool_execution_service=None, tool_run_query_service=None,
+    storage_service=None, asset_service=None, tool_result_query_service=None,
+    result_service=None, conversation_cleanup_service=None, invocation_service=None,
+    agent_store=None, agent_model=None, agent_runtime=None,
 ) -> FastAPI:
+    from materialsagent.application.agent_runtime import AgentRuntime
+    from materialsagent.application.agent_tools import RegistryAgentGateway, ManagedToolWorkflow
+    from materialsagent.domain.models.agent import RunBudget
+    from materialsagent.infrastructure.db.agent import SQLAlchemyAgentStore
+    from materialsagent.infrastructure.llm.agent_model import AgentModelAdapter, MockAgentModel
+
     resolved_settings = settings or load_settings()
-    resolved_readiness_service = readiness_service or build_readiness_service(
-        resolved_settings
-    )
-    owned_storage: _LazyConfiguredStorage | None = None
+    resolved_readiness_service = readiness_service or build_readiness_service(resolved_settings)
+    owned_engine = None
+    owned_storage = None
+    resolved_unit_of_work_factory = unit_of_work_factory
+    session_factory = None
+    if resolved_unit_of_work_factory is None:
+        try:
+            owned_engine = create_engine_from_settings(resolved_settings)
+            session_factory = create_session_factory(owned_engine)
+            resolved_unit_of_work_factory = lambda: SQLAlchemyUnitOfWork(session_factory)
+        except ConfigurationError:
+            pass
+    resolved_actor_context = actor_context
+    if resolved_actor_context is None and resolved_settings.local_actor_id:
+        resolved_actor_context = ActorContext(actor_id=resolved_settings.local_actor_id, user_id=None)
     resolved_storage_service = storage_service
     if resolved_storage_service is None:
         try:
             owned_storage = _LazyConfiguredStorage(resolved_settings)
             resolved_storage_service = owned_storage
         except ConfigurationError:
-            owned_storage = None
-    owned_engine: Engine | None = None
-    resolved_unit_of_work_factory = unit_of_work_factory
-    if resolved_unit_of_work_factory is None:
-        try:
-            owned_engine = create_engine_from_settings(resolved_settings)
-            session_factory = create_session_factory(owned_engine)
-            resolved_unit_of_work_factory = lambda: SQLAlchemyUnitOfWork(
-                session_factory
-            )
-        except ConfigurationError:
-            owned_engine = None
-    owned_query_repository = (
-        SQLAlchemyTimelineQueryRepository(owned_engine)
-        if owned_engine is not None
-        else None
-    )
-
-    resolved_actor_context = actor_context
-    if resolved_actor_context is None:
-        try:
-            resolved_actor_context = ActorContext(
-                actor_id=resolved_settings.local_actor_id,
-                user_id=None,
-            )
-        except (TypeError, ValueError):
-            resolved_actor_context = None
-
+            pass
+    runtime_config = parse_zta35g_runtime_config(resolved_settings)
+    runtime_client = None
+    if runtime_config:
+        runtime_client = LocalZTA35GToolClientAdapter(base_url=runtime_config.base_url,
+            token=runtime_config.token.get_secret_value(), timeout_seconds=runtime_config.timeout_seconds)
+    resolved_tool_registry = tool_registry or build_tool_registry(runtime_client,
+        enable_dev_fake_side_effect_tool=resolved_settings.enable_dev_fake_side_effect_tool)
+    if resolved_settings.app_env == "production" and any(
+        r.execution_profile is ToolExecutionProfile.SIDE_EFFECT for r in resolved_tool_registry.list_registered()
+    ):
+        raise ConfigurationError("Side-effect Tools are forbidden in the production Catalog.")
+    resolved_tool_catalog_service = tool_catalog_service or ToolCatalogService(resolved_tool_registry)
     resolved_conversation_service = conversation_service
     resolved_conversation_cleanup_service = conversation_cleanup_service
-    resolved_message_submission_service = message_submission_service
-    resolved_chat_orchestration_service = chat_orchestration_service
-    resolved_task_query_service = task_query_service
-    resolved_timeline_query_service = timeline_query_service
-    resolved_tool_registry = tool_registry
-    runtime_config = parse_zta35g_runtime_config(resolved_settings)
-    if resolved_tool_registry is None:
-        runtime_client = None
-        if runtime_config is not None:
-            runtime_client = LocalZTA35GToolClientAdapter(
-                base_url=runtime_config.base_url,
-                token=runtime_config.token.get_secret_value(),
-                timeout_seconds=runtime_config.timeout_seconds,
-            )
-        resolved_tool_registry = build_tool_registry(
-            runtime_client,
-            enable_dev_fake_side_effect_tool=(
-                resolved_settings.enable_dev_fake_side_effect_tool
-            ),
-        )
-    if (
-        resolved_settings.app_env == "production"
-        and any(
-            registration.execution_profile is ToolExecutionProfile.SIDE_EFFECT
-            for registration in resolved_tool_registry.list_registered()
-        )
-    ):
-        raise ConfigurationError(
-            "Side-effect Tools are forbidden in the production Catalog."
-        )
-    resolved_tool_catalog_service = (
-        tool_catalog_service or ToolCatalogService(resolved_tool_registry)
-    )
     resolved_tool_execution_service = tool_execution_service
     resolved_tool_run_query_service = tool_run_query_service
     resolved_asset_service = asset_service
     resolved_tool_result_query_service = tool_result_query_service
     resolved_result_service = result_service
-    resolved_explanation_service = explanation_service
-    resolved_tool_workflow_service = tool_workflow_service
-    resolved_tool_retry_service = tool_retry_service
-    resolved_explanation_retry_service = explanation_retry_service
     resolved_invocation_service = invocation_service
-    process_cutoff = clock() if clock is not None else datetime.now(timezone.utc)
-    resolved_chat_orchestration_port = chat_orchestration_port
-    resolved_tool_input_extraction_port = tool_input_extraction_port
-    resolved_explanation_port = explanation_port
-    needs_default_chat_port = (
-        resolved_chat_orchestration_service is None
-        and resolved_chat_orchestration_port is None
-    )
-    needs_default_explanation_port = (
-        resolved_explanation_service is None
-        and resolved_explanation_port is None
-    )
-    needs_default_tool_input_extraction_port = (
-        resolved_chat_orchestration_service is None
-        and resolved_tool_input_extraction_port is None
-    )
-    if (
-        needs_default_chat_port
-        or needs_default_explanation_port
-        or needs_default_tool_input_extraction_port
-    ):
-        if resolved_settings.llm_adapter == "mock":
-            if needs_default_chat_port:
-                resolved_chat_orchestration_port = (
-                    MockChatOrchestrationAdapter(default_mock_responder)
-                )
-            if needs_default_tool_input_extraction_port:
-                resolved_tool_input_extraction_port = (
-                    MockToolInputExtractionAdapter(
-                        default_mock_tool_input_responder
-                    )
-                )
-            if needs_default_explanation_port:
-                resolved_explanation_port = MockExplanationAdapter()
-        else:
-            from materialsagent.infrastructure.llm.configuration import (
-                load_llm_configuration,
-            )
-            from materialsagent.infrastructure.llm.langchain_chat import (
-                LangChainChatOrchestrationAdapter,
-            )
-            from materialsagent.infrastructure.llm.langchain_explanation import (
-                LangChainExplanationAdapter,
-            )
-            from materialsagent.infrastructure.llm.langchain_tool_input import (
-                LangChainToolInputExtractionAdapter,
-            )
-
-            llm_configuration = load_llm_configuration(resolved_settings)
-            if needs_default_chat_port:
-                resolved_chat_orchestration_port = (
-                    LangChainChatOrchestrationAdapter(
-                        llm_configuration.for_role("chat_orchestration")
-                    )
-                )
-            if needs_default_tool_input_extraction_port:
-                resolved_tool_input_extraction_port = (
-                    LangChainToolInputExtractionAdapter(
-                        llm_configuration.for_role("tool_input_extraction")
-                    )
-                )
-            if needs_default_explanation_port:
-                resolved_explanation_port = LangChainExplanationAdapter(
-                    llm_configuration.for_role("tool_result_explanation")
-                )
-    tool_chain_requested = (
-        m7_tool_chain_enabled is True
-        or (
-            m7_tool_chain_enabled is None
-            and runtime_config is not None
-        )
-    )
-    executable_tool_boundary_configured = (
-        runtime_config is not None
-        or tool_execution_service is not None
-        or tool_workflow_service is not None
-    )
-    auto_tool_chain_enabled = (
-        tool_chain_requested
-        and executable_tool_boundary_configured
-    )
-    if resolved_unit_of_work_factory is not None:
-        if resolved_conversation_service is None:
-            resolved_conversation_service = ConversationService(
-                resolved_unit_of_work_factory,
-                clock=clock,
-                id_factory=id_factory,
-            )
-        if (
-            resolved_conversation_cleanup_service is None
-            and resolved_storage_service is not None
-        ):
+    resolved_tool_workflow_service = None
+    process_cutoff = clock() if clock else datetime.now(timezone.utc)
+    if resolved_unit_of_work_factory:
+        factory = resolved_unit_of_work_factory
+        resolved_conversation_service = resolved_conversation_service or ConversationService(factory, clock=clock, id_factory=id_factory)
+        resolved_tool_execution_service = resolved_tool_execution_service or ToolExecutionService(factory, resolved_tool_registry, clock=clock)
+        resolved_tool_run_query_service = resolved_tool_run_query_service or ToolRunQueryService(factory)
+        resolved_tool_result_query_service = resolved_tool_result_query_service or ToolResultQueryService(factory)
+        resolved_result_service = resolved_result_service or ResultService(factory, clock=clock)
+        if resolved_storage_service:
             try:
-                cleanup_storage_config = parse_minio_config(resolved_settings)
+                storage_config = parse_minio_config(resolved_settings)
             except ConfigurationError:
-                cleanup_storage_config = None
-            if cleanup_storage_config is not None:
-                resolved_conversation_cleanup_service = ConversationCleanupService(
-                    resolved_unit_of_work_factory,
-                    resolved_storage_service,
-                    environment=resolved_settings.app_env,
-                    bucket=cleanup_storage_config.bucket,
-                    storage_namespace=(
-                        f"minio+{'https' if cleanup_storage_config.secure else 'http'}://"
-                        f"{cleanup_storage_config.endpoint}"
-                    ),
-                    process_cutoff=process_cutoff,
-                    clock=clock,
-                    id_factory=id_factory,
-                )
-        if resolved_message_submission_service is None:
-            resolved_message_submission_service = MessageSubmissionService(
-                resolved_unit_of_work_factory,
-                clock=clock,
-                id_factory=id_factory,
-                title_generator=title_generator,
-            )
-        if resolved_tool_execution_service is None:
-            resolved_tool_execution_service = ToolExecutionService(
-                resolved_unit_of_work_factory,
-                resolved_tool_registry,
-                clock=clock,
-            )
-        if resolved_tool_run_query_service is None:
-            resolved_tool_run_query_service = ToolRunQueryService(
-                resolved_unit_of_work_factory
-            )
-        if resolved_tool_result_query_service is None:
-            resolved_tool_result_query_service = ToolResultQueryService(
-                resolved_unit_of_work_factory
-            )
-        if resolved_result_service is None:
-            resolved_result_service = ResultService(
-                resolved_unit_of_work_factory,
-                clock=clock,
-            )
-        if resolved_explanation_service is None:
-            if resolved_explanation_port is None:
-                raise ConfigurationError("Invalid LLM adapter configuration.")
-            resolved_explanation_service = ExplanationService(
-                resolved_unit_of_work_factory,
-                resolved_explanation_port,
-                clock=clock,
-            )
-        if (
-            resolved_asset_service is None
-            and resolved_storage_service is not None
-        ):
-            asset_storage_config = parse_minio_config(resolved_settings)
-            resolved_asset_service = AssetService(
-                resolved_unit_of_work_factory,
-                resolved_storage_service,
-                environment=resolved_settings.app_env,
-                bucket=asset_storage_config.bucket,
-                storage_namespace=(
-                    f"minio+{'https' if asset_storage_config.secure else 'http'}://"
-                    f"{asset_storage_config.endpoint}"
-                ),
-                clock=clock,
-            )
-        if (
-            resolved_tool_workflow_service is None
-            and resolved_asset_service is not None
-            and resolved_result_service is not None
-            and resolved_explanation_service is not None
-            and auto_tool_chain_enabled
-        ):
-            resolved_tool_workflow_service = ToolWorkflowService(
-                resolved_unit_of_work_factory,
-                resolved_tool_execution_service,
-                resolved_asset_service,
-                resolved_result_service,
-                resolved_explanation_service,
-                clock=clock,
-            )
-        if resolved_invocation_service is None:
-            authorization = (
-                ExactPermissionAuthorizationService(
-                    (FAKE_SIDE_EFFECT_PERMISSION,)
-                )
-                if resolved_settings.enable_dev_fake_side_effect_tool
-                else EmptyPermissionAuthorizationService()
-            )
-            resolved_invocation_service = InvocationService(
-                resolved_unit_of_work_factory,
-                resolved_tool_registry,
-                ExecutorRouter((StandardSyncExecutor(), ManagedExecutor())),
-                authorization=authorization,
-                clock=clock,
-                id_factory=id_factory,
-                managed_workflow_service=resolved_tool_workflow_service,
-            )
-        if (
-            resolved_tool_retry_service is None
-            and resolved_tool_workflow_service is not None
-            and resolved_tool_execution_service is not None
-            and resolved_tool_result_query_service is not None
-        ):
-            resolved_tool_retry_service = ToolRetryService(
-                resolved_unit_of_work_factory,
-                resolved_tool_execution_service,
-                resolved_tool_workflow_service,
-                resolved_tool_result_query_service,
-                resolved_invocation_service,
-            )
-        if (
-            resolved_explanation_retry_service is None
-            and resolved_explanation_service is not None
-        ):
-            resolved_explanation_retry_service = ExplanationRetryService(
-                resolved_unit_of_work_factory,
-                resolved_explanation_service,
-            )
-        tool_chain_activated = (
-            auto_tool_chain_enabled
-            and resolved_tool_workflow_service is not None
-        )
-        if resolved_invocation_service is None:
-            raise ConfigurationError("Tool Invocation service is unavailable.")
-        if resolved_chat_orchestration_service is None:
-            if resolved_chat_orchestration_port is None:
-                raise ConfigurationError("Invalid LLM adapter configuration.")
-            resolved_chat_orchestration_service = ChatOrchestrationService(
-                resolved_unit_of_work_factory,
-                resolved_chat_orchestration_port,
-                clock=clock,
-                id_factory=id_factory,
-                tool_chain_enabled=tool_chain_activated,
-                tool_registry=resolved_tool_registry,
-                tool_input_extraction_port=(
-                    resolved_tool_input_extraction_port
-                ),
-                invocation_service=resolved_invocation_service,
-            )
+                storage_config = None
+            if storage_config:
+                namespace = f"minio+{'https' if storage_config.secure else 'http'}://{storage_config.endpoint}"
+                resolved_asset_service = resolved_asset_service or AssetService(factory, resolved_storage_service,
+                    environment=resolved_settings.app_env, bucket=storage_config.bucket, storage_namespace=namespace, clock=clock)
+                resolved_conversation_cleanup_service = resolved_conversation_cleanup_service or ConversationCleanupService(
+                    factory, resolved_storage_service, environment=resolved_settings.app_env, bucket=storage_config.bucket,
+                    storage_namespace=namespace, process_cutoff=process_cutoff, clock=clock, id_factory=id_factory)
+        if resolved_asset_service:
+            resolved_tool_workflow_service = ManagedToolWorkflow(factory, resolved_tool_execution_service,
+                resolved_asset_service, resolved_result_service)
+        authorization = ExactPermissionAuthorizationService((FAKE_SIDE_EFFECT_PERMISSION,)) if resolved_settings.enable_dev_fake_side_effect_tool else EmptyPermissionAuthorizationService()
+        resolved_invocation_service = resolved_invocation_service or InvocationService(factory, resolved_tool_registry,
+            ExecutorRouter((StandardSyncExecutor(), ManagedExecutor())), authorization=authorization,
+            clock=clock, id_factory=id_factory, managed_workflow_service=resolved_tool_workflow_service,
+            lease_seconds=max(60, int(resolved_settings.zta35g_runtime_timeout_seconds) + 60))
+    resolved_agent_store = agent_store or (SQLAlchemyAgentStore(session_factory) if session_factory else None)
+    resolved_agent_model = agent_model
+    if resolved_agent_model is None:
+        if resolved_settings.llm_adapter == "mock":
+            resolved_agent_model = MockAgentModel()
         else:
-            resolved_chat_orchestration_service = (
-                resolved_chat_orchestration_service.configured_for_tool_chain(
-                    enabled=tool_chain_activated,
-                )
-            )
-    if (
-        resolved_task_query_service is None
-        and owned_query_repository is not None
-    ):
-        resolved_task_query_service = TaskQueryService(
-            owned_query_repository
-        )
-    if (
-        resolved_timeline_query_service is None
-        and owned_query_repository is not None
-        and resolved_settings.timeline_cursor_signing_key is not None
-    ):
-        resolved_timeline_query_service = TimelineQueryService(
-            owned_query_repository,
-            TimelineCursorCodec(
-                resolved_settings.timeline_cursor_signing_key
-            ),
-            resolved_invocation_service,
-        )
+            from materialsagent.infrastructure.llm.configuration import load_llm_configuration
+            configuration = load_llm_configuration(resolved_settings)
+            resolved_agent_model = AgentModelAdapter({role: configuration.for_role(role) for role in (
+                "agent_decision", "tool_arg_resolution", "final_answer")})
+    resolved_agent_runtime = agent_runtime
+    if resolved_agent_runtime is None and resolved_agent_store and resolved_invocation_service:
+        gateway = RegistryAgentGateway(resolved_tool_registry, resolved_unit_of_work_factory,
+            resolved_invocation_service, resolved_tool_workflow_service, resolved_tool_result_query_service)
+        resolved_agent_runtime = AgentRuntime(resolved_agent_store, resolved_agent_model, gateway, **({"clock": clock} if clock else {}))
+    agent_budget = RunBudget(max_action_steps=resolved_settings.agent_max_action_steps,
+        max_tool_executions=resolved_settings.agent_max_tool_executions,
+        max_active_seconds=resolved_settings.agent_max_active_seconds, max_llm_tokens=resolved_settings.agent_max_llm_tokens,
+        standard_timeout_seconds=resolved_settings.agent_standard_timeout_seconds,
+        managed_timeout_seconds=resolved_settings.zta35g_runtime_timeout_seconds)
 
     request_logger = configure_logging(resolved_settings.log_level)
     request_logger.disabled = False
@@ -692,6 +363,8 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         try:
+            if resolved_agent_runtime is not None and hasattr(resolved_agent_runtime.store, "recover_interrupted"):
+                resolved_agent_runtime.store.recover_interrupted(resolved_agent_runtime.process_id, repair=resolved_agent_runtime.tools.repair)
             if (
                 resolved_conversation_cleanup_service is not None
                 and resolved_actor_context is not None
@@ -717,24 +390,18 @@ def create_app(
         version="0.1.0",
         lifespan=lifespan,
     )
+    app.state.agent_runtime = resolved_agent_runtime
+    app.state.agent_budget = agent_budget
     app.state.readiness_service = resolved_readiness_service
     app.state.actor_context = resolved_actor_context
     app.state.conversation_service = resolved_conversation_service
     app.state.conversation_cleanup_service = resolved_conversation_cleanup_service
-    app.state.message_submission_service = resolved_message_submission_service
-    app.state.chat_orchestration_service = resolved_chat_orchestration_service
-    app.state.task_query_service = resolved_task_query_service
-    app.state.timeline_query_service = resolved_timeline_query_service
     app.state.tool_catalog_service = resolved_tool_catalog_service
     app.state.tool_execution_service = resolved_tool_execution_service
     app.state.tool_run_query_service = resolved_tool_run_query_service
     app.state.asset_service = resolved_asset_service
     app.state.tool_result_query_service = resolved_tool_result_query_service
     app.state.tool_workflow_service = resolved_tool_workflow_service
-    app.state.tool_retry_service = resolved_tool_retry_service
-    app.state.explanation_retry_service = (
-        resolved_explanation_retry_service
-    )
     app.state.invocation_service = resolved_invocation_service
     app.state.m5_dev_routes_enabled = resolved_settings.m5_dev_routes_enabled
 
@@ -769,15 +436,22 @@ def create_app(
     app.include_router(health_router)
     app.include_router(assets_router)
     app.include_router(conversations_router)
-    app.include_router(tasks_router)
-    app.include_router(timeline_router)
     app.include_router(tools_router)
     app.include_router(tool_results_router)
-    app.include_router(tool_invocations_router)
+    from materialsagent.api.routes.agent_runs import router as agent_runs_router
+    app.include_router(agent_runs_router)
     app.add_exception_handler(ApplicationError, _application_error_handler)
     app.add_exception_handler(
         RequestValidationError,
         _request_validation_error_handler,
     )
     app.add_exception_handler(Exception, _internal_error_handler)
+    from materialsagent.domain.ports.agent import AgentConflictError, AgentFailure
+    async def agent_error(request, error):
+        code = error.code if isinstance(error, AgentFailure) else "AGENT_CONFLICT"
+        status_code = 404 if code.endswith("NOT_FOUND") else 409
+        return JSONResponse(status_code=status_code, content={"request_id": request.state.request_id,
+            "error": {"code": code, "message": "当前操作无法继续，请刷新运行状态后重试。", "details": []}})
+    app.add_exception_handler(AgentConflictError, agent_error)
+    app.add_exception_handler(AgentFailure, agent_error)
     return app

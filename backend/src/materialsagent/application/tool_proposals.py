@@ -29,36 +29,6 @@ class ResolvedToolInvocationProposal:
         return self.registration.ref
 
 
-def native_tool_call_proposal(
-    tool_calls: Sequence[Mapping[str, object]],
-    *,
-    conversation_id: str,
-    source_message_id: str,
-    llm_call_id: str,
-) -> ToolInvocationProposal | None:
-    if len(tool_calls) == 0:
-        return None
-    if len(tool_calls) != 1:
-        raise MultipleToolCallsUnsupportedError(
-            "A model response may contain at most one executable Tool call."
-        )
-    call = tool_calls[0]
-    name = call.get("name")
-    arguments = call.get("args")
-    call_id = call.get("id")
-    if type(name) is not str or not isinstance(arguments, Mapping):
-        raise ToolProposalError("Native Tool call is invalid.")
-    return ToolInvocationProposal(
-        conversation_id=conversation_id,
-        source_message_id=source_message_id,
-        llm_call_id=llm_call_id,
-        model_tool_name=name,
-        proposed_arguments=arguments,
-        origin=ProposalOrigin.NATIVE,
-        provider_tool_call_id=call_id if type(call_id) is str else None,
-    )
-
-
 def resolve_tool_proposal(
     registry: ToolRegistry,
     snapshot: RoutingCatalogSnapshot,

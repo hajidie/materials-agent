@@ -14,7 +14,6 @@ from materialsagent.application.tool_projections import ToolProjectionService
 from materialsagent.application.tool_proposals import (
     MultipleToolCallsUnsupportedError,
     ToolProposalError,
-    native_tool_call_proposal,
     resolve_tool_proposal,
 )
 from materialsagent.application.tool_invocations import (
@@ -30,10 +29,6 @@ from materialsagent.application.unit_conversion_tool import (
     build_unit_conversion_registered_tool,
 )
 from materialsagent.domain.models.tool_invocation import ProposalOrigin
-from materialsagent.domain.ports.chat_orchestration import (
-    ChatOrchestrationInput,
-    ChatOrchestrationProtocolError,
-)
 from materialsagent.domain.ports.tool_registry import (
     RegisteredTool,
     RoutingCatalogSnapshot,
@@ -41,9 +36,7 @@ from materialsagent.domain.ports.tool_registry import (
     ToolExecutionProfile,
 )
 from materialsagent.infrastructure.llm.configuration import ConfiguredRole
-from materialsagent.infrastructure.llm.langchain_chat import (
-    LangChainChatOrchestrationAdapter,
-)
+
 from materialsagent.infrastructure.db.conversation_task import MessageRow
 from materialsagent.infrastructure.db.llm_call import LLMCallRow
 from materialsagent.infrastructure.db.tool_invocation import (
@@ -201,100 +194,10 @@ def test_executor_router_rejects_profile_incompatible_binding() -> None:
         router.validate_registration(registry.resolve(incompatible.tool_id))
 
 
-def test_native_cardinality_and_snapshot_resolution_are_platform_owned() -> None:
-    registration = build_unit_conversion_registered_tool()
-    registry = ToolRegistry((registration,))
-    snapshot = registry.routing_snapshot()
-    call = {
-        "name": registration.tool_id,
-        "args": {"value": 1, "from_unit": "MPa", "to_unit": "Pa"},
-        "id": "provider_call_1",
-        "version": "forged",
-        "schema_hash": "0" * 64,
-    }
-
-    proposal = native_tool_call_proposal(
-        [call],
-        conversation_id="conversation_1",
-        source_message_id="message_1",
-        llm_call_id="llm_1",
-    )
-    assert proposal is not None
-    assert proposal.origin is ProposalOrigin.NATIVE
-    assert not hasattr(proposal, "version")
-    assert not hasattr(proposal, "schema_hash")
-    assert resolve_tool_proposal(registry, snapshot, proposal).tool_ref == registry.resolve(
-        registration.tool_id
-    ).ref
-
-    with pytest.raises(MultipleToolCallsUnsupportedError):
-        native_tool_call_proposal(
-            [call, call],
-            conversation_id="conversation_1",
-            source_message_id="message_1",
-            llm_call_id="llm_1",
-        )
-    assert native_tool_call_proposal(
-        [],
-        conversation_id="conversation_1",
-        source_message_id="message_1",
-        llm_call_id="llm_1",
-    ) is None
-
-    stale_entry = replace(snapshot.entries[0], version="stale")
-    with pytest.raises(ToolProposalError, match="changed"):
-        resolve_tool_proposal(
-            registry,
-            RoutingCatalogSnapshot((stale_entry,)),
-            proposal,
-        )
-    with pytest.raises(ToolProposalError, match="Routing Snapshot"):
-        resolve_tool_proposal(
-            registry,
-            RoutingCatalogSnapshot(
-                (snapshot.entries[0], snapshot.entries[0])
-            ),
-            proposal,
-        )
 
 
-def test_unknown_model_tool_name_is_rejected_by_snapshot() -> None:
-    registration = build_unit_conversion_registered_tool()
-    registry = ToolRegistry((registration,))
-    proposal = native_tool_call_proposal(
-        [{"name": "unknown_tool", "args": {}, "id": "call_unknown"}],
-        conversation_id="conversation_1",
-        source_message_id="message_1",
-        llm_call_id="llm_1",
-    )
-    assert proposal is not None
-
-    with pytest.raises(ToolProposalError, match="Routing Snapshot"):
-        resolve_tool_proposal(registry, registry.routing_snapshot(), proposal)
 
 
-class _NativeModel:
-    def __init__(self, tool_calls: list[dict[str, object]]) -> None:
-        self.tool_calls = tool_calls
-        self.bound_tools: object | None = None
-        self.parallel_tool_calls: bool | None = None
-
-    def bind_tools(self, tools, *, parallel_tool_calls):  # type: ignore[no-untyped-def]
-        self.bound_tools = tools
-        self.parallel_tool_calls = parallel_tool_calls
-        return self
-
-    def invoke(self, _messages):
-        return type(
-            "NativeResponse",
-            (),
-            {
-                "tool_calls": self.tool_calls,
-                "content": "",
-                "usage_metadata": {"input_tokens": 1, "output_tokens": 1},
-                "response_metadata": {},
-            },
-        )()
 
 
 def _native_config() -> ConfiguredRole:
@@ -322,44 +225,6 @@ def _native_config() -> ConfiguredRole:
     )
 
 
-def test_native_provider_multiple_calls_are_rejected_even_when_flag_is_disabled() -> None:
-    registration = ToolRegistry(
-        (build_unit_conversion_registered_tool(),)
-    ).resolve("materials_unit_conversion")
-    snapshot = ToolRegistry((registration,)).routing_snapshot()
-    model = _NativeModel(
-        [
-            {"name": registration.tool_id, "args": {}, "id": "call_1"},
-            {"name": registration.tool_id, "args": {}, "id": "call_2"},
-        ]
-    )
-    adapter = LangChainChatOrchestrationAdapter(
-        _native_config(),
-        chat_model=model,
-    )
-    request = ChatOrchestrationInput(
-        task_id=None,
-        conversation_id="conversation_1",
-        request_id="request_1",
-        content_text="convert",
-        routing_catalog=snapshot,
-    )
-
-    adapter.request_metadata(request)
-    with pytest.raises(ChatOrchestrationProtocolError) as raised:
-        adapter.orchestrate(request)
-
-    assert raised.value.error_code == "MULTIPLE_TOOL_CALLS_UNSUPPORTED"
-    assert model.parallel_tool_calls is False
-    serialized = str(model.bound_tools)
-    assert "schema_hash" not in serialized
-    assert "required_permissions" not in serialized
-    assert isinstance(model.bound_tools, list)
-    assert set(model.bound_tools[0]["function"]) == {
-        "name",
-        "description",
-        "parameters",
-    }
 
 
 def test_invocation_database_metadata_uses_strong_optional_relationships() -> None:
@@ -387,7 +252,7 @@ def test_invocation_database_metadata_uses_strong_optional_relationships() -> No
         "fk_invocation_result_run",
         "uq_invocation_result_run",
     }
-    assert any(
+    assert not any(
         index.name == "uq_invocation_message_proposal" and index.unique
         for index in run_table.indexes
     )

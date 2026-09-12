@@ -72,6 +72,10 @@ class LocalZTA35GToolClientAdapter:
         self._timeout = urllib3.Timeout(total=float(timeout_seconds))
         self._pool = pool or urllib3.PoolManager(num_pools=1)
 
+    def _request_timeout(self):
+        from materialsagent.application.execution_deadline import remaining_timeout
+        return urllib3.Timeout(total=remaining_timeout(float(self._timeout.total)))
+
     def execute(
         self,
         metadata: ToolMetadata,
@@ -147,7 +151,7 @@ class LocalZTA35GToolClientAdapter:
                 f"{self._base_url}{path}",
                 body=body,
                 headers=headers,
-                timeout=self._timeout,
+                timeout=self._request_timeout(),
                 retries=False,
                 preload_content=True,
             )

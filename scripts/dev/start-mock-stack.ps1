@@ -45,6 +45,7 @@ $ControlledEnvironmentKeys = @(
     'ZTA35G_RUNTIME_TOKEN'
     'ZTA35G_RUNTIME_TIMEOUT_SECONDS'
     'M5_DEV_ROUTES_ENABLED'
+    # Retired setting: strip any legacy caller secret from unrelated children.
     'TIMELINE_CURSOR_SIGNING_KEY'
 )
 $RequiredEnvKeys = @(
@@ -62,7 +63,6 @@ $RequiredEnvKeys = @(
     'MINIO_SECURE'
     'ZTA35G_RUNTIME_URL'
     'ZTA35G_RUNTIME_TOKEN'
-    'TIMELINE_CURSOR_SIGNING_KEY'
 )
 $ExpectedProcesses = @{
     runtime = @{
@@ -268,7 +268,9 @@ function Read-SafeDotEnv {
 
     $allowed = @{}
     foreach ($key in $ControlledEnvironmentKeys) {
-        $allowed[$key] = $true
+        if ($key -ne 'TIMELINE_CURSOR_SIGNING_KEY') {
+            $allowed[$key] = $true
+        }
     }
     $values = @{}
     foreach ($entry in $ControlledEnvironmentDefaults.GetEnumerator()) {
@@ -438,15 +440,6 @@ from materialsagent.infrastructure.config import (
 )
 from materialsagent.infrastructure.db.session import build_postgres_url
 
-probe = dict(os.environ)
-probe['TIMELINE_CURSOR_SIGNING_KEY'] = (
-    'm11a-preflight-probe-signing-key-at-least-32-bytes'
-)
-try:
-    load_settings(probe)
-except ConfigurationError:
-    sys.exit(31)
-
 try:
     settings = load_settings(os.environ)
 except ConfigurationError:
@@ -468,8 +461,6 @@ if runtime is None:
     sys.exit(35)
 if settings.local_actor_id is None or not settings.local_actor_id.strip():
     sys.exit(36)
-if settings.timeline_cursor_signing_key is None:
-    sys.exit(37)
 '@
         $previousErrorActionPreference = $ErrorActionPreference
         try {
@@ -500,11 +491,8 @@ if settings.timeline_cursor_signing_key is None:
 
     switch ($validationExitCode) {
         0 { return }
-        31 {
-            throw 'AppSettings configuration does not satisfy M11-A preflight validation.'
-        }
         32 {
-            throw 'TIMELINE_CURSOR_SIGNING_KEY does not satisfy AppSettings validation.'
+            throw 'AppSettings configuration does not satisfy M11-A preflight validation.'
         }
         33 {
             throw 'PostgreSQL configuration does not satisfy AppSettings validation.'
@@ -516,9 +504,6 @@ if settings.timeline_cursor_signing_key is None:
             throw 'ZTA35G_RUNTIME_URL/TOKEN does not satisfy AppSettings validation.'
         }
         36 { throw 'LOCAL_ACTOR_ID must be non-empty for M11-A.' }
-        37 {
-            throw 'TIMELINE_CURSOR_SIGNING_KEY is required for M11-A.'
-        }
         default {
             throw 'M11-A AppSettings preflight validation could not run.'
         }

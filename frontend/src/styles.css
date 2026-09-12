@@ -8,6 +8,18 @@
   text-rendering: optimizeLegibility;
 }
 
+.agent-timeline { display: grid; gap: 1.25rem; margin-block: 1.25rem; }
+.agent-run { padding: 1.25rem; min-width: 0; }
+.agent-run__header { display: flex; align-items: start; justify-content: space-between; gap: 1rem; }
+.agent-run__header h3 { margin: 0; overflow-wrap: anywhere; }
+.agent-run pre { overflow-x: auto; max-width: 100%; padding: .75rem; background: #f8faf8; border-radius: .5rem; }
+.agent-run img { max-width: 100%; height: auto; }
+.agent-answer, .agent-run__input { white-space: pre-wrap; overflow-wrap: anywhere; }
+.agent-trace { margin-top: 1rem; color: #465e50; font-size: .875rem; }
+.agent-trace summary { cursor: pointer; padding: .5rem 0; }
+.agent-run__actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+.composer textarea { resize: none; }
+
 *,
 *::before,
 *::after {

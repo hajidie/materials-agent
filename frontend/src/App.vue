@@ -1,165 +1,59 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-
 import ConversationSidebar from "./components/ConversationSidebar.vue";
-import ConversationView from "./components/ConversationView.vue";
-import GlobalErrorNotice from "./components/GlobalErrorNotice.vue";
 import DeleteConversationDialog from "./components/DeleteConversationDialog.vue";
-import { toUserVisibleError } from "./api/errors";
-import { useMaterialsAgent } from "./composables/useMaterialsAgent";
+import AgentRunCard from "./components/AgentRunCard.vue";
+import ChatComposer from "./components/ChatComposer.vue";
+import { clarificationLabel } from "./api/agent";
+import { useAgentRuns } from "./composables/useAgentRuns";
 
-const agent = useMaterialsAgent();
-const creatingConversation = ref(false);
-const deleteCandidateId = ref<string | null>(null);
-const deletePending = ref(false);
+const agent = useAgentRuns();
+const deleteId = ref<string | null>(null);
+const deleting = ref(false);
 const deleteError = ref<string | null>(null);
-
-const selectedConversation = computed(
-  () =>
-    agent.conversations.value.find(
-      (conversation) =>
-        conversation.conversation_id ===
-        agent.selectedConversationId.value,
-    ) ?? null,
-);
-
-const writeBusy = computed(
-  () =>
-    creatingConversation.value ||
-    agent.mutationStatus.value === "SENDING" ||
-    agent.mutationStatus.value === "UNCERTAIN" ||
-    agent.invocationMutationBusy.value,
-);
-
-const deleteCandidate = computed(() =>
-  agent.conversations.value.find(
-    (conversation) => conversation.conversation_id === deleteCandidateId.value,
-  ) ?? null,
-);
-
-onMounted(() => {
-  void (async () => {
-    try {
-      await agent.initialize();
-    } catch {
-      // useMaterialsAgent already owns the bounded user-visible error.
-    }
-    agent.startPolling();
-  })();
-});
-
-async function createConversation(): Promise<void> {
-  if (writeBusy.value) {
-    return;
-  }
-  if (typeof agent.showBlankWorkspace === "function") {
-    agent.showBlankWorkspace();
-    return;
-  }
-  creatingConversation.value = true;
-  try {
-    await agent.createConversation();
-  } finally {
-    creatingConversation.value = false;
-  }
+const candidate = computed(() => agent.conversations.value.find(c => c.conversation_id === deleteId.value));
+const selected = computed(() => agent.conversations.value.find(c => c.conversation_id === agent.selectedId.value));
+onMounted(() => { void agent.initialize(); });
+async function submit(text: string) {
+  await agent.submit(text);
 }
-
-function openDeleteDialog(conversationId: string): void {
-  if (writeBusy.value) {
-    return;
-  }
-  deleteCandidateId.value = conversationId;
+async function remove() {
+  if (!deleteId.value || deleting.value) return;
+  deleting.value = true;
   deleteError.value = null;
+  try { await agent.remove(deleteId.value); deleteId.value = null; }
+  catch { deleteError.value = "无法删除。运行中的对话需要等待执行结束，请刷新后重试。"; }
+  finally { deleting.value = false; }
 }
-
-function closeDeleteDialog(): void {
-  if (!deletePending.value) {
-    deleteCandidateId.value = null;
-    deleteError.value = null;
-  }
-}
-
-async function confirmDeleteConversation(): Promise<void> {
-  const conversationId = deleteCandidateId.value;
-  if (conversationId === null || deletePending.value) {
-    return;
-  }
-  deletePending.value = true;
-  deleteError.value = null;
-  try {
-    await agent.deleteConversation(conversationId);
-    deleteCandidateId.value = null;
-  } catch (error) {
-    deleteError.value = toUserVisibleError(error).message;
-  } finally {
-    deletePending.value = false;
-  }
-}
-
-function ignoreRejected(operation: Promise<unknown>): void {
-  void operation.catch(() => undefined);
-}
+function safely(promise: Promise<unknown>) { void promise.catch(() => { agent.error.value = "操作未完成，请刷新后重试。"; }); }
 </script>
 
 <template>
-  <div
-    class="app-shell"
-    :data-mutation-status="agent.mutationStatus.value"
-    :inert="deleteCandidate !== null"
-  >
-    <ConversationSidebar
-      :conversations="agent.conversations.value"
-      :selected-conversation-id="agent.selectedConversationId.value"
-      :loading="agent.conversationListLoading.value"
-      :has-more="agent.conversationNextCursor.value !== null"
-      :creating="creatingConversation"
-      :create-disabled="writeBusy"
-      @create="createConversation"
-      @refresh="ignoreRejected(agent.refreshConversations())"
-      @select="ignoreRejected(agent.selectConversation($event))"
-      @delete="openDeleteDialog"
-      @load-more="ignoreRejected(agent.loadMoreConversations())"
-    />
-
-    <section class="app-main">
-      <GlobalErrorNotice
-        :error="agent.globalError.value"
-        :errors="agent.globalErrors.value"
-        :pending-mutation="agent.pendingMutation.value"
-        :mutation-status="agent.mutationStatus.value"
-        @retry-pending="ignoreRejected(agent.retryPendingMutation())"
-        @discard-pending="agent.discardPendingMutation()"
-      />
-
-      <ConversationView
-        :selected-conversation="selectedConversation"
-        :timeline="agent.timeline.value"
-        :timeline-loading="agent.timelineLoading.value"
-        :supplement-target="agent.supplementTarget.value"
-        :mutation-status="agent.mutationStatus.value"
-        :write-busy="writeBusy"
-        :initial-draft="agent.firstTurnDraft?.value ?? ''"
-        @submit-new-task="ignoreRejected(agent.submitNewTask($event))"
-        @submit-supplement="ignoreRejected(agent.submitSupplement($event))"
-        @set-supplement-target="agent.setSupplementTarget($event)"
-        @cancel-supplement-target="agent.cancelSupplementTarget()"
-        @retry-tool="ignoreRejected(agent.retryTool($event))"
-        @retry-explanation="
-          ignoreRejected(agent.retryExplanation($event))
-        "
-        @confirm-invocation="ignoreRejected(agent.confirmInvocation($event))"
-        @reject-invocation="ignoreRejected(agent.rejectInvocation($event))"
-        @refresh="ignoreRejected(agent.refreshTimeline())"
-      />
-    </section>
+  <div class="app-shell" :inert="candidate !== undefined">
+    <ConversationSidebar :conversations="agent.conversations.value" :selected-conversation-id="agent.selectedId.value"
+      :loading="agent.loading.value" :has-more="agent.conversationCursor.value !== null" :creating="false" :create-disabled="agent.busy.value"
+      @create="safely(agent.select(null))" @select="safely(agent.select($event))" @delete="deleteId = $event"
+      @refresh="safely(agent.refreshConversations())" @load-more="safely(agent.refreshConversations(true))" />
+    <main class="app-main">
+      <header class="conversation-header"><h2>{{ selected?.title || '材料研究' }}</h2><button class="button" @click="safely(agent.refresh())">刷新运行状态</button></header>
+      <section v-if="agent.error.value || agent.pending.value" class="global-error" role="status">
+        <p>{{ agent.error.value || (agent.sending.value ? '请求正在执行，进度会自动更新。' : '有一项提交尚未确认结果。') }}</p>
+        <button v-if="agent.pending.value" class="button" :disabled="agent.sending.value" @click="safely(agent.sendPending())">检查原提交</button>
+      </section>
+      <p v-if="agent.loading.value" role="status">正在加载运行记录…</p>
+      <p v-else-if="agent.runs.value.length === 0" class="empty-state">描述你的研究目标，或输入“1000 MPa 转 GPa”开始。</p>
+      <button v-if="agent.nextCursor.value" class="button" @click="safely(agent.refresh(true))">加载更早的运行</button>
+      <section class="agent-timeline" aria-label="研究运行记录">
+        <AgentRunCard v-for="run in agent.runs.value" :key="run.agent_run_id" :run="run" :disabled="agent.busy.value"
+          @resume="agent.resumeTarget.value = run" @confirm="safely(agent.confirm(run, $event))"
+          @regenerate="safely(agent.retry(run))" @retry="safely(agent.retry(run, $event))" />
+      </section>
+      <ChatComposer :key="`${agent.selectedId.value}:${agent.resumeTarget.value?.agent_run_id ?? 'new'}`" :disabled="agent.busy.value" :sending="agent.sending.value" :completed="agent.completed.value"
+        :waiting-question="agent.resumeTarget.value?.waiting ? clarificationLabel(agent.resumeTarget.value.waiting.question) : null"
+        :initial-draft="typeof agent.pending.value?.body.content_text === 'string' ? agent.pending.value.body.content_text : ''"
+        @submit="safely(submit($event))" @cancel-resume="agent.resumeTarget.value = null" />
+    </main>
   </div>
-
-  <DeleteConversationDialog
-    v-if="deleteCandidate"
-    :title="deleteCandidate.title?.trim() || '新对话'"
-    :pending="deletePending"
-    :error="deleteError"
-    @cancel="closeDeleteDialog"
-    @confirm="confirmDeleteConversation"
-  />
+  <DeleteConversationDialog v-if="candidate" :title="candidate.title || '新对话'" :pending="deleting" :error="deleteError"
+    @cancel="deleteId = null" @confirm="safely(remove())" />
 </template>

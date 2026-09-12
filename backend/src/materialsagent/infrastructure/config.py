@@ -62,9 +62,13 @@ class AppSettings(BaseSettings):
 
     zta35g_runtime_url: str | None = None
     zta35g_runtime_token: SecretStr | None = None
-    zta35g_runtime_timeout_seconds: float = Field(default=10.0, gt=0, le=900)
+    zta35g_runtime_timeout_seconds: float = Field(default=1200.0, gt=0, le=86400)
+    agent_max_action_steps: int = Field(default=12, ge=1, le=100)
+    agent_max_tool_executions: int = Field(default=4, ge=1, le=32)
+    agent_max_active_seconds: float = Field(default=3600, gt=0, le=86400)
+    agent_max_llm_tokens: int = Field(default=32000, ge=1, le=2000000)
+    agent_standard_timeout_seconds: float = Field(default=10, gt=0, le=3600)
     m5_dev_routes_enabled: bool = False
-    timeline_cursor_signing_key: SecretStr | None = None
     enable_dev_fake_side_effect_tool: bool = False
 
     @field_validator(
@@ -88,27 +92,6 @@ class AppSettings(BaseSettings):
                 raise ValueError(
                     "Provider API keys must be controlled non-whitespace text."
                 )
-        return value
-
-    @field_validator("timeline_cursor_signing_key")
-    @classmethod
-    def validate_timeline_cursor_signing_key(
-        cls,
-        value: SecretStr | None,
-    ) -> SecretStr | None:
-        if value is None:
-            return None
-        secret = value.get_secret_value()
-        if (
-            not secret
-            or secret != secret.strip()
-            or len(secret.encode("utf-8")) < 32
-            or any(
-                unicodedata.category(character).startswith("C")
-                for character in secret
-            )
-        ):
-            raise ValueError("Invalid timeline cursor signing key.")
         return value
 
     @model_validator(mode="after")
@@ -138,8 +121,12 @@ ENVIRONMENT_FIELDS = {
     "ZTA35G_RUNTIME_URL": "zta35g_runtime_url",
     "ZTA35G_RUNTIME_TOKEN": "zta35g_runtime_token",
     "ZTA35G_RUNTIME_TIMEOUT_SECONDS": "zta35g_runtime_timeout_seconds",
+    "AGENT_MAX_ACTION_STEPS": "agent_max_action_steps",
+    "AGENT_MAX_TOOL_EXECUTIONS": "agent_max_tool_executions",
+    "AGENT_MAX_ACTIVE_SECONDS": "agent_max_active_seconds",
+    "AGENT_MAX_LLM_TOKENS": "agent_max_llm_tokens",
+    "AGENT_STANDARD_TIMEOUT_SECONDS": "agent_standard_timeout_seconds",
     "M5_DEV_ROUTES_ENABLED": "m5_dev_routes_enabled",
-    "TIMELINE_CURSOR_SIGNING_KEY": "timeline_cursor_signing_key",
     "ENABLE_DEV_FAKE_SIDE_EFFECT_TOOL": "enable_dev_fake_side_effect_tool",
 }
 

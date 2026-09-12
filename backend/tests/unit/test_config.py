@@ -258,7 +258,7 @@ def test_runtime_timeout_default_is_independent_from_llm_toml() -> None:
 
     settings = load_settings({})
 
-    assert settings.zta35g_runtime_timeout_seconds == 10.0
+    assert settings.zta35g_runtime_timeout_seconds == 1200.0
 
 
 def test_runtime_timeout_accepts_gate4_upper_boundary() -> None:
@@ -284,7 +284,7 @@ def test_runtime_timeout_accepts_gate4_upper_boundary() -> None:
 
 @pytest.mark.parametrize(
     "value",
-    ["901", "0", "-1", "not-a-number"],
+    ["86401", "0", "-1", "not-a-number"],
     ids=("above-upper-bound", "zero", "negative", "non-numeric"),
 )
 def test_runtime_timeout_rejects_values_outside_gate4_boundary(
@@ -345,59 +345,19 @@ def test_absent_runtime_configuration_keeps_adapter_disabled() -> None:
     assert settings.m5_dev_routes_enabled is False
 
 
-def test_timeline_cursor_signing_key_is_optional_and_secret_safe() -> None:
-    from materialsagent.infrastructure.config import load_settings
+def test_retired_timeline_secret_in_existing_dotenv_does_not_block_startup(tmp_path, monkeypatch) -> None:
+    from materialsagent.infrastructure import config
 
-    absent = load_settings({})
-    secret = "timeline-signing-key-with-at-least-32-bytes"
-    configured = load_settings({"TIMELINE_CURSOR_SIGNING_KEY": secret})
+    dotenv = tmp_path / ".env"
+    secret = "retired-short-key"
+    dotenv.write_text(f"TIMELINE_CURSOR_SIGNING_KEY={secret}\n", encoding="utf-8")
+    monkeypatch.setattr(config, "ROOT_ENV_FILE", dotenv)
+    monkeypatch.delenv("TIMELINE_CURSOR_SIGNING_KEY", raising=False)
 
-    assert absent.timeline_cursor_signing_key is None
-    assert configured.timeline_cursor_signing_key is not None
-    assert (
-        configured.timeline_cursor_signing_key.get_secret_value()
-        == secret
-    )
-    assert secret not in repr(configured)
+    settings = config.load_settings()
 
-
-@pytest.mark.parametrize(
-    "value",
-    [
-        "",
-        "short",
-        " timeline-signing-key-with-at-least-32-bytes",
-        "timeline-signing-key-with-at-least-32-bytes ",
-        "timeline-signing-key-with-at-least-32-\nbytes",
-        "timeline-signing-key-with-at-least-32-\x00bytes",
-    ],
-)
-def test_invalid_timeline_cursor_signing_key_is_safely_rejected(
-    value: str,
-) -> None:
-    from materialsagent.infrastructure.config import (
-        ConfigurationError,
-        load_settings,
-    )
-
-    with pytest.raises(
-        ConfigurationError,
-        match=r"^Invalid application configuration\.$",
-    ) as exc_info:
-        load_settings({"TIMELINE_CURSOR_SIGNING_KEY": value})
-
-    if value:
-        assert value not in str(exc_info.value)
-
-
-def test_timeline_cursor_signing_key_length_is_measured_in_utf8_bytes() -> None:
-    from materialsagent.infrastructure.config import load_settings
-
-    value = "密钥" * 6
-    settings = load_settings({"TIMELINE_CURSOR_SIGNING_KEY": value})
-
-    assert settings.timeline_cursor_signing_key is not None
-    assert settings.timeline_cursor_signing_key.get_secret_value() == value
+    assert "timeline_cursor_signing_key" not in settings.model_dump()
+    assert secret not in repr(settings)
 
 
 def test_llm_defaults_keep_mock_enabled_without_provider_secrets() -> None:
@@ -441,10 +401,10 @@ def test_committed_llm_toml_resolves_default_roles_and_keeps_secret_safe() -> No
         )
     )
 
-    chat = configured.for_role("chat_orchestration")
-    explanation = configured.for_role("tool_result_explanation")
+    chat = configured.for_role("agent_decision")
+    explanation = configured.for_role("final_answer")
     assert chat.provider == explanation.provider == "deepseek"
-    assert chat.model_name == "deepseek-v4-flash"
+    assert chat.model_name == "deepseek-flash"
     assert chat.max_tokens == 1024
     assert chat.context_window_tokens == 1_000_000
     assert chat.prompt_limit_tokens == 16_384
@@ -492,8 +452,8 @@ def test_qwen_default_and_role_override_select_only_required_keys(tmp_path) -> N
     mixed = tmp_path / "mixed.toml"
     mixed.write_text(
         text.replace(
-            "[roles.tool_result_explanation]\n",
-            '[roles.tool_result_explanation]\nmodel = "qwen_default"\n',
+            "[roles.final_answer]\n",
+            '[roles.final_answer]\nmodel = "qwen_default"\n',
         ),
         encoding="utf-8",
     )
@@ -507,8 +467,8 @@ def test_qwen_default_and_role_override_select_only_required_keys(tmp_path) -> N
         ),
         mixed,
     )
-    assert mixed_configuration.for_role("chat_orchestration").provider == "deepseek"
-    assert mixed_configuration.for_role("tool_result_explanation").provider == "qwen"
+    assert mixed_configuration.for_role("agent_decision").provider == "deepseek"
+    assert mixed_configuration.for_role("final_answer").provider == "qwen"
 
 
 def test_qwen_explanation_role_resolves_independent_reasoning_parameters(
@@ -523,13 +483,13 @@ def test_qwen_explanation_role_resolves_independent_reasoning_parameters(
     candidate = tmp_path / "qwen-explanation.toml"
     source = LLM_CONFIG_FILE.read_text(encoding="utf-8")
     old_block = (
-        "[roles.tool_result_explanation]\n"
+        "[roles.final_answer]\n"
         "temperature = 0.0\n"
         "max_tokens = 768\n"
         'reasoning_mode = "disabled"'
     )
     new_block = (
-        "[roles.tool_result_explanation]\n"
+        "[roles.final_answer]\n"
         'model = "qwen_default"\n'
         "top_p = 0.9\n"
         "top_k = 20\n"
@@ -550,7 +510,7 @@ def test_qwen_explanation_role_resolves_independent_reasoning_parameters(
         ),
         candidate,
     )
-    role = configured.for_role("tool_result_explanation")
+    role = configured.for_role("final_answer")
 
     assert role.provider == "qwen"
     assert role.top_p == 0.9
@@ -619,7 +579,7 @@ def test_deepseek_hard_conflicts_fail_at_startup(
             ),
             candidate,
         )
-    assert "chat_orchestration" in str(captured.value)
+    assert "agent_decision" in str(captured.value)
     assert expected_field in str(captured.value)
     assert "secret-must-not-leak" not in str(captured.value)
 
@@ -645,7 +605,7 @@ def test_qwen_structured_reasoning_is_rejected(tmp_path) -> None:
         ),
         encoding="utf-8",
     )
-    with pytest.raises(ConfigurationError, match="chat_orchestration.*reasoning_mode"):
+    with pytest.raises(ConfigurationError, match="agent_decision.*reasoning_mode"):
         load_llm_configuration(
             load_settings(
                 {

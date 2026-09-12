@@ -60,6 +60,7 @@ class ToolRunRow(Base):
         ),
         CheckConstraint("current_status <> 'FAILED' OR (cardinality(completed_outputs) = 0 AND error_code IS NOT NULL)", name="ck_tool_run_failed_shape"),
         UniqueConstraint("task_id", "attempt_no", name="uq_tool_run_task_attempt"),
+        UniqueConstraint("tool_run_id", "task_id", name="uq_tool_run_id_task"),
     )
 
     tool_run_id: Mapped[str] = mapped_column(Text, primary_key=True)

@@ -3,7 +3,7 @@ default_model = "deepseek_default"
 
 [models.deepseek_default]
 provider = "deepseek"
-name = "deepseek-v4-flash"
+name = "deepseek-flash"
 context_window_tokens = 1000000
 
 [models.deepseek_default.capabilities]
@@ -34,8 +34,7 @@ supports_tool_calling = true
 [defaults]
 timeout_seconds = 60
 
-[roles.chat_orchestration]
-tool_calling_mode = "structured"
+[roles.agent_decision]
 temperature = 0.0
 max_tokens = 1024
 reasoning_mode = "disabled"
@@ -43,7 +42,7 @@ prompt_limit_tokens = 16384
 history_token_budget = 8192
 safety_margin_tokens = 1024
 
-[roles.tool_input_extraction]
+[roles.tool_arg_resolution]
 temperature = 0.0
 max_tokens = 1024
 reasoning_mode = "disabled"
@@ -51,7 +50,7 @@ prompt_limit_tokens = 8192
 history_token_budget = 4096
 safety_margin_tokens = 1024
 
-[roles.tool_result_explanation]
+[roles.final_answer]
 temperature = 0.0
 max_tokens = 768
 reasoning_mode = "disabled"

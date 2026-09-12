@@ -138,11 +138,14 @@ def test_needs_input_allows_bound_incomplete_or_unbound_multi_candidate_clarific
     ],
     ids=("complete", "validation-errors-only"),
 )
-def test_bound_needs_input_requires_a_missing_or_ambiguous_field(
+def test_bound_needs_input_requires_an_unresolved_field(
     revision_overrides: dict[str, object],
 ) -> None:
     task = _task(current_status=NEEDS_INPUT)
     task.bind_tool(ZTA_REF)
 
-    with pytest.raises(TaskRoutingStateError, match="unresolved input field"):
+    if revision_overrides.get("validation_errors"):
         task.validate_routing_state(_revision(**revision_overrides))
+    else:
+        with pytest.raises(TaskRoutingStateError, match="unresolved input field"):
+            task.validate_routing_state(_revision(**revision_overrides))

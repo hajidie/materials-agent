@@ -9,6 +9,7 @@ from materialsagent.infrastructure.config import AppSettings, load_settings
 from materialsagent.infrastructure.db.actor import ActorRow
 from materialsagent.infrastructure.db.asset import AssetRow
 from materialsagent.infrastructure.db.base import Base
+from materialsagent.infrastructure.db.agent import AGENT_TABLES
 from materialsagent.infrastructure.db.conversation_task import (
     ConversationRow,
     MessageRow,

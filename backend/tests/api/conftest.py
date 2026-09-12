@@ -132,27 +132,15 @@ class APITestHarness:
         **app_overrides: Any,
     ) -> TestClient:
         from materialsagent.application.context import ActorContext
-        from materialsagent.application.tasks import TaskQueryService
-        from materialsagent.application.timeline import (
-            TimelineQueryService,
-        )
-        from materialsagent.application.timeline_cursor import (
-            TimelineCursorCodec,
-        )
-        from materialsagent.infrastructure.db.timeline_query import (
-            SQLAlchemyTimelineQueryRepository,
-        )
         from materialsagent.main import create_app
         from pydantic import SecretStr
 
         raise_server_exceptions = bool(
             app_overrides.pop("raise_server_exceptions", False)
         )
-        configure_timeline = bool(
-            app_overrides.pop("configure_timeline", True)
-        )
-        query_repository = SQLAlchemyTimelineQueryRepository(self.engine)
+        from materialsagent.infrastructure.db.agent import SQLAlchemyAgentStore
         options: dict[str, Any] = {
+            "agent_store": SQLAlchemyAgentStore(create_session_factory(self.engine)),
             "settings": self.settings,
             "readiness_service": ReadinessService(
                 postgresql_probe=lambda: True,
@@ -161,22 +149,9 @@ class APITestHarness:
             "unit_of_work_factory": self.unit_of_work_factory,
             "actor_context": ActorContext(actor_id=actor_id, user_id=None),
             "clock": lambda: BASE_TIME.replace(hour=1),
-            "m7_tool_chain_enabled": False,
-            "task_query_service": TaskQueryService(query_repository),
         }
-        injected_timeline_service = app_overrides.get("timeline_query_service")
         options.update(app_overrides)
         app = create_app(**options)
-        if configure_timeline and injected_timeline_service is None:
-            app.state.timeline_query_service = TimelineQueryService(
-                query_repository,
-                TimelineCursorCodec(
-                    SecretStr(
-                        "api-test-timeline-signing-key-at-least-32-bytes"
-                    )
-                ),
-                app.state.invocation_service,
-            )
         return TestClient(
             app,
             raise_server_exceptions=raise_server_exceptions,

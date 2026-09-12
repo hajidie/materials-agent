@@ -108,12 +108,22 @@ class StandardSyncExecutor:
         target = registration.binding.execution_target
         invoke_with_context = getattr(target, "invoke_with_context", None)
         invoke = getattr(target, "invoke", None)
-        if callable(invoke_with_context):
-            raw_result = invoke_with_context(dict(validated), context)
-        elif callable(invoke):
-            raw_result = invoke(dict(validated))
-        else:
+        def call_target():
+            if callable(invoke_with_context):
+                return invoke_with_context(dict(validated), context)
+            if callable(invoke):
+                return invoke(dict(validated))
             raise ValueError("Synchronous execution target is invalid.")
+        from concurrent.futures import ThreadPoolExecutor
+        from contextvars import copy_context
+        from materialsagent.application.execution_deadline import remaining_timeout
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tool-call")
+        try:
+            future = executor.submit(copy_context().run, call_target)
+            raw_result = future.result(timeout=remaining_timeout(10))
+        finally:
+            # Timeout never claims that a non-cooperative target was forcibly cancelled.
+            executor.shutdown(wait=False, cancel_futures=True)
         codec = registration.binding.codec
         presenter = registration.binding.presenter
         if codec is None or presenter is None:
@@ -318,6 +328,7 @@ class InvocationService:
         *,
         request_id: str,
         idempotency_key: str,
+        defer_execution: bool = False,
     ) -> PublicInvocation:
         registration = resolved.registration
         if registration.execution_profile is ToolExecutionProfile.MANAGED:
@@ -397,7 +408,7 @@ class InvocationService:
                     or message.role != "USER"
                 ):
                     raise ResourceNotFoundError()
-                existing = uow.invocation_runs.get_by_message(run.source_message_id)
+                existing = uow.invocation_runs.get_by_idempotency(actor.actor_id, idempotency_key)
                 if existing is not None:
                     existing_id = existing.invocation_run_id
                 else:
@@ -406,14 +417,14 @@ class InvocationService:
                     uow.commit()
         except PersistenceError:
             with self._unit_of_work_factory() as uow:
-                existing = uow.invocation_runs.get_by_message(run.source_message_id)
+                existing = uow.invocation_runs.get_by_idempotency(actor.actor_id, idempotency_key)
                 if existing is None:
                     raise
                 existing_id = existing.invocation_run_id
         if existing_id is not None:
             return self.get(actor, existing_id)
         run = self._authorize_initial(actor, run.invocation_run_id)
-        if run.status is InvocationStatus.PENDING:
+        if run.status is InvocationStatus.PENDING and not defer_execution:
             run = self._drive_pending(actor, run.invocation_run_id)
         return self.get(actor, run.invocation_run_id)
 
@@ -429,6 +440,7 @@ class InvocationService:
         request_id: str,
         idempotency_key: str,
         workflow_service: object,
+        defer_execution: bool = False,
     ) -> tuple[PublicInvocation, object]:
         if registration.execution_profile is not ToolExecutionProfile.MANAGED:
             raise ApplicationValidationError()
@@ -490,12 +502,12 @@ class InvocationService:
             if (
                 message is None
                 or task is None
-                or message.task_id != task_id
+                or message.task_id not in (None, task_id)
                 or message.conversation_id != task.conversation_id
                 or task.bound_tool_ref != registration.ref
             ):
                 raise ResourceNotFoundError()
-            existing = uow.invocation_runs.get_by_message(source_message_id)
+            existing = uow.invocation_runs.get_by_idempotency(actor.actor_id, idempotency_key)
             if existing is not None:
                 if (
                     existing.task_id != task_id
@@ -508,6 +520,10 @@ class InvocationService:
                 uow.commit()
 
         run_id = existing_id or run.invocation_run_id
+        if defer_execution:
+            with self._unit_of_work_factory() as uow:
+                saved = uow.invocation_runs.get_owned(run_id, actor.actor_id)
+                return self._public(uow, saved), None
         workflow = self._drive_managed(
             actor,
             run_id,
@@ -540,17 +556,7 @@ class InvocationService:
             return None
         if run.execution_profile is not ToolExecutionProfile.MANAGED:
             raise ApplicationConflictError()
-        now = self._clock()
-        if run.status is InvocationStatus.RUNNING:
-            if (
-                run.execution_lease_expires_at is not None
-                and now < run.execution_lease_expires_at
-            ):
-                return None
-            if run.dispatch_started_at is not None:
-                self._reconcile_managed_dispatched(actor, run, now=now)
-                return None
-        elif run.status is not InvocationStatus.PENDING:
+        if run.status is not InvocationStatus.PENDING:
             return None
         registration = self._current_registration(run)
         policy = registration.definition.tool_execution_policy
@@ -583,20 +589,6 @@ class InvocationService:
                         error_code=decision.reason_code,
                         safe_error_message="Tool authorization was denied.",
                     )
-                elif (
-                    current.status is InvocationStatus.RUNNING
-                    and current.dispatch_started_at is None
-                    and current.execution_lease_expires_at is not None
-                    and claimed_at >= current.execution_lease_expires_at
-                ):
-                    denied = current.transition(
-                        InvocationStatus.FAILED,
-                        now=claimed_at,
-                        authorization_checked_at=claimed_at,
-                        completed_at=claimed_at,
-                        error_code=decision.reason_code,
-                        safe_error_message="Tool authorization was denied during recovery.",
-                    )
                 else:
                     return None
                 saved = uow.invocation_runs.update(
@@ -622,22 +614,6 @@ class InvocationService:
                         claimed_at + timedelta(seconds=self._lease_seconds)
                     ),
                     execution_attempt_count=current.execution_attempt_count + 1,
-                )
-            elif (
-                current.status is InvocationStatus.RUNNING
-                and current.dispatch_started_at is None
-                and current.execution_lease_expires_at is not None
-                and claimed_at >= current.execution_lease_expires_at
-            ):
-                running = replace(
-                    current,
-                    authorization_checked_at=claimed_at,
-                    execution_claim_token=claim_token,
-                    execution_lease_expires_at=(
-                        claimed_at + timedelta(seconds=self._lease_seconds)
-                    ),
-                    execution_attempt_count=current.execution_attempt_count + 1,
-                    updated_at=claimed_at,
                 )
             else:
                 return None
@@ -713,11 +689,16 @@ class InvocationService:
             )
             if current is None:
                 raise ResourceNotFoundError()
+            tool_result = getattr(workflow, "result", None)
+            failed = getattr(tool_result, "status", None) == "FAILED"
+            result_error = getattr(tool_result, "error", None) or {}
             succeeded = current.transition(
-                InvocationStatus.SUCCEEDED,
+                InvocationStatus.FAILED if failed else InvocationStatus.SUCCEEDED,
                 now=completed_at,
                 managed_tool_run_id=managed_tool_run_id,
                 completed_at=completed_at,
+                error_code=result_error.get("code") if failed else None,
+                safe_error_message="Managed Tool failed." if failed else None,
             )
             final = uow.invocation_runs.update(
                 succeeded,
@@ -787,12 +768,13 @@ class InvocationService:
                 )
                 result_missing = True
             else:
+                failed = task.current_status == "FAILED"
                 terminal = current.transition(
-                    InvocationStatus.SUCCEEDED,
+                    InvocationStatus.FAILED if failed else InvocationStatus.SUCCEEDED,
                     now=completed_at,
                     completed_at=completed_at,
-                    error_code=None,
-                    safe_error_message=None,
+                    error_code=task.error_code if failed else None,
+                    safe_error_message="Managed Tool failed." if failed else None,
                 )
             final = uow.invocation_runs.update(
                 terminal,
@@ -815,6 +797,9 @@ class InvocationService:
         request_id: str,
         idempotency_key: str,
         workflow_service: object,
+        source_message_id: str | None = None,
+        retry_of_invocation_run_id: str | None = None,
+        defer_execution: bool = False,
     ) -> PublicInvocation:
         now = self._clock()
         with self._unit_of_work_factory() as uow:
@@ -839,7 +824,9 @@ class InvocationService:
                 (message for message in messages if message.role == "USER"),
                 None,
             )
-            if source_message is None:
+            if source_message_id is not None:
+                source_message = uow.messages.get(source_message_id)
+            if source_message is None or source_message.conversation_id != task.conversation_id:
                 raise ResourceNotFoundError()
             try:
                 registration = self._registry.resolve(task.bound_tool_ref.tool_id)
@@ -872,7 +859,7 @@ class InvocationService:
                 source_message_id=source_message.message_id,
                 task_id=task_id,
                 retry_of_invocation_run_id=(
-                    None if prior is None else prior.invocation_run_id
+                    retry_of_invocation_run_id or (None if prior is None else prior.invocation_run_id)
                 ),
                 request_id=request_id,
                 idempotency_key=idempotency_key,
@@ -935,53 +922,10 @@ class InvocationService:
             or existing.managed_tool_run_id != tool_run_id
         ):
             raise ApplicationConflictError()
-        self._drive_managed(
-            actor,
-            existing.invocation_run_id,
-            workflow_service=workflow_service,
-        )
+        if not defer_execution:
+            self._drive_managed(actor, existing.invocation_run_id, workflow_service=workflow_service)
         return self.get(actor, existing.invocation_run_id)
 
-    def execute_managed_task(
-        self,
-        actor: ActorContext,
-        *,
-        task_id: str,
-        source_message_id: str,
-        task_input_revision_id: str,
-        request_id: str,
-        idempotency_key: str,
-        workflow_service: object,
-    ) -> tuple[PublicInvocation, object]:
-        with self._unit_of_work_factory() as uow:
-            task = uow.tasks.get_owned(task_id, actor.actor_id)
-            revision = uow.task_input_revisions.get(task_input_revision_id)
-            if (
-                task is None
-                or revision is None
-                or revision.task_id != task.task_id
-                or revision.normalized_input is None
-                or task.bound_tool_ref is None
-            ):
-                raise ResourceNotFoundError()
-            try:
-                registration = self._registry.resolve(task.bound_tool_ref.tool_id)
-            except UnknownToolError:
-                raise ApplicationConflictError() from None
-            if registration.ref != task.bound_tool_ref:
-                raise ApplicationConflictError()
-            arguments = dict(revision.normalized_input)
-        return self.execute_managed(
-            actor,
-            registration=registration,
-            task_id=task_id,
-            source_message_id=source_message_id,
-            task_input_revision_id=task_input_revision_id,
-            proposed_arguments=arguments,
-            request_id=request_id,
-            idempotency_key=idempotency_key,
-            workflow_service=workflow_service,
-        )
 
     def _managed_revision_id(
         self,
@@ -1008,71 +952,6 @@ class InvocationService:
             key=lambda revision: (revision.revision, revision.created_at),
         ).task_input_revision_id
 
-    def _reconcile_managed_dispatched(
-        self,
-        actor: ActorContext,
-        run: InvocationRun,
-        *,
-        now: datetime,
-    ) -> None:
-        with self._unit_of_work_factory() as uow:
-            current = uow.invocation_runs.get_owned_for_update(
-                run.invocation_run_id,
-                actor.actor_id,
-            )
-            if (
-                current is None
-                or current.status is not InvocationStatus.RUNNING
-                or current.execution_claim_token != run.execution_claim_token
-            ):
-                return
-            task = (
-                None
-                if current.task_id is None
-                else uow.tasks.get_owned(current.task_id, actor.actor_id)
-            )
-            tool_runs = (
-                []
-                if current.task_id is None
-                else uow.tool_runs.list_for_task(current.task_id)
-            )
-            latest = max(
-                tool_runs,
-                key=lambda item: (item.created_at, item.tool_run_id),
-                default=None,
-            )
-            if (
-                task is not None
-                and task.selected_result_id is not None
-                and task.selected_tool_run_id is not None
-            ):
-                reconciled = current.transition(
-                    InvocationStatus.SUCCEEDED,
-                    now=now,
-                    managed_tool_run_id=task.selected_tool_run_id,
-                    completed_at=now,
-                    error_code=None,
-                    safe_error_message=None,
-                )
-            else:
-                reconciled = current.transition(
-                    InvocationStatus.FAILED,
-                    now=now,
-                    managed_tool_run_id=(
-                        None if latest is None else latest.tool_run_id
-                    ),
-                    completed_at=now,
-                    error_code="MANAGED_EXECUTION_INTERRUPTED",
-                    safe_error_message=(
-                        "Managed Tool execution was interrupted; use explicit retry."
-                    ),
-                )
-            if uow.invocation_runs.update(
-                reconciled,
-                expected_status=InvocationStatus.RUNNING,
-                expected_claim_token=current.execution_claim_token,
-            ) is not None:
-                uow.commit()
 
     def _task_conversation(self, actor: ActorContext, task_id: str) -> str:
         with self._unit_of_work_factory() as uow:
@@ -1102,15 +981,15 @@ class InvocationService:
                 key=lambda item: (item.created_at, item.tool_run_id),
                 default=None,
             )
+            committed = None if latest is None else uow.tool_results.get_for_tool_run(latest.tool_run_id)
+            succeeded = committed is not None and committed.status != "FAILED"
             failed = current.transition(
-                InvocationStatus.FAILED,
+                InvocationStatus.SUCCEEDED if succeeded else InvocationStatus.FAILED,
                 now=completed_at,
-                managed_tool_run_id=(
-                    None if latest is None else latest.tool_run_id
-                ),
+                managed_tool_run_id=None if latest is None else latest.tool_run_id,
                 completed_at=completed_at,
-                error_code="MANAGED_EXECUTION_FAILED",
-                safe_error_message="Managed Tool execution failed; use explicit retry.",
+                error_code=None if succeeded else "MANAGED_EXECUTION_FAILED",
+                safe_error_message=None if succeeded else "Managed Tool execution failed; use explicit retry.",
             )
             saved = uow.invocation_runs.update(
                 failed,
@@ -1123,7 +1002,6 @@ class InvocationService:
             return saved
 
     def get(self, actor: ActorContext, invocation_run_id: str) -> PublicInvocation:
-        self._reconcile(actor, invocation_run_id)
         with self._unit_of_work_factory() as uow:
             run = uow.invocation_runs.get_owned(invocation_run_id, actor.actor_id)
             if run is None:
@@ -1139,7 +1017,7 @@ class InvocationService:
             runs = uow.invocation_runs.list_for_conversation(conversation_id, actor.actor_id)
         return [self.get(actor, run.invocation_run_id) for run in runs]
 
-    def confirm(self, actor: ActorContext, invocation_run_id: str) -> PublicInvocation:
+    def confirm(self, actor: ActorContext, invocation_run_id: str, *, defer_execution: bool = False) -> PublicInvocation:
         now = self._clock()
         with self._unit_of_work_factory() as uow:
             run = uow.invocation_runs.get_owned_for_update(invocation_run_id, actor.actor_id)
@@ -1185,7 +1063,7 @@ class InvocationService:
                 return self.get(actor, invocation_run_id)
             else:
                 raise ApplicationConflictError()
-        if run.status is InvocationStatus.PENDING:
+        if run.status is InvocationStatus.PENDING and not defer_execution:
             self._drive_pending(actor, invocation_run_id)
         return self.get(actor, invocation_run_id)
 
@@ -1372,6 +1250,8 @@ class InvocationService:
                     execution_claim_token=saved.execution_claim_token,
                 ),
             )
+        except TimeoutError:
+            return self._finalize_unknown(actor, saved)
         except Exception:
             if saved.execution_profile is ToolExecutionProfile.SIDE_EFFECT:
                 return self._finalize_unknown(actor, saved)
@@ -1468,107 +1348,6 @@ class InvocationService:
             uow.commit()
             return saved
 
-    def _reconcile(self, actor: ActorContext, invocation_run_id: str) -> None:
-        now = self._clock()
-        with self._unit_of_work_factory() as uow:
-            snapshot = uow.invocation_runs.get_owned(invocation_run_id, actor.actor_id)
-            if snapshot is None:
-                raise ResourceNotFoundError()
-        if snapshot.status is InvocationStatus.PENDING:
-            if snapshot.execution_profile is ToolExecutionProfile.MANAGED:
-                if self._managed_workflow_service is not None:
-                    self._drive_managed(
-                        actor,
-                        invocation_run_id,
-                        workflow_service=self._managed_workflow_service,
-                    )
-                return
-            if snapshot.authorization_checked_at is None and snapshot.confirmed_at is None:
-                snapshot = self._authorize_initial(actor, invocation_run_id)
-            if snapshot.status is InvocationStatus.PENDING and (
-                not snapshot.confirmation_required or snapshot.confirmed_at is not None
-            ):
-                self._drive_pending(actor, invocation_run_id)
-            return
-        with self._unit_of_work_factory() as uow:
-            run = uow.invocation_runs.get_owned_for_update(invocation_run_id, actor.actor_id)
-            if run is None:
-                raise ResourceNotFoundError()
-            if (
-                run.status is InvocationStatus.PENDING_CONFIRMATION
-                and run.confirmation_expires_at is not None
-                and now >= run.confirmation_expires_at
-            ):
-                expired = run.transition(
-                    InvocationStatus.EXPIRED,
-                    now=now,
-                    expired_at=now,
-                    completed_at=now,
-                )
-                if uow.invocation_runs.update(
-                    expired,
-                    expected_status=InvocationStatus.PENDING_CONFIRMATION,
-                ) is None:
-                    raise ApplicationConflictError()
-                uow.commit()
-                return
-        if (
-            run.status is not InvocationStatus.RUNNING
-            or run.execution_lease_expires_at is None
-            or now < run.execution_lease_expires_at
-        ):
-            return
-        if run.dispatch_started_at is not None:
-            if run.execution_profile is ToolExecutionProfile.SIDE_EFFECT:
-                self._finalize_unknown(actor, run)
-                return
-            if run.execution_profile is ToolExecutionProfile.MANAGED:
-                self._reconcile_managed_dispatched(actor, run, now=now)
-                return
-        if run.execution_profile is ToolExecutionProfile.MANAGED:
-            if self._managed_workflow_service is not None:
-                self._drive_managed(
-                    actor,
-                    invocation_run_id,
-                    workflow_service=self._managed_workflow_service,
-                )
-            return
-        registration = self._current_registration(run)
-        policy = registration.definition.tool_execution_policy
-        decision = self._authorization.authorize(
-            ToolAuthorizationRequest(
-                actor_id=actor.actor_id,
-                user_id=actor.user_id,
-                tool_ref=run.tool_ref,
-                required_permissions=policy.required_permissions,
-                action="EXECUTE",
-            )
-        )
-        if not decision.allowed:
-            self._finalize_failure(
-                actor,
-                run,
-                "TOOL_AUTHORIZATION_DENIED_ON_RECOVERY",
-            )
-            return
-        reclaimed = replace(
-            run,
-            authorization_checked_at=now,
-            execution_claim_token=self._id_factory("claim"),
-            execution_lease_expires_at=now + timedelta(seconds=self._lease_seconds),
-            execution_attempt_count=run.execution_attempt_count + 1,
-            updated_at=now,
-        )
-        with self._unit_of_work_factory() as uow:
-            saved = uow.invocation_runs.update(
-                reclaimed,
-                expected_status=InvocationStatus.RUNNING,
-                expected_claim_token=run.execution_claim_token,
-            )
-            if saved is None:
-                return
-            uow.commit()
-        self._dispatch(actor, saved, registration)
 
     def _current_registration(self, run: InvocationRun) -> RegisteredTool:
         try:

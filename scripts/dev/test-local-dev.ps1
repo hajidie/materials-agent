@@ -387,6 +387,11 @@ Invoke-Test 'process ownership rejects PID reuse metadata changes' {
         (Test-ProcessSnapshotMatch -Record $record -Snapshot $matching) `
         'Matching process snapshot was rejected.'
 
+    $deserialized = $record.PSObject.Copy()
+    $deserialized.process_start_time = $matching.start_time
+    Assert-True (Test-ProcessSnapshotMatch -Record $deserialized -Snapshot $matching) `
+        'JSON-deserialized UTC timestamp was incorrectly interpreted as local time.'
+
     $reused = $matching.PSObject.Copy()
     $reused.start_time = [DateTime]::Parse('2026-08-04T01:12:03Z').ToUniversalTime()
     Assert-True `
@@ -494,6 +499,42 @@ Invoke-Test 'status summary never labels an unready service READY' {
     Assert-True ($lines -contains 'Runtime: NOT_READY_OR_UNVERIFIED http://127.0.0.1:8100') 'Runtime status was not honest.'
     Assert-True ($lines -contains 'Frontend: NOT_READY_OR_UNVERIFIED http://127.0.0.1:3000') 'Frontend status was not honest.'
     Assert-True ($lines -contains 'Backend: READY http://127.0.0.1:8000') 'Backend READY status was lost.'
+}
+
+Invoke-Test 'legacy Mock launcher preflight does not require the retired cursor secret' {
+    $python = Resolve-CondaEnvironmentPython -EnvironmentName 'materialsagent-backend'
+    & {
+        . (Join-Path $PSScriptRoot 'start-mock-stack.ps1') -LoadFunctionsOnly
+        $fixture = [ordered]@{
+            LOCAL_ACTOR_ID = 'offline-actor'
+            POSTGRES_HOST = '127.0.0.1'
+            POSTGRES_DB = 'offline-db'
+            POSTGRES_USER = 'offline-user'
+            POSTGRES_PASSWORD = 'offline-password'
+            MINIO_API_PORT = '9000'
+            MINIO_CONSOLE_PORT = '9001'
+            MINIO_ENDPOINT = 'http://127.0.0.1:9000'
+            MINIO_ACCESS_KEY = 'offline-access'
+            MINIO_SECRET_KEY = 'offline-secret'
+            MINIO_BUCKET = 'offline-bucket'
+            MINIO_SECURE = 'false'
+            ZTA35G_RUNTIME_URL = 'http://127.0.0.1:8100'
+            ZTA35G_RUNTIME_TOKEN = 'offline-runtime-token'
+        }
+        $fixturePath = [IO.Path]::GetTempFileName()
+        try {
+            foreach ($legacyLine in @('', 'TIMELINE_CURSOR_SIGNING_KEY=')) {
+                $lines = @($fixture.GetEnumerator() | ForEach-Object { '{0}={1}' -f $_.Key, $_.Value })
+                Set-Content -LiteralPath $fixturePath -Value ($lines + $legacyLine) -Encoding UTF8
+                $environment = Read-SafeDotEnv -Path $fixturePath
+                Assert-True (-not $environment.ContainsKey('TIMELINE_CURSOR_SIGNING_KEY')) 'Retired secret was parsed'
+                $backup = Enter-ControlledEnvironment -Environment $environment
+                try { Assert-M11ALocalConfiguration -Environment $environment -Python $python }
+                finally { Restore-ControlledEnvironment -Backup $backup }
+            }
+        }
+        finally { Remove-Item -LiteralPath $fixturePath -Force }
+    }
 }
 
 Write-Output ("LOCAL_DEV_OFFLINE_TESTS_OK tests={0}" -f $script:Passed)

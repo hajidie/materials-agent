@@ -9,10 +9,7 @@ import sys
 from materialsagent.application.tool_registry import ToolRegistry
 from materialsagent.application.tools import build_tool_registry
 from materialsagent.application.zta35g_tool import build_zta35g_tool_definition
-from materialsagent.domain.ports.chat_orchestration import (
-    ToolCandidateProposal,
-    ToolCandidateSet,
-)
+from materialsagent.domain.models.agent import CallTool
 from materialsagent.domain.ports.tool_execution import (
     ToolExecutionOutput,
     ToolRequestContext,
@@ -65,9 +62,10 @@ def test_two_definition_registry_keeps_unrelated_contracts_and_hashes() -> None:
 
 
 def test_generic_candidate_validation_accepts_ml_training_fields() -> None:
-    candidate = ToolCandidateProposal(
-        tool_id="ml_training_test",
-        proposed_arguments={
+    candidate = CallTool(
+        type="CallTool",
+        tool_name="ml_training_test",
+        arguments={
             "dataset": "dataset_fixture_1",
             "task_type": "regression",
             "split_ratio": 0.8,
@@ -76,9 +74,7 @@ def test_generic_candidate_validation_accepts_ml_training_fields() -> None:
         },
     )
 
-    result = ToolCandidateSet((candidate,))
-
-    assert result.candidates[0].candidate_input == {
+    assert candidate.arguments == {
         "dataset": "dataset_fixture_1",
         "task_type": "regression",
         "split_ratio": 0.8,

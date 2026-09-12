@@ -30,7 +30,7 @@ def _persist_result(
         _factory(api_harness.engine),
         clock=lambda: BASE + timedelta(seconds=5),
         id_factory=lambda: "result_1",
-    ).commit_result(ACTOR, receipt=receipt, assets=assets)
+    ).commit_initial_result(ACTOR, receipt=receipt, assets=assets)
 
 
 def test_get_tool_result_uses_linked_asset_public_projection(

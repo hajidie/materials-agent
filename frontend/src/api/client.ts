@@ -14,16 +14,7 @@ import type {
   ConversationDeleteData,
   Conversation,
   ConversationPage,
-  ExplanationRetryRequest,
-  ExplanationRetryResponseData,
-  MessageSubmissionRequest,
-  MessageSubmissionResponseData,
-  TaskDetail,
-  TimelinePage,
   ToolResult,
-  ToolRetryRequest,
-  ToolRetryResponseData,
-  ToolInvocation,
 } from "./types";
 
 const DEFAULT_API_BASE_URL = "/api/v1";
@@ -52,16 +43,6 @@ export interface MaterialsAgentApi {
     cursor?: string,
     signal?: AbortSignal,
   ): Promise<ApiSuccessEnvelope<ConversationPage>>;
-  getTimelinePage(
-    conversationId: string,
-    limit?: number,
-    cursor?: string,
-    signal?: AbortSignal,
-  ): Promise<ApiSuccessEnvelope<TimelinePage>>;
-  getTask(
-    taskId: string,
-    signal?: AbortSignal,
-  ): Promise<ApiSuccessEnvelope<TaskDetail>>;
   getToolResult(
     resultId: string,
     signal?: AbortSignal,
@@ -70,27 +51,6 @@ export interface MaterialsAgentApi {
     assetId: string,
     signal?: AbortSignal,
   ): Promise<ApiSuccessEnvelope<AssetMetadata>>;
-  submitMessage(
-    conversationId: string,
-    body: MessageSubmissionRequest,
-    idempotencyKey: string,
-  ): Promise<ApiSuccessEnvelope<MessageSubmissionResponseData>>;
-  confirmToolInvocation?(
-    invocationRunId: string,
-  ): Promise<ApiSuccessEnvelope<ToolInvocation>>;
-  rejectToolInvocation?(
-    invocationRunId: string,
-  ): Promise<ApiSuccessEnvelope<ToolInvocation>>;
-  retryTool(
-    taskId: string,
-    body: ToolRetryRequest,
-    idempotencyKey: string,
-  ): Promise<ApiSuccessEnvelope<ToolRetryResponseData>>;
-  retryExplanation(
-    resultId: string,
-    body: ExplanationRetryRequest,
-    idempotencyKey: string,
-  ): Promise<ApiSuccessEnvelope<ExplanationRetryResponseData>>;
   resolvePublicContentUrl(contentUrl: string): string;
 }
 
@@ -405,32 +365,6 @@ export function createMaterialsAgentApi(
           : { networkFailure: "READ", signal },
       );
     },
-    getTimelinePage(
-      conversationId,
-      limit = 20,
-      cursor,
-      signal,
-    ) {
-      return request(
-        "GET",
-        withQuery(
-          `/conversations/${encodeId(conversationId)}/timeline`,
-          { limit, cursor },
-        ),
-        signal === undefined
-          ? { networkFailure: "READ" }
-          : { networkFailure: "READ", signal },
-      );
-    },
-    getTask(taskId, signal) {
-      return request(
-        "GET",
-        `/tasks/${encodeId(taskId)}`,
-        signal === undefined
-          ? { networkFailure: "READ" }
-          : { networkFailure: "READ", signal },
-      );
-    },
     getToolResult(resultId, signal) {
       return request(
         "GET",
@@ -447,53 +381,6 @@ export function createMaterialsAgentApi(
         signal === undefined
           ? { networkFailure: "READ" }
           : { networkFailure: "READ", signal },
-      );
-    },
-    submitMessage(conversationId, body, idempotencyKey) {
-      return request(
-        "POST",
-        `/conversations/${encodeId(conversationId)}/messages`,
-        {
-          body: { ...body },
-          idempotencyKey,
-          networkFailure: "IDEMPOTENT_WRITE",
-        },
-      );
-    },
-    confirmToolInvocation(invocationRunId) {
-      return request(
-        "POST",
-        `/tool-invocations/${encodeId(invocationRunId)}/confirm`,
-        { networkFailure: "IDEMPOTENT_WRITE" },
-      );
-    },
-    rejectToolInvocation(invocationRunId) {
-      return request(
-        "POST",
-        `/tool-invocations/${encodeId(invocationRunId)}/reject`,
-        { networkFailure: "IDEMPOTENT_WRITE" },
-      );
-    },
-    retryTool(taskId, body, idempotencyKey) {
-      return request(
-        "POST",
-        `/tasks/${encodeId(taskId)}/tool-runs`,
-        {
-          body: { ...body },
-          idempotencyKey,
-          networkFailure: "IDEMPOTENT_WRITE",
-        },
-      );
-    },
-    retryExplanation(resultId, body, idempotencyKey) {
-      return request(
-        "POST",
-        `/tool-results/${encodeId(resultId)}/explanations`,
-        {
-          body: { ...body },
-          idempotencyKey,
-          networkFailure: "IDEMPOTENT_WRITE",
-        },
       );
     },
     resolvePublicContentUrl(contentUrl) {

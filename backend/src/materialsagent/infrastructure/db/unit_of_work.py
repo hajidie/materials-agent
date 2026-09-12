@@ -250,6 +250,16 @@ class SQLAlchemyUnitOfWork:
     def commit(self) -> None:
         session = self._active_session()
         try:
+            from materialsagent.application.execution_deadline import current_execution_owner
+            owner = current_execution_owner()
+            if owner:
+                from sqlalchemy import select
+                from materialsagent.infrastructure.db.agent import AgentRunRow
+                from materialsagent.domain.ports.agent import AgentConflictError
+                row = session.scalar(select(AgentRunRow).where(AgentRunRow.agent_run_id == owner[0]).with_for_update())
+                if row is None or row.version != owner[1] or row.status != "RUNNING" or row.document.get("claim") != owner[2]:
+                    session.rollback()
+                    raise AgentConflictError("Execution owner is stale.")
             self._validate_routing_states(session)
             session.commit()
             self._clear_routing_state_tracking(session)

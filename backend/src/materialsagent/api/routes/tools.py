@@ -12,7 +12,6 @@ from materialsagent.api.dependencies import (
     get_tool_catalog_service,
     get_tool_execution_service,
     get_tool_run_query_service,
-    require_m5_dev_routes,
 )
 from materialsagent.application.context import ActorContext
 from materialsagent.application.asset_service import AssetService
@@ -145,47 +144,9 @@ def get_tool(
     )
 
 
-@router.post(
-    "/api/v1/dev/tasks/{task_id}/tool-runs",
-    response_model=ToolRunResponse,
-    status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_m5_dev_routes)],
-)
-def execute_tool_revision(
-    task_id: str,
-    payload: ExecuteToolRequest,
-    request: Request,
-    actor_context: Annotated[ActorContext, Depends(get_actor_context)],
-    service: Annotated[ToolExecutionService, Depends(get_tool_execution_service)],
-    asset_service: Annotated[AssetService, Depends(get_asset_service)],
-) -> ToolRunResponse:
-    receipt = service.execute_revision_with_output(
-        actor_context,
-        task_id=task_id,
-        task_input_revision_id=payload.task_input_revision_id,
-        request_id=request.state.request_id,
-    )
-    assets = []
-    if receipt.output.images:
-        assets = asset_service.create_from_output(
-            actor_context,
-            task_id=task_id,
-            tool_run_id=receipt.tool_run.tool_run_id,
-            output=receipt.output,
-        )
-    return ToolRunResponse(
-        request_id=request.state.request_id,
-        data=_project_tool_run(
-            receipt.tool_run,
-            asset_ids=[asset.asset_id for asset in assets],
-        ),
-    )
-
-
 @router.get(
     "/api/v1/dev/tool-runs/{tool_run_id}",
     response_model=ToolRunResponse,
-    dependencies=[Depends(require_m5_dev_routes)],
 )
 def get_tool_run(
     tool_run_id: str,

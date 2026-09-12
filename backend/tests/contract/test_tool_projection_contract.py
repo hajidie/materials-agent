@@ -22,34 +22,6 @@ def test_catalog_and_invocation_openapi_use_strict_safe_projection_dtos() -> Non
             "limitations",
             "availability",
         },
-        "InvocationToolView": {
-            "tool_id",
-            "version",
-            "display_name",
-            "execution_profile",
-            "confirmation_required",
-            "confirmation_prompt",
-        },
-        "InvocationDataView": {
-            "invocation_run_id",
-            "conversation_id",
-            "source_message_id",
-            "task_id",
-            "status",
-            "tool",
-            "confirmation_required",
-            "confirmation_expires_at",
-            "confirmed_at",
-            "rejected_at",
-            "expired_at",
-            "dispatch_started_at",
-            "error_code",
-            "safe_error_message",
-            "result",
-            "created_at",
-            "updated_at",
-            "completed_at",
-        },
     }
     for name, fields in expected_fields.items():
         assert components[name]["additionalProperties"] is False
@@ -58,10 +30,14 @@ def test_catalog_and_invocation_openapi_use_strict_safe_projection_dtos() -> Non
     serialized = str(
         {
             name: components[name]
-            for name in ("PublicToolCatalogItemView", "InvocationToolView")
+            for name in ("PublicToolCatalogItemView",)
         }
     )
     assert "schema_hash" not in serialized
     assert "required_permissions" not in serialized
     assert "runtime_metadata" not in serialized
     assert "execution_target" not in serialized
+
+    assert components["AgentRunView"]["additionalProperties"] is False
+    assert not {"actor_id", "claim", "process_id", "context"}.intersection(components["AgentRunView"]["properties"])
+    assert "Submission" in components and "CallTool" in components and "Finish" in components

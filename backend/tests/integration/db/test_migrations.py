@@ -30,7 +30,7 @@ IMMEDIATE_PREVIOUS_REVISION = "0006_asset"
 M8_REVISION = "0008_idempotency_record"
 M9_REVISION = "0009_timeline_query_indexes"
 M10_REVISION = "0010_registry_routing_state"
-EXPECTED_REVISION = "0014_tool_invocation"
+EXPECTED_REVISION = "0015"
 ALEMBIC_INI = Path(__file__).resolve().parents[3] / "alembic.ini"
 NEW_TASK_TIME_CHECKS = {
     "ck_task_started_at_not_before_created_at",
@@ -56,7 +56,7 @@ M8_TABLES = M7_TABLES | {
     "idempotency_record",
     "conversation_object_cleanup",
 }
-HEAD_TABLES = M8_TABLES | {"invocation_run", "invocation_result"}
+HEAD_TABLES = M8_TABLES | {"invocation_run", "invocation_result", "agent_run", "agent_submission", "agent_step", "agent_observation", "agent_execution", "agent_model_call", "agent_final_answer"}
 
 
 def _make_alembic_config(settings: AppSettings) -> Config:
@@ -452,6 +452,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "created_at",
             },
             "invocation_run": {
+                "version",
                 "invocation_run_id",
                 "actor_id",
                 "conversation_id",
@@ -761,6 +762,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "ck_message_content_text_not_blank",
                 "ck_message_conversation_id_not_blank",
                 "ck_message_generation_source_allowed",
+                "ck_message_agent_source_role",
                 "ck_message_llm_call_id_not_blank",
                 "ck_message_llm_source_role",
                 "ck_message_message_id_not_blank",
@@ -1019,7 +1021,6 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "invocation_run_id",
             ],
             "ix_invocation_recovery": ["status", "execution_lease_expires_at"],
-            "uq_invocation_message_proposal": ["source_message_id"],
         }
         assert {
             constraint["name"]: constraint["column_names"]
@@ -1325,7 +1326,7 @@ def test_m7_result_and_explanation_migration_round_trip(
                     "actor_id, request_id, role, generation_source, content_text, "
                     "structured_content, llm_call_id, created_at) VALUES "
                     "('message_1', 'conversation_1', 'task_1', 'actor_1', "
-                    "'request_1', 'USER', NULL, 'migration fixture', NULL, NULL, "
+                    "'request_1', 'USER', 'USER', 'migration fixture', NULL, NULL, "
                     ":created_at)"
                 ),
                 {"created_at": created_at},
@@ -2212,7 +2213,7 @@ def test_m10_backfills_only_known_zta_tasks_and_refuses_ready_downgrade(
                     "actor_id, request_id, role, generation_source, content_text, "
                     "structured_content, llm_call_id, created_at) VALUES "
                     "('message_m10', 'conversation_m10', 'task_m10_tool', "
-                    "'actor_m10', 'request_m10', 'USER', NULL, "
+                    "'actor_m10', 'request_m10', 'USER', 'USER', "
                     "'migration fixture', NULL, NULL, :created_at)"
                 ),
                 {"created_at": created_at},

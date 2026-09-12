@@ -306,7 +306,22 @@ class SQLAlchemyConversationLifecycleRepository:
         process_cutoff: datetime,
     ) -> bool:
         try:
-            tasks = self._locked_tasks(actor_id=actor_id, conversation_id=conversation_id)
+            from materialsagent.infrastructure.db.agent import AgentRunRow
+            agent_activity = self._session.scalar(select(AgentRunRow.agent_run_id).where(
+                AgentRunRow.actor_id == actor_id, AgentRunRow.conversation_id == conversation_id,
+                AgentRunRow.status.in_(("PENDING", "RUNNING"))).limit(1))
+            if agent_activity is not None:
+                return True
+            linked = self._session.scalars(select(AgentRunRow).where(
+                AgentRunRow.actor_id == actor_id, AgentRunRow.conversation_id == conversation_id)).all()
+            managed_ids = set()
+            for row in linked:
+                document = row.document
+                for record in [document.get("draft"), document.get("pending_execution"), *document.get("executions", []), *document.get("observations", [])]:
+                    if record and record.get("task_id"):
+                        managed_ids.add(record["task_id"])
+            tasks = [task for task in self._locked_tasks(actor_id=actor_id, conversation_id=conversation_id)
+                if task.task_id not in managed_ids]
             if any(
                 task.current_status in {"PENDING", "RUNNING", "READY"}
                 and task.updated_at >= process_cutoff
