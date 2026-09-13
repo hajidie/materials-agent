@@ -89,6 +89,7 @@ def test_production_composition_registers_managed_and_safe_standard_tools() -> N
     assert {definition.tool_id for definition in registry.list_registered()} == {
         "zta35g_sem_virtual_lab",
         "materials_unit_conversion",
+        "ebsd_yield_strength_predictor",
     }
 
 

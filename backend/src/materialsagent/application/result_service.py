@@ -16,7 +16,7 @@ from materialsagent.application.tool_execution import (
     _tool_output_fingerprint,
     normalize_tool_output_summary,
 )
-from materialsagent.application.zta35g_input import PARAMETER_FIELDS
+from materialsagent.application.managed_input_contracts import source_for, provenance_for
 from materialsagent.domain.models.asset import Asset
 from materialsagent.domain.models.result_asset_link import ResultAssetLink
 from materialsagent.domain.models.task import Task
@@ -585,40 +585,7 @@ class ResultService:
             or revision.normalized_input is None
         ):
             raise ApplicationConflictError(task_id=task.task_id)
-        normalized_input = revision.normalized_input
-        execution_process_parameters = tool_run.execution_input.get(
-            "process_parameters"
-        )
-        expected_requested_outputs = list(tool_run.requested_outputs)
-        if (
-            normalized_input.get("material") != "ZTA35G"
-            or normalized_input.get("requested_outputs")
-            != expected_requested_outputs
-            or tool_run.execution_input.get("requested_outputs")
-            != expected_requested_outputs
-            or not isinstance(execution_process_parameters, dict)
-        ):
-            raise ApplicationConflictError(task_id=task.task_id)
-        expected_units = {
-            "solution_temperature": "°C",
-            "solution_time": "h",
-            "aging_temperature": "°C",
-            "aging_time": "h",
-        }
-        normalized_process_parameters: dict[str, object] = {}
-        for field_name in PARAMETER_FIELDS:
-            parameter = normalized_input.get(field_name)
-            if (
-                not isinstance(parameter, dict)
-                or set(parameter) != {"value", "unit"}
-                or parameter["unit"] != expected_units[field_name]
-                or field_name not in execution_process_parameters
-                or parameter["value"]
-                != execution_process_parameters[field_name]
-            ):
-                raise ApplicationConflictError(task_id=task.task_id)
-            normalized_process_parameters[field_name] = dict(parameter)
-        return revision.revision, normalized_process_parameters
+        return revision.revision, source_for(unit_of_work, task, tool_run, revision)
 
     @staticmethod
     def _load_and_validate_assets(
@@ -706,15 +673,8 @@ class ResultService:
             failed_outputs=list(output.failed_outputs),
             data=dict(output.data),
             warnings=[dict(item) for item in output.warnings],
-            provenance={
-                "input_revision": sources.revision_number,
-                "normalized_process_parameters": (
-                    sources.normalized_process_parameters
-                ),
-                "actual_runtime_parameters": dict(
-                    output.actual_runtime_parameters
-                ),
-            },
+            provenance=provenance_for(sources.tool_run.tool_id, sources.revision_number,
+                sources.normalized_process_parameters, output.actual_runtime_parameters),
             error=error,
             tool_id=sources.tool_run.tool_id,
             tool_version=sources.tool_run.tool_version,

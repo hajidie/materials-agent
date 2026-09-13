@@ -37,7 +37,7 @@ class ConversationObjectCleanup:
     conversation_id: str
     asset_id: str
     operation_id: str
-    producer_tool_run_id: str
+    producer_tool_run_id: str | None
     object_key: str
     bucket: str
     storage_namespace: str
@@ -56,12 +56,13 @@ class ConversationObjectCleanup:
             "conversation_id",
             "asset_id",
             "operation_id",
-            "producer_tool_run_id",
             "object_key",
             "bucket",
             "storage_namespace",
         ):
             _require_text(getattr(self, field_name), field_name)
+        if self.producer_tool_run_id is not None:
+            _require_text(self.producer_tool_run_id, "producer_tool_run_id")
         validate_object_key(self.object_key)
         if self.identity_version not in STORAGE_IDENTITY_VERSIONS:
             raise ValueError("identity_version is not supported.")

@@ -8,6 +8,9 @@ import { clarificationLabel } from "./api/agent";
 import { useAgentRuns } from "./composables/useAgentRuns";
 
 const agent = useAgentRuns();
+const pendingHere = computed(() => agent.pending.value?.conversationId === agent.selectedId.value ? agent.pending.value : null);
+const composerText = computed(() => typeof pendingHere.value?.body.content_text === "string" ? pendingHere.value.body.content_text : agent.draft.value.text);
+const composerAsset = computed(() => typeof pendingHere.value?.body.ebsd_asset_id === "string" ? pendingHere.value.body.ebsd_asset_id : agent.draft.value.assetId);
 const deleteId = ref<string | null>(null);
 const deleting = ref(false);
 const deleteError = ref<string | null>(null);
@@ -50,7 +53,9 @@ function safely(promise: Promise<unknown>) { void promise.catch(() => { agent.er
       </section>
       <ChatComposer :key="`${agent.selectedId.value}:${agent.resumeTarget.value?.agent_run_id ?? 'new'}`" :disabled="agent.busy.value" :sending="agent.sending.value" :completed="agent.completed.value"
         :waiting-question="agent.resumeTarget.value?.waiting ? clarificationLabel(agent.resumeTarget.value.waiting.question) : null"
-        :initial-draft="typeof agent.pending.value?.body.content_text === 'string' ? agent.pending.value.body.content_text : ''"
+        :initial-draft="composerText"
+        :ebsd-asset-id="composerAsset" :uploading="agent.uploading.value" :upload-error="agent.uploadError.value" :can-retry-upload="agent.canRetryUpload.value"
+        @update-draft="agent.setDraftText($event)" @upload-ebsd="safely(agent.uploadEbsd($event))" @remove-ebsd="agent.removeEbsd()" @retry-ebsd="safely(agent.retryEbsdUpload())"
         @submit="safely(submit($event))" @cancel-resume="agent.resumeTarget.value = null" />
     </main>
   </div>

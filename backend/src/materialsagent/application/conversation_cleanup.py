@@ -28,7 +28,7 @@ from materialsagent.domain.ports.unit_of_work import PersistenceError, UnitOfWor
 _ENVIRONMENT_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,31}\Z")
 _OBJECT_KEY_PATTERN = re.compile(
     r"assets/(?P<environment>[a-z0-9][a-z0-9-]{0,31})/"
-    r"(?P<asset_id>asset_[a-z0-9_-]{1,90})\.png\Z"
+    r"(?P<asset_id>asset_[a-z0-9_-]{1,90})\.(?:png|jpg)\Z"
 )
 MAX_CLEANUP_DRAIN = 100
 _IDENTITY_METADATA = frozenset({"asset-id", "operation-id", "producer-tool-run-id"})
@@ -120,6 +120,9 @@ class ConversationCleanupService:
                 )
                 if conversation is None:
                     return ConversationDeletion(conversation_id, ())
+                from materialsagent.application.ebsd_assets import upload_in_progress
+                if upload_in_progress(conversation_id):
+                    raise ConversationBusyError(conversation_id=conversation_id)
                 unit_of_work.conversation_lifecycle.recover_stale(
                     actor_id=actor_context.actor_id,
                     process_cutoff=self._process_cutoff,
@@ -143,7 +146,7 @@ class ConversationCleanupService:
                         conversation_id=conversation_id,
                         asset_id=asset.asset_id,
                         operation_id=asset.operation_id,
-                        producer_tool_run_id=str(asset.producer_tool_run_id),
+                        producer_tool_run_id=asset.producer_tool_run_id,
                         object_key=asset.object_key,
                         bucket=asset.storage_bucket or self._bucket,
                         storage_namespace=(
@@ -244,8 +247,11 @@ class ConversationCleanupService:
             "operation-id": cleanup.operation_id,
             "producer-tool-run-id": cleanup.producer_tool_run_id,
         }
+        if cleanup.producer_tool_run_id is None:
+            expected.pop("producer-tool-run-id")
+            actual = {key: stored.metadata.get(key) for key in expected}
         present = {key for key, value in actual.items() if value is not None}
-        metadata_matches = present == _IDENTITY_METADATA and actual == expected
+        metadata_matches = present == set(expected) and actual == expected
         legacy_without_identity = cleanup.identity_version == LEGACY_DB_KEY and not present
         if cleanup.identity_version == METADATA_V1 and not metadata_matches:
             return self._persist_outcome(

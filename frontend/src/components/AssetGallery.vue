@@ -10,6 +10,7 @@ import type { AssetSummary } from "../api/types";
 defineOptions({ name: "AssetGallery" });
 
 const props = defineProps<{
+  imageLabel?: string;
   assets: readonly (
     | AssetSummary
     | DeepReadonly<AssetSummary>
@@ -130,7 +131,7 @@ function imageRenderKey(assetId: string): string {
             class="asset-card__image"
             v-show="!failedById[entry.asset.asset_id]"
             :src="entry.inlineUrl"
-            alt="生成的 SEM 图像"
+            :alt="imageLabel ?? '生成的 SEM 图像'"
             @load="markLoaded(entry.asset.asset_id)"
             @error="markFailed(entry.asset.asset_id)"
           />

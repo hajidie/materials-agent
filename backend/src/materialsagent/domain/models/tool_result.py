@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .managed_contracts import outputs_for, validate_performance, validate_provenance
+
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
@@ -145,12 +147,12 @@ def _freeze_json_array(value: object, field_name: str) -> tuple[object, ...]:
     return frozen
 
 
-def _normalize_requested_outputs(value: object) -> tuple[str, ...]:
+def _normalize_requested_outputs(value: object, tool_id: str) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple)):
         raise ValueError("requested_outputs must be a text array.")
     normalized: list[str] = []
     for output in value:
-        if type(output) is not str or output not in SUPPORTED_OUTPUTS:
+        if type(output) is not str or output not in outputs_for(tool_id):
             raise ValueError("requested_outputs supports only registered outputs.")
         if output not in normalized:
             normalized.append(output)
@@ -172,53 +174,6 @@ def _normalize_output_subset(
             raise ValueError(f"{field_name} must be a requested output subset.")
         values.add(output)
     return tuple(output for output in requested_outputs if output in values)
-
-
-def _validate_data(
-    data: Mapping[str, object],
-    completed_outputs: tuple[str, ...],
-) -> None:
-    if "mechanical_properties" not in completed_outputs:
-        if data:
-            raise ValueError("data must be empty without mechanical_properties.")
-        return
-    if set(data) != {"yield_strength", "elongation"}:
-        raise ValueError("data must contain only controlled mechanical properties.")
-    for name, unit in (("yield_strength", "MPa"), ("elongation", "%")):
-        property_value = data[name]
-        if not isinstance(property_value, Mapping) or set(property_value) != {"value", "unit"}:
-            raise ValueError("data must use the controlled mechanical property schema.")
-        value = property_value["value"]
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(value)
-            or property_value["unit"] != unit
-        ):
-            raise ValueError("data must contain finite mechanical values in fixed units.")
-
-
-def _validate_provenance(value: Mapping[str, object]) -> None:
-    if set(value) != {
-        "input_revision",
-        "normalized_process_parameters",
-        "actual_runtime_parameters",
-    }:
-        raise ValueError("provenance must use the controlled public schema.")
-    input_revision = value["input_revision"]
-    if (
-        type(input_revision) is not int
-        or input_revision <= 0
-    ):
-        raise ValueError("provenance.input_revision must be positive.")
-    if not isinstance(
-        value["normalized_process_parameters"],
-        Mapping,
-    ) or not isinstance(
-        value["actual_runtime_parameters"],
-        Mapping,
-    ):
-        raise ValueError("provenance must contain controlled JSON objects.")
 
 
 def _validate_error(
@@ -276,7 +231,7 @@ class ToolResult:
             raise ValueError("schema_hash must be lowercase SHA-256 hex.")
         if self.status not in TOOL_RESULT_STATUSES:
             raise ValueError("status is not an allowed ToolResult status.")
-        requested_outputs = _normalize_requested_outputs(self.requested_outputs)
+        requested_outputs = _normalize_requested_outputs(self.requested_outputs, self.tool_id)
         completed_outputs = _normalize_output_subset(
             self.completed_outputs,
             "completed_outputs",
@@ -304,8 +259,8 @@ class ToolResult:
         warnings = _freeze_json_array(self.warnings, "warnings")
         provenance = _freeze_json_object(self.provenance, "provenance")
         error = None if self.error is None else _freeze_json_object(self.error, "error")
-        _validate_data(data, completed_outputs)
-        _validate_provenance(provenance)
+        validate_performance(self.tool_id, data, completed_outputs)
+        validate_provenance(self.tool_id, provenance)
         _validate_error(error, self.status)
         _require_utc(self.created_at, "created_at")
         object.__setattr__(self, "requested_outputs", requested_outputs)

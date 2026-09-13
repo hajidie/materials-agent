@@ -23,7 +23,7 @@ INVALID_OBJECT_KEYS = [
     "control\nname.bin",
     "x" * 1025,
 ]
-EXPECTED_STORAGE_GET_HARD_LIMIT = 1024 * 1024
+EXPECTED_STORAGE_GET_HARD_LIMIT = 10 * 1024 * 1024
 
 
 def test_write_outcome_unknown_is_a_distinct_storage_error() -> None:

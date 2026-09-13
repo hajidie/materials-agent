@@ -63,7 +63,7 @@ def _safe_details(value: dict[str, object] | None) -> None:
 @dataclass(slots=True)
 class Asset:
     asset_id: str
-    task_id: str
+    task_id: str | None
     producer_tool_run_id: str | None
     actor_id: str
     operation_id: str
@@ -91,11 +91,11 @@ class Asset:
     storage_identity_version: str = LEGACY_DB_KEY
     storage_bucket: str | None = None
     storage_namespace: str | None = None
+    conversation_id: str | None = None
 
     def __post_init__(self) -> None:
         for field_name in (
             "asset_id",
-            "task_id",
             "actor_id",
             "operation_id",
             "asset_type",
@@ -116,9 +116,15 @@ class Asset:
             self.storage_bucket is None or self.storage_namespace is None
         ):
             raise ValueError("METADATA_V1 requires persisted storage identity.")
-        if self.asset_type != "sem_image" or self.source_type != "GENERATED":
-            raise ValueError("Only generated SEM image assets are supported.")
-        _require_text(self.producer_tool_run_id, "producer_tool_run_id")
+        if self.asset_type == "ebsd_image" and self.source_type == "UPLOADED":
+            _require_text(self.conversation_id, "conversation_id")
+            if self.task_id is not None or self.producer_tool_run_id is not None or self.role != "supporting":
+                raise ValueError("Uploaded EBSD assets cannot have a producer.")
+        else:
+            if self.asset_type != "sem_image" or self.source_type != "GENERATED" or self.conversation_id is not None:
+                raise ValueError("Only generated SEM or uploaded EBSD assets are supported.")
+            _require_text(self.task_id, "task_id")
+            _require_text(self.producer_tool_run_id, "producer_tool_run_id")
         if self.role not in ASSET_ROLES:
             raise ValueError("role is not an allowed Asset role.")
         try:

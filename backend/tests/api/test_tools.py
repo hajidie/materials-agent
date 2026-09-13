@@ -133,6 +133,7 @@ def test_catalog_list_detail_and_unknown_tool_are_safely_projected(
     assert set(entries) == {
         "materials_unit_conversion",
         "zta35g_sem_virtual_lab",
+        "ebsd_yield_strength_predictor",
     }
     entry = entries["zta35g_sem_virtual_lab"]
     assert set(entry) == {

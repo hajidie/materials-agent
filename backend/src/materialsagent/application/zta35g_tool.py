@@ -278,18 +278,31 @@ def build_zta35g_tool_definition(client: ToolClientPort | None = None) -> Regist
         display_name=metadata.display_name,
         description=metadata.description,
         input_schema={
-            "type": "object", "required": ["material", *PROCESS_FIELDS, "requested_outputs"],
+            "type": "object", "additionalProperties": False,
+            "required": ["material", *PROCESS_FIELDS, "requested_outputs"],
             "properties": {
                 "material": {"const": "ZTA35G"},
-                "solution_temperature": {"unit": "°C", "minimum": 900, "maximum": 1100, "precision": 0},
-                "solution_time": {"unit": "h", "minimum": 1, "maximum": 5, "precision": 1},
-                "aging_temperature": {"unit": "°C", "minimum": 670, "maximum": 790, "precision": 0},
-                "aging_time": {"unit": "h", "minimum": 1, "maximum": 5, "precision": 1},
-                "requested_outputs": {"enum": list(SUPPORTED_OUTPUTS)},
+                **{name: {"type": "object", "additionalProperties": False,
+                    "required": ["value", "unit"], "properties": {
+                        "value": {"type": "number", "minimum": lower, "maximum": upper, "multipleOf": precision},
+                        "unit": {"const": unit}}}
+                    for name, unit, lower, upper, precision in (
+                        ("solution_temperature", "°C", 900, 1100, 1),
+                        ("solution_time", "h", 1, 5, 0.1),
+                        ("aging_temperature", "°C", 670, 790, 1),
+                        ("aging_time", "h", 1, 5, 0.1))},
+                "requested_outputs": {"type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": True,
+                    "items": {"enum": list(SUPPORTED_OUTPUTS)}},
             },
         },
         proposal_schema=_candidate_input_schema(),
-        output_schema={"type": "object"},
+        output_schema={"type": "object", "additionalProperties": False,
+            "properties": {
+                name: {"type": "object", "additionalProperties": False, "required": ["value", "unit"],
+                    "properties": {"value": {"type": "number"}, "unit": {"const": unit}}}
+                for name, unit in (("yield_strength", "MPa"), ("elongation", "%"))
+            },
+            "oneOf": [{"maxProperties": 0}, {"required": ["yield_strength", "elongation"]}]},
         runtime_metadata=metadata, supported_outputs=SUPPORTED_OUTPUTS,
         supported_asset_types=metadata.supported_asset_types, limitations=metadata.limitations,
         execution_profile=ToolExecutionProfile.MANAGED,

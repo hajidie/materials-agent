@@ -10,6 +10,7 @@ requires-python = ">=3.11,<3.12"
 dependencies = [
   "fastapi==0.139.2",
   "pydantic==2.13.4",
+  "Pillow==12.3.0",
   "uvicorn==0.51.0",
 ]
 

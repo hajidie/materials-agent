@@ -17,6 +17,7 @@ PROMPTS = {
 动作：CallTool {type,tool_name,arguments}；AskUser {type,reason,question,tool_name,fields,known_arguments}；
 Finish {type,answer,observation_ids,needs_synthesis}。工具调用后读取 Observation 再决定下一步。
 工具、参数与结果只能依据给定 Schema 和事实；缺少信息可以主动询问，不虚构参数。
+上下文 ebsd_asset_id 是本次用户上传的 EBSD 图片引用，可传给 EBSD 工具；不猜测图片内容或编造资产引用。
 reason 为 INTENT_CLARIFICATION 或 TOOL_ARGUMENT_CLARIFICATION；意图询问不携带工具字段。
 draft.issues 是确定性参数事实，存在未解决字段时必须 AskUser，不可重复 CallTool 或 Finish。
 当 draft.resolver_authoritative=true 时，工具补参的 fields 只能引用 draft.issues 中的字段。
@@ -203,6 +204,9 @@ class MockAgentModel:
         if match:
             return {"type": "CallTool", "tool_name": "materials_unit_conversion",
                     "arguments": {"value": float(match[1]), "from_unit": match[2], "to_unit": match[3]}}
+        if payload.get("ebsd_asset_id") or "EBSD" in text.upper():
+            return {"type": "CallTool", "tool_name": "ebsd_yield_strength_predictor",
+                "arguments": {"ebsd_asset_id": payload["ebsd_asset_id"]} if payload.get("ebsd_asset_id") else {}}
         if "ZTA35G" in text.upper():
             return {"type": "AskUser", "reason": "TOOL_ARGUMENT_CLARIFICATION", "question": "请提供工艺参数和输出类型。",
                     "tool_name": "zta35g_sem_virtual_lab", "known_arguments": {"material": "ZTA35G"},

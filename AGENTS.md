@@ -62,6 +62,7 @@
   触碰它；完整性基线是 `docs/acceptance/sem-package-manifest.json`。
 - 不把 Tensor、完整 Prompt、Secret、完整 Provider 原始响应、图片 bytes、权重路径、内部
   绝对路径或本地数据写入日志、公共响应或版本库。
+- EBSD 外部研究目录及权重保持只读；EBSD 使用 FP32/eval/no_grad，不修改全局 CUDA/TF32 精度配置。
 - 固定推理参数 `num_samples=1`、`guide_scale=2.0`、`timesteps=1000` 属于 Runtime 合同。
   变更时必须同步合同、实现和测试，不得仅开放为环境变量。
 - 不混合不同 ToolRun 的图片、性能结果或解释来源。Backend 不自动重试 Runtime execute；
@@ -77,14 +78,14 @@
 ## 产品范围边界
 
 当前版本是单用户、本地运行的模块化单体 MVP，默认应用组合注册
-`materials_unit_conversion` Standard Tool 与 `zta35g_sem_virtual_lab` Managed Tool。单一
+`materials_unit_conversion` Standard Tool，以及 `zta35g_sem_virtual_lab` 与
+`ebsd_yield_strength_predictor` Managed Tool。EBSD 仅支持单张用户上传图片，复用现有 SEM Runtime。单一
 Tool Registry、LangChain Adapter 和 ExecutorRouter 是显式扩展底座；每个 AgentRun 通过有界循环形成多个有序 Invocation，生产 Catalog 禁止 Side-effect Tool。
 
 Agent Runtime 是唯一执行入口；不得恢复旧 Router、固定 Explanation、旧补参或 Native Tool Calling 独立执行路径。
 FinalAnswer 成功持久化后 Run 才能 SUCCEEDED，HTTP 发送结果不改变已提交业务状态。
 
-当前不包含 Redis、后台 Worker、SSE、WebSocket、登录、多用户隔离、真实 SEM 上传、EBSD
-输入、ML Training、Planner、多 Agent、动态插件上传或生产部署。增加这些能力属于产品或
+当前不包含 Redis、后台 Worker、SSE、WebSocket、登录、多用户隔离、真实 SEM 上传、通用附件系统、ML Training、Planner、多 Agent、动态插件上传或生产部署。增加这些能力属于产品或
 架构范围变更；实施前必须获得确认，并同步实现、迁移、测试、README 和项目上下文。
 
 ## 修改纪律

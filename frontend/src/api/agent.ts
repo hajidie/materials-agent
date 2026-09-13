@@ -27,6 +27,7 @@ export interface AgentRun {
   conversation_id: string;
   source_message_id: string;
   goal: string;
+  ebsd_asset_id?: string | null;
   status: "PENDING" | "RUNNING" | "WAITING_FOR_USER" | "WAITING_FOR_CONFIRMATION" | "SUCCEEDED" | "TERMINATED";
   version: number;
   waiting_version: number;
@@ -72,10 +73,10 @@ export async function agentRequest<T>(path: string, options: { body?: unknown; k
 
 
 export function toolLabel(name: string): string {
-  return ({materials_unit_conversion: "材料单位换算", zta35g_sem_virtual_lab: "ZTA35G 虚拟实验"} as Record<string, string>)[name] ?? name;
+  return ({ebsd_yield_strength_predictor: "EBSD 屈服强度预测", materials_unit_conversion: "材料单位换算", zta35g_sem_virtual_lab: "ZTA35G 虚拟实验"} as Record<string, string>)[name] ?? name;
 }
 
 export function clarificationLabel(question: string): string {
-  const fields: Record<string, string> = {solution_temperature: "固溶温度", solution_time: "固溶时间", aging_temperature: "时效温度", aging_time: "时效时间", requested_outputs: "所需结果类型", from_unit: "原始单位", to_unit: "目标单位", value: "数值", material: "材料"};
-  return question.replace(/\b(solution_temperature|solution_time|aging_temperature|aging_time|requested_outputs|from_unit|to_unit|value|material)\b/g, field => fields[field] ?? field);
+  const fields: Record<string, string> = {ebsd_asset_id: "EBSD 图片", solution_temperature: "固溶温度", solution_time: "固溶时间", aging_temperature: "时效温度", aging_time: "时效时间", requested_outputs: "所需结果类型", from_unit: "原始单位", to_unit: "目标单位", value: "数值", material: "材料"};
+  return question.replace(/\b(ebsd_asset_id|solution_time|aging_temperature|aging_time|requested_outputs|from_unit|to_unit|value|material)\b/g, field => fields[field] ?? field);
 }

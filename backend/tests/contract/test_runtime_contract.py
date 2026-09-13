@@ -204,7 +204,7 @@ def test_registry_is_only_version_source_and_unknown_tool_is_rejected() -> None:
         registry.resolve("unknown_tool")
 
     catalog = ToolCatalogService(registry).list_entries()
-    assert len(catalog) == 2
+    assert len(catalog) == 3
     zta_catalog = next(
         item for item in catalog if item["tool_id"] == "zta35g_sem_virtual_lab"
     )

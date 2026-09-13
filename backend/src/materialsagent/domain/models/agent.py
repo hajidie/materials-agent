@@ -206,6 +206,7 @@ class AgentRun(Contract):
     executions: list[ExecutionRecord] = Field(default_factory=list)
     calls: list[ModelCall] = Field(default_factory=list)
     user_inputs: list[str] = Field(default_factory=list)
+    ebsd_asset_id: str | None = None
     context: list[dict[str, Any]] = Field(default_factory=list)
     final_answer: FinalAnswer | None = None
     error_code: str | None = None

@@ -121,8 +121,10 @@ class SQLAlchemyAgentStore:
     def submit(self, conversation_id: str, actor_id: str, content: str, key: str, *,
                run_id: str | None = None, waiting_version: int | None = None,
                budget: RunBudget | None = None, retry_source: AgentRun | None = None,
-               retry_type: str | None = None, retry_invocation_id: str | None = None) -> tuple[AgentRun, bool]:
+               retry_type: str | None = None, retry_invocation_id: str | None = None, ebsd_asset_id: str | None = None) -> tuple[AgentRun, bool]:
         digest = fingerprint([content, run_id, waiting_version, retry_source.agent_run_id if retry_source else None, retry_type, retry_invocation_id])
+        if ebsd_asset_id is not None:
+            digest = fingerprint([digest, ebsd_asset_id])
         try:
             with self.sessions.begin() as session:
                 conversation = session.scalar(select(ConversationRow).where(ConversationRow.conversation_id == conversation_id).with_for_update())
@@ -134,6 +136,12 @@ class SQLAlchemyAgentStore:
                         raise AgentConflictError("Idempotency payload differs.")
                     row = session.get(AgentRunRow, existing.agent_run_id)
                     return AgentRun.model_validate(row.document), True
+                if ebsd_asset_id is not None:
+                    from materialsagent.infrastructure.db.asset import AssetRow
+                    asset = session.get(AssetRow, ebsd_asset_id)
+                    if (asset is None or asset.actor_id != actor_id or asset.conversation_id != conversation_id
+                            or asset.asset_type != "ebsd_image" or asset.current_status != "AVAILABLE"):
+                        raise AgentFailure("EBSD_ASSET_NOT_FOUND")
                 if run_id:
                     row = session.get(AgentRunRow, run_id)
                     if row is None or row.actor_id != actor_id or row.conversation_id != conversation_id:
@@ -146,6 +154,8 @@ class SQLAlchemyAgentStore:
                             return run, True
                         raise AgentConflictError("A response already owns this waiting version.")
                     # Serialize input acceptance with the message, before request-hosted advancement.
+                    if ebsd_asset_id is not None:
+                        run.ebsd_asset_id = ebsd_asset_id
                     run.accepted_waiting_version = waiting_version
                     run.accepted_input_hash = digest
                     run.version += 1
@@ -154,7 +164,7 @@ class SQLAlchemyAgentStore:
                 message_id = identifier()
                 session.add(MessageRow(message_id=message_id, conversation_id=conversation_id, actor_id=actor_id,
                     task_id=None, request_id=identifier(), role="USER", generation_source="USER", content_text=content,
-                    structured_content=None, llm_call_id=None, created_at=now()))
+                    structured_content={"ebsd_asset_id": ebsd_asset_id} if ebsd_asset_id else None, llm_call_id=None, created_at=now()))
                 session.flush()
                 if not run_id:
                     if conversation.title is None:
@@ -171,8 +181,9 @@ class SQLAlchemyAgentStore:
                                 {"role": "assistant", "content": previous.final_answer.text,
                                 "agent_run_id": previous.agent_run_id}])
                     run = AgentRun(conversation_id=conversation_id, actor_id=actor_id, source_message_id=message_id,
-                        goal=content, budget=budget or RunBudget(), context=context)
+                        goal=content, budget=budget or RunBudget(), context=context, ebsd_asset_id=ebsd_asset_id)
                     if retry_source:
+                        run.ebsd_asset_id = retry_source.ebsd_asset_id
                         run.user_inputs = list(retry_source.user_inputs)
                         run.source_agent_run_id = retry_source.agent_run_id
                         run.retry_type = retry_type

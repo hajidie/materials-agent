@@ -463,6 +463,8 @@ def create_app(
         finally:
             state.execution_lock.release()
 
+    from .ebsd import install
+    install(app, state, authorize, RuntimeRequestError)
     return app
 
 

@@ -393,7 +393,10 @@ class ToolArgResolver:
                     revisions = uow.task_input_revisions.list_for_task(task.task_id)
                     revision = max(revisions, key=lambda item: item.revision)
                     draft.task_id, draft.revision_id = task.task_id, revision.task_input_revision_id
-            elif not (previous and previous.arguments == draft.arguments and previous.normalized == draft.normalized and previous.issues == draft.issues):
+            # A provider may restate defaults after resolution. An unchanged READY
+            # input reuses its revision instead of attempting READY -> READY.
+            elif not (previous and previous.normalized == draft.normalized and previous.issues == draft.issues
+                    and (previous.arguments == draft.arguments or not draft.issues)):
                 self._save_revision(run, draft, registration)
         return draft
 
@@ -566,7 +569,9 @@ class RegistryAgentGateway:
             "result_id", "tool_run_id", "status", "requested_outputs", "completed_outputs", "failed_outputs",
             "data", "warnings", "provenance", "error", "tool_id", "tool_version", "schema_hash")}
         summary["created_at"] = result.created_at.isoformat()
+        presenter = self.registry.resolve(record.tool_name).binding.presenter
+        presentation = plain(presenter(summary)) if presenter else {}
         return tool_observation(step_id=record.action_id, kind="TOOL_RESULT", status=result.status, tool_name=record.tool_name,
             invocation_run_id=invocation.invocation_run_id, task_id=result.task_id, tool_run_id=result.tool_run_id,
-            result_id=result.result_id, data=plain(result.data), artifacts=artifacts, result_summary=summary,
+            result_id=result.result_id, data=plain(result.data), artifacts=artifacts, result_summary=summary, presentation=presentation,
             warnings=plain(result.warnings), error=plain(result.error))

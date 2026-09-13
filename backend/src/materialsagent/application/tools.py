@@ -9,6 +9,7 @@ from materialsagent.application.tool_projections import ToolProjectionService
 from materialsagent.application.unit_conversion_tool import (
     build_unit_conversion_registered_tool,
 )
+from materialsagent.application.ebsd_tool import build_ebsd_tool
 from materialsagent.application.zta35g_tool import build_zta35g_tool_definition
 from materialsagent.domain.ports.tool_execution import ToolClientPort
 from materialsagent.domain.ports.tool_registry import (
@@ -23,6 +24,7 @@ StaticToolRegistry = ToolRegistry
 def build_tool_registry(
     client: ToolClientPort | None = None,
     *,
+    ebsd_client: ToolClientPort | None = None,
     enable_dev_fake_side_effect_tool: bool = False,
     fake_side_effect_sink: FakeSideEffectSink | None = None,
 ) -> ToolRegistry:
@@ -30,6 +32,7 @@ def build_tool_registry(
     registrations = [
         build_zta35g_tool_definition(client),
         build_unit_conversion_registered_tool(),
+        build_ebsd_tool(ebsd_client),
     ]
     if enable_dev_fake_side_effect_tool:
         registrations.append(

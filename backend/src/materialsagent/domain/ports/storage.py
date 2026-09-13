@@ -6,7 +6,7 @@ import unicodedata
 
 
 MAX_OBJECT_KEY_LENGTH = 1024
-MAX_STORAGE_GET_BYTES = 1024 * 1024
+MAX_STORAGE_GET_BYTES = 10 * 1024 * 1024
 
 
 class StorageError(RuntimeError):

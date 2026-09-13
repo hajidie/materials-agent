@@ -1,4 +1,4 @@
-import { computed, onUnmounted, ref } from "vue";
+import { computed, onUnmounted, ref, watch } from "vue";
 import { createMaterialsAgentApi } from "../api/client";
 import { agentRequest, AgentRequestError, type AgentRun } from "../api/agent";
 import type { ConversationListItem } from "../api/types";
@@ -39,7 +39,71 @@ export function useAgentRuns() {
       }
     }
   } catch { error.value = "待提交操作无法读取，请检查当前运行状态。"; }
-  const busy = computed(() => sending.value || pending.value !== null);
+  const uploading = ref(false);
+  const canRetryUpload = ref(false);
+  const uploadError = ref<string | null>(null);
+  const draftKey = computed(() => `${selectedId.value ?? 'new'}:${resumeTarget.value?.agent_run_id ?? 'new'}`);
+  const drafts = ref<Record<string, { text: string; assetId?: string }>>({});
+  try {
+    const stored = JSON.parse(sessionStorage.getItem("materials-agent.ebsd-drafts.v1") ?? "{}");
+    if (stored && typeof stored === "object" && !Array.isArray(stored)) {
+      drafts.value = Object.fromEntries(Object.entries(stored).filter(([, value]) => {
+        const item = value as { text?: unknown; assetId?: unknown } | null;
+        return item && typeof item.text === "string" && (item.assetId === undefined ||
+          (typeof item.assetId === "string" && /^asset_[A-Za-z0-9_-]{1,90}$/.test(item.assetId)));
+      })) as Record<string, { text: string; assetId?: string }>;
+    }
+  } catch { /* Discard invalid local drafts. */ }
+  const draft = computed(() => drafts.value[draftKey.value] ?? { text: "" });
+  function saveDraft(value: { text: string; assetId?: string }) {
+    drafts.value[draftKey.value] = value;
+    sessionStorage.setItem("materials-agent.ebsd-drafts.v1", JSON.stringify(drafts.value));
+  }
+  function setDraftText(text: string) { if (!pending.value) saveDraft({ ...draft.value, text }); }
+  function removeEbsd() { saveDraft({ text: draft.value.text }); uploadError.value = null; canRetryUpload.value = false; uploadAttempt = null; }
+  watch(draftKey, () => { uploadError.value = null; canRetryUpload.value = false; });
+  let uploadAttempt: { file: File; key: string; createKey: string; conversationId: string | null } | null = null;
+  const busy = computed(() => sending.value || pending.value !== null || uploading.value);
+
+  async function retryEbsdUpload() { if (uploadAttempt) await uploadEbsd(uploadAttempt.file); }
+
+  async function uploadEbsd(file: File) {
+    if (busy.value) return;
+    uploadError.value = null;
+    canRetryUpload.value = false;
+    if (!['image/png', 'image/jpeg'].includes(file.type) || file.size === 0 || file.size > 10 * 1024 * 1024) {
+      uploadError.value = "请选择不超过 10 MiB 的 PNG/JPEG 图片。";
+      return;
+    }
+    if (!uploadAttempt || uploadAttempt.file !== file || uploadAttempt.conversationId !== selectedId.value) {
+      uploadAttempt = { file, key: crypto.randomUUID(), createKey: crypto.randomUUID(), conversationId: selectedId.value };
+    }
+    const attempt = uploadAttempt;
+    const originalDraft = { ...draft.value };
+    uploading.value = true;
+    try {
+      if (!attempt.conversationId) {
+        const created = await conversationsApi.createConversation(undefined, attempt.createKey);
+        attempt.conversationId = created.data.conversation_id;
+        await select(attempt.conversationId, true);
+        saveDraft(originalDraft);
+        await refreshConversations();
+      }
+      const context = draftKey.value;
+      const response = await fetch(`/api/v1/conversations/${encodeURIComponent(attempt.conversationId)}/ebsd-images`, {
+        method: 'POST', headers: { 'Content-Type': file.type, 'Idempotency-Key': attempt.key }, body: file,
+      });
+      const payload = await response.json();
+      if (context !== draftKey.value) return;
+      if (!response.ok || !/^asset_[A-Za-z0-9_-]{1,90}$/.test(payload.data?.asset_id ?? '')) {
+        throw new Error(response.status === 422 ? "图片必须是边长 128–4096 像素的正方形 RGB PNG/JPEG。" : "上传未完成，请重试原图片。");
+      }
+      saveDraft({ ...draft.value, assetId: payload.data.asset_id });
+      uploadAttempt = null;
+    } catch (cause) { canRetryUpload.value = true; uploadError.value = cause instanceof Error && !(cause instanceof TypeError) ? cause.message : "连接中断，请重试原图片。"; }
+    finally { uploading.value = false; }
+  }
+
 
   function persistPending() {
     if (pending.value) sessionStorage.setItem(PENDING_KEY, JSON.stringify(pending.value));
@@ -72,7 +136,8 @@ export function useAgentRuns() {
     } finally { polling = false; }
   }
 
-  async function select(id: string | null) {
+  async function select(id: string | null, uploadCreation = false) {
+    if (uploading.value && !uploadCreation) return;
     generation++;
     selectedId.value = id;
     runs.value = [];
@@ -106,7 +171,12 @@ export function useAgentRuns() {
         runs.value = [...runs.value.filter(item => item.agent_run_id !== run.agent_run_id), run].sort((a, b) => a.created_at.localeCompare(b.created_at));
       }
       pending.value = null;
-      if (operation.path.endsWith("/messages")) completed.value++;
+      if (operation.path.endsWith("/messages")) {
+        const context = `${operation.conversationId}:${operation.body.agent_run_id ?? 'new'}`;
+        delete drafts.value[context];
+        sessionStorage.setItem("materials-agent.ebsd-drafts.v1", JSON.stringify(drafts.value));
+        completed.value++;
+      }
       persistPending();
       resumeTarget.value = null;
       try { await refresh(); await refreshConversations(); }
@@ -128,6 +198,7 @@ export function useAgentRuns() {
       key: crypto.randomUUID(), conversationId: selectedId.value,
       ...(selectedId.value ? {} : { createKey: crypto.randomUUID() }),
     };
+    if (draft.value.assetId) pending.value.body.ebsd_asset_id = draft.value.assetId;
     persistPending();
     await sendPending();
   }
@@ -154,6 +225,8 @@ export function useAgentRuns() {
   async function remove(id: string) {
     if (busy.value) return;
     await conversationsApi.deleteConversation?.(id);
+    for (const key of Object.keys(drafts.value)) if (key.startsWith(`${id}:`)) delete drafts.value[key];
+    sessionStorage.setItem("materials-agent.ebsd-drafts.v1", JSON.stringify(drafts.value));
     if (selectedId.value === id) await select(null);
     await refreshConversations();
   }
@@ -167,5 +240,6 @@ export function useAgentRuns() {
   }
   onUnmounted(() => { if (timer) clearInterval(timer); generation++; });
   return { conversations, selectedId, runs, loading, sending, completed, busy, error, pending, nextCursor, conversationCursor,
+    uploading, uploadError, canRetryUpload, draft, setDraftText, uploadEbsd, retryEbsdUpload, removeEbsd,
     resumeTarget, initialize, select, refresh, refreshConversations, submit, sendPending, confirm, retry, remove };
 }

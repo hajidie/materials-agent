@@ -182,6 +182,10 @@ class _RuntimeRequestHandler(BaseHTTPRequestHandler):
         # type: () -> None
         if not self._authorized():
             return
+        if self.path == "/internal/v1/ebsd/health/ready":
+            from .ebsd import ready
+            ready(self)
+            return
         if self.path == "/internal/v1/health/live":
             self._live()
             return
@@ -202,6 +206,10 @@ class _RuntimeRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         # type: () -> None
         if not self._authorized():
+            return
+        if self.path == "/internal/v1/ebsd/execute":
+            from .ebsd import execute
+            execute(self)
             return
         if self.path != "/internal/v1/execute":
             if self.path in (
@@ -326,7 +334,7 @@ class _RuntimeRequestHandler(BaseHTTPRequestHandler):
             },
         )
 
-    def _request_body(self):
+    def _request_body(self, max_bytes=MAX_REQUEST_BYTES):
         # type: () -> bytes
         content_length = self.headers.get("Content-Length")
         if content_length is None:
@@ -346,7 +354,7 @@ class _RuntimeRequestHandler(BaseHTTPRequestHandler):
                 http_status=400,
                 safe_message="Runtime request length is invalid.",
             )
-        if length > MAX_REQUEST_BYTES:
+        if length > max_bytes:
             raise ContractError(
                 http_status=413,
                 safe_message="Runtime request is too large.",
@@ -582,6 +590,16 @@ def create_runtime_server(
             error_code="MODEL_LOAD_FAILED",
             device="unknown",
         )
+    server.ebsd_engine = None
+    if settings.ebsd_model_root is not None:
+        from .ebsd import EBSDEngine
+        ebsd_engine = EBSDEngine(settings.ebsd_model_root)
+        try:
+            ebsd_engine.load()
+            server.ebsd_engine = ebsd_engine
+        except Exception:
+            ebsd_engine.close()
+            _log_event("ebsd_model_load_failed", status="FAILED", error_code="MODEL_LOAD_FAILED")
     return server
 
 
@@ -608,6 +626,8 @@ def close_runtime_server(server):
         )
         try:
             with state.execution_lock:
+                if getattr(server, "ebsd_engine", None) is not None:
+                    server.ebsd_engine.close()
                 if not state.engine_closed:
                     try:
                         server.engine.close()

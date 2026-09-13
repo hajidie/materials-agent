@@ -55,7 +55,7 @@ class ConversationObjectCleanupRow(Base):
     conversation_id: Mapped[str] = mapped_column(Text, nullable=False)
     asset_id: Mapped[str] = mapped_column(Text, nullable=False)
     operation_id: Mapped[str] = mapped_column(Text, nullable=False)
-    producer_tool_run_id: Mapped[str] = mapped_column(Text, nullable=False)
+    producer_tool_run_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     object_key: Mapped[str] = mapped_column(Text, nullable=False)
     bucket: Mapped[str] = mapped_column(Text, nullable=False)
     storage_namespace: Mapped[str] = mapped_column(Text, nullable=False)
@@ -371,14 +371,14 @@ class SQLAlchemyConversationLifecycleRepository:
         try:
             rows = self._session.scalars(
                 select(AssetRow)
-                .join(TaskRow, TaskRow.task_id == AssetRow.task_id)
+                .outerjoin(TaskRow, TaskRow.task_id == AssetRow.task_id)
                 .where(
-                    TaskRow.actor_id == actor_id,
-                    TaskRow.conversation_id == conversation_id,
+                    ((TaskRow.actor_id == actor_id) & (TaskRow.conversation_id == conversation_id))
+                    | (AssetRow.conversation_id == conversation_id),
                     AssetRow.actor_id == actor_id,
                 )
                 .order_by(AssetRow.asset_id)
-                .with_for_update()
+                .with_for_update(of=AssetRow)
             ).all()
             return [_asset_from_row(row) for row in rows]
         except SQLAlchemyError as error:

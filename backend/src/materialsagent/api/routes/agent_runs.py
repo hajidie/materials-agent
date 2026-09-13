@@ -37,6 +37,7 @@ class Submission(BaseModel):
     model_config = ConfigDict(extra="forbid")
     mode: Literal["NEW_RUN", "RESUME_RUN"]
     content_text: str = Field(min_length=1, max_length=32768)
+    ebsd_asset_id: str | None = Field(default=None, pattern=r"^asset_[A-Za-z0-9_-]{1,90}$")
     agent_run_id: str | None = None
     waiting_version: int | None = Field(default=None, ge=1)
 
@@ -88,10 +89,10 @@ def submit(conversation_id: str, body: Submission, request: Request,
     runtime = runtime_for(request)
     run, replayed = runtime.store.submit(conversation_id, actor.actor_id, body.content_text,
         key_value(idempotency_key), run_id=body.agent_run_id, waiting_version=body.waiting_version,
-        budget=request.app.state.agent_budget)
+        budget=request.app.state.agent_budget, **({"ebsd_asset_id": body.ebsd_asset_id} if body.ebsd_asset_id else {}))
     if run.status == "PENDING" or (body.mode == "RESUME_RUN" and run.status == "WAITING_FOR_USER" and run.waiting_version == body.waiting_version):
         run = runtime.advance(run.agent_run_id, actor.actor_id, waiting_version=body.waiting_version,
-            user_input=body.content_text if body.mode == "RESUME_RUN" else None)
+            user_input=(body.content_text + ("\nebsd_asset_id: " + body.ebsd_asset_id if body.ebsd_asset_id else "")) if body.mode == "RESUME_RUN" else None)
     return {"request_id": request.state.request_id, "data": {"agent_run": public(run), "idempotency_replayed": replayed}}
 
 

@@ -336,6 +336,7 @@ class AgentRuntime:
     def _context(self, run: AgentRun) -> dict[str, Any]:
         return {
             "goal": run.goal, "conversation_context": run.context, "user_inputs": run.user_inputs,
+            "ebsd_asset_id": run.ebsd_asset_id,
             "run_status": run.status,
             "remaining_budget": {"action_steps": run.budget.max_action_steps - len(run.steps),
                 "tool_executions": run.budget.max_tool_executions - run.tool_executions,

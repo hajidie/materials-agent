@@ -497,7 +497,7 @@ textarea:focus-visible {
 
 .composer__form textarea {
   width: 100%;
-  resize: vertical;
+  resize: none;
   padding: 0.8rem;
   border: 1px solid #aebeb5;
   border-radius: 0.7rem;
@@ -686,3 +686,5 @@ textarea:focus-visible {
     grid-template-columns: 1fr;
   }
 }
+
+.ebsd-upload input[type="file"] { max-width: 100%; }

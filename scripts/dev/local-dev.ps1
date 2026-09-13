@@ -9,6 +9,7 @@ param(
     [string]$Llm = 'Mock',
     [string]$BackendPython,
     [string]$RuntimePython,
+    [string]$EbsdModelRoot = $env:EBSD_MODEL_ROOT,
     [ValidateRange(10, 900)]
     [int]$ReadyTimeoutSeconds = 300,
     [switch]$LoadFunctionsOnly
@@ -295,6 +296,7 @@ function New-LaunchProfile {
         PYTHONPATH = $runtimeSource
         ZTA35G_RUNTIME_TOKEN = $RuntimeToken
         ZTA35G_MODEL_ROOT = $(if ($Runtime -eq 'Real') { [IO.Path]::GetFullPath($modelRoot) } else { $null })
+        EBSD_MODEL_ROOT = $(if ($Runtime -eq 'Real' -and $EbsdModelRoot) { [IO.Path]::GetFullPath($EbsdModelRoot) } else { $null })
         DEEPSEEK_API_KEY = $null
         DASHSCOPE_API_KEY = $null
         POSTGRES_PASSWORD = $null

@@ -15,6 +15,7 @@ class RuntimeSettings:
     token: str = field(repr=False)
     model_root: Path
     port: int = DEFAULT_PORT
+    ebsd_model_root: Optional[Path] = None
     host: str = field(default=HOST, init=False)
 
     def __post_init__(self):
@@ -56,6 +57,7 @@ def load_settings(
     try:
         return RuntimeSettings(
             token=token,
+            ebsd_model_root=Path(source["EBSD_MODEL_ROOT"]) if source.get("EBSD_MODEL_ROOT") else None,
             port=port,
             model_root=Path(model_root_text),
         )

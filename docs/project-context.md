@@ -6,9 +6,9 @@
 ## 系统边界
 
 单用户、本地运行的模块化单体。Backend 使用 Python 3.11，真实 ZTA35G Runtime 使用隔离的
-Python 3.8 和旧模型依赖。SEM 是只读外部模型包；Backend 不加载权重、不安装旧模型依赖。
+Python 3.8 和旧模型依赖。SEM 与 EBSD 研究目录是只读外部模型包；Backend 不加载权重、不安装旧模型依赖。
 
-默认 Registry 注册材料单位换算 Standard Tool 和 ZTA35G SEM 虚拟实验 Managed Tool。请求宿主
+默认 Registry 注册材料单位换算 Standard Tool、ZTA35G SEM 虚拟实验与 EBSD 屈服强度预测 Managed Tool。请求宿主
 同步推进 AgentRun；AgentRuntime 应用层不依赖 HTTP，ZTA35G 模型 Runtime 通过受控 HTTP 合同接入。
 不引入 Worker、队列、Planner、多 Agent、WebSocket、
 SSE 或任意 checkpoint 接管。生产 Catalog 拒绝 Side-effect Tool。
@@ -123,19 +123,51 @@ ZTA35G 固定 num_samples=1、guide_scale=2.0、timesteps=1000。执行一次实
 返回值区分 SUCCEEDED、PARTIALLY_SUCCEEDED、FAILED，completed/failed 必须覆盖 requested。
 Backend 不自动重试 Runtime execute，真实模型依赖只在隔离 Runtime 环境。
 
+SEM 与 EBSD 的参数、性能字段集合、固定单位和来源校验位于工具合同；Managed 的执行、事务、
+幂等、重试、状态与结果一致性门禁保持共用。性能数值使用 data 中的 `{value, unit}`：SEM 成功性能
+输出必须同时有 yield_strength（MPa）和 elongation（%）；EBSD 只能有 yield_strength（MPa）。
+SEM 规范化输入现以闭合 JSON Schema 声明原有单位、范围与字段；严格化声明会改变 schema_hash，
+历史结果仍可读取，旧绑定恢复/重试仍受原有 schema hash 门禁约束，不回写历史快照。
+未完成性能输出时 data 为空，不填入虚假数值。EBSD Presenter 通过原有绑定提供确定性摘要。
+
+EBSD 使用现有 Runtime 的 POST /internal/v1/ebsd/execute 和 GET /internal/v1/ebsd/health/ready，
+沿用 X-ZTA35G-Runtime-Token 鉴权。execute 的 Content-Type 是 application/octet-stream，body 为
+受限图片二进制；X-EBSD-Request 是闭合 JSON：request_id、task_id、tool_run_id、asset_id、sha256、
+seed、tool_id、schema_version。Runtime 独立复核摘要、解码、尺寸与格式，不接受路径或远程 URL。
+图片只在 Backend 存储适配器与 Runtime 的受控调用中传输，不写日志或 Provider 请求。
+
+EBSD_MODEL_ROOT 指向外部 CNN_1.pt 所在研究目录；适配层固定摘要和兼容 CNN，预处理为
+ToTensor → Resize(128)，FP32/eval/no_grad，无 autocast。不设置 TF32 或其他全局 CUDA 精度选项，
+结果只记录现有配置。EBSD 与 SEM 共用执行锁，BUSY 需要显式重试，异常释放锁；EBSD 加载失败不
+阻断 SEM。EBSD 来源保存输入资产 ID/摘要、工具版本、模型版本、预处理版本和输入 Revision；
+图片是输入来源，不是 ResultAssetLink 生成产物。独立接口测试与原 CNN 对照使用同一环境和精度策略。
+
 MinIO 上传经过 Asset 生命周期和内容完整性验证；公共图片只通过资产 ID 和受控 content URL 读取。
 Conversation 删除先核实归属和活动状态，再原子删除数据库聚合，最后事务外根据持久化 cleanup
-记录删除已确认属于本项目 namespace/bucket 的生成对象。禁止清空共享卷或触碰 SEM/权重/凭据。
+记录删除已确认属于本项目 namespace/bucket 的生成对象和上传 EBSD 图片。禁止清空共享卷或触碰 SEM/权重/凭据。
+
+EBSD 上传使用专用 Asset 分支：UPLOADED/ebsd_image、actor_id 与 conversation_id 必填，Task 和
+producer ToolRun 为空；生成 SEM 分支继续要求 Task/producer 且不允许直接 conversation_id。
+迁移 0016 固化两种互斥约束，已有 SEM 数据保持兼容；有 EBSD 资产或清理记录时拒绝降级迁移。
+上传键绑定 actor、conversation、内容摘要，PENDING 写入短事务后才调用 MinIO，完成后 CAS 为 AVAILABLE。
+同键不同内容拒绝；失败可重放原上传。当前单进程 Backend 的上传活动门禁与 Conversation 行锁配合，
+上传进行中删除返回 BUSY，防止删除清理后出现迟到写入；异常释放门禁，未完成资产也由现有删除清理覆盖。
 
 ## API 与前端
 
-POST conversations/{id}/messages 使用 NEW_RUN 或 RESUME_RUN。响应以 agent_run 为顶层业务对象。
+POST conversations/{id}/ebsd-images 接收单图原始二进制和 Idempotency-Key，实际解码校验单帧 RGB
+PNG/JPEG、正方形 128–4096 像素、最大 10 MiB，返回资产 ID 与受控 content_url，不裁剪或重编码。
+POST conversations/{id}/messages 使用 NEW_RUN 或 RESUME_RUN，可带单值可选 ebsd_asset_id。
+该字段计入幂等摘要，保存到来源消息和 AgentRun；提交及执行前检查归属、当前对话、类型、可用状态与
+内容摘要。预测 Revision 绑定不可变引用；补图走现有 ToolArgResolver，不引入附件数组或视觉模型。
+响应以 agent_run 为顶层业务对象。
 GET agent-runs/{id} 查询状态；GET conversations/{id}/agent-runs 使用游标分页；GET agent-runs/{id}/trace
 分页读取 Step、Observation、ModelCall。确认/拒绝定位 Run + Invocation，retry 显式选择失败调用或
 回答再生成。具体字段以 FastAPI OpenAPI 和契约测试为准。
 
 useAgentRuns 统一提交和恢复，sessionStorage 保留未确认写操作的原幂等键。刷新/轮询只读，网络
 不确定时检查原提交，不新建重复目标。UI 沿用聊天输入、结果摘要、AssetGallery 和删除对话框。
+文本和 EBSD 引用按对话/补参目标存入 sessionStorage，上传完成前禁止带图提交；网络不确定保留原键。
 切换对话与恢复目标隔离输入草稿，中文输入法 Enter 不误提交；长执行显示已提交状态。
 
 本地栈由 scripts/dev/local-dev.ps1 管理；Mock 与真实模式独立选择。Vite 代理允许 3660 秒请求，

@@ -30,7 +30,7 @@ IMMEDIATE_PREVIOUS_REVISION = "0006_asset"
 M8_REVISION = "0008_idempotency_record"
 M9_REVISION = "0009_timeline_query_indexes"
 M10_REVISION = "0010_registry_routing_state"
-EXPECTED_REVISION = "0015"
+EXPECTED_REVISION = "0016_ebsd_uploaded_assets"
 ALEMBIC_INI = Path(__file__).resolve().parents[3] / "alembic.ini"
 NEW_TASK_TIME_CHECKS = {
     "ck_task_started_at_not_before_created_at",
@@ -357,6 +357,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             },
             "asset": {
                 "asset_id",
+                "conversation_id",
                 "task_id",
                 "producer_tool_run_id",
                 "actor_id",
@@ -628,6 +629,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             },
             "asset": {
                 "fk_asset_actor": "actor",
+                "fk_asset_conversation": "conversation",
                 "fk_asset_task": "task",
                 "fk_asset_tool_run": "tool_run",
             },
@@ -688,6 +690,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             },
             "asset": {
                 "fk_asset_actor": "RESTRICT",
+                "fk_asset_conversation": "CASCADE",
                 "fk_asset_task": "CASCADE",
                 "fk_asset_tool_run": "CASCADE",
             },

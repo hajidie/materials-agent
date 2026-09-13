@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import ResearchResultSummary from "./ResearchResultSummary.vue";
+import EbsdImage from "./EbsdImage.vue";
 import AssetGallery from "./AssetGallery.vue";
 import { clarificationLabel, toolLabel } from "../api/agent";
 import type { AgentRun } from "../api/agent";
@@ -14,6 +15,7 @@ const canRegenerate = computed(() => terminal.value && props.run.observations.so
 <template>
   <article class="tool-card agent-run" :data-run-id="run.agent_run_id">
     <header class="agent-run__header"><h3>{{ run.goal }}</h3><span class="status-badge" role="status">{{ labels[run.status] }}</span></header>
+    <EbsdImage v-if="run.ebsd_asset_id && !run.observations.some(o => o.result_summary)" :asset-id="run.ebsd_asset_id" />
     <p v-if="run.status === 'RUNNING'" class="muted">正在处理目标，进度会自动更新。材料模型推理可能需要较长时间。</p>
     <p v-for="(input, i) in run.user_inputs" :key="i" class="agent-run__input">补充：{{ input }}</p>
     <section v-if="run.waiting && run.status === 'WAITING_FOR_USER'" class="supplement-banner">

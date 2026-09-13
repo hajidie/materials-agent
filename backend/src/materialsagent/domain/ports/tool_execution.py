@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Protocol
 
@@ -56,8 +56,11 @@ class ToolExecutionInput:
     requested_outputs: tuple[str, ...]
     runtime_parameters: dict[str, int | float]
 
+    input_assets: dict[str, str] = field(default_factory=dict)
+
     def to_json(self) -> dict[str, object]:
         return {
+            **({"input_assets": dict(self.input_assets)} if self.input_assets else {}),
             "process_parameters": dict(self.process_parameters),
             "requested_outputs": list(self.requested_outputs),
             "runtime_parameters": dict(self.runtime_parameters),

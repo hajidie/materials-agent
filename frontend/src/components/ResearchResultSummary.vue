@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, type DeepReadonly } from "vue";
 
+import EbsdImage from "./EbsdImage.vue";
 import type { ResultSummary } from "../api/types";
 
 defineOptions({ name: "ResearchResultSummary" });
@@ -69,8 +70,13 @@ const conditions = computed<LabeledMeasurement[] | null>(() => {
     : null;
 });
 
+const isEbsd = computed(() => props.result.tool_id === "ebsd_yield_strength_predictor");
+const inputAssetId = computed(() => {
+  const asset = props.result.provenance.input_asset;
+  return isPlainRecord(asset) && typeof asset.asset_id === 'string' ? asset.asset_id : null;
+});
 const hasMechanicalProperties = computed(() =>
-  props.result.completed_outputs.includes("mechanical_properties"),
+  props.result.completed_outputs.includes(isEbsd.value ? "yield_strength" : "mechanical_properties"),
 );
 
 const metrics = computed<LabeledMeasurement[] | null>(() => {
@@ -79,6 +85,7 @@ const metrics = computed<LabeledMeasurement[] | null>(() => {
   }
   const elongation = measurement(props.result.data.elongation);
   const yieldStrength = measurement(props.result.data.yield_strength);
+  if (isEbsd.value) return yieldStrength === null ? null : [{ label: "屈服强度", ...yieldStrength }];
   if (elongation === null || yieldStrength === null) {
     return null;
   }
@@ -106,7 +113,13 @@ const errorMessage = computed(() => safeErrorMessage(props.result.error));
 
 <template>
   <section class="research-result-summary" aria-label="研究结果摘要">
-    <section data-section="conditions">
+    <section v-if="isEbsd" aria-label="EBSD 预测来源">
+      <p>材料：Inconel 625</p>
+      <EbsdImage v-if="inputAssetId" :asset-id="inputAssetId" />
+      <p class="muted">实验性预测；图像编码要求与适用数据分布尚未核实。</p>
+      <p>模型：{{ result.provenance.model_version }}</p>
+    </section>
+    <section v-else data-section="conditions">
       <h3>实验条件</h3>
       <dl v-if="conditions">
         <div v-for="condition in conditions" :key="condition.label">

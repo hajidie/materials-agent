@@ -2,7 +2,8 @@
 
 这是一个面向材料研究的本地材料智能体 MVP。用户通过自然语言创建对话，可调用默认应用组合中
 的材料单位换算 Standard Tool，或通过受严格治理的 `zta35g_sem_virtual_lab` Managed Tool，
-根据 ZTA35G 热处理工艺参数生成 SEM 图像，并按请求获得力学性能结果和可追溯的最终回答。
+根据 ZTA35G 热处理工艺参数生成 SEM 图像及力学性能；也可上传单张 EBSD 图片，通过
+`ebsd_yield_strength_predictor` Managed Tool 预测 Inconel 625 屈服强度，保留输入来源和最终回答。
 
 ## Quick Context
 
@@ -11,9 +12,9 @@
 | 项目类型 | 单用户、本地运行的材料研究智能体；Backend 是模块化单体，模型执行在隔离 Runtime 中 |
 | 当前阶段 | 可运行 MVP，不是生产部署方案 |
 | 主要能力 | 自然语言目标 → 有界 Agent Loop → 多工具连续编排 → 持久化最终回答 |
-| 当前 Tool | `materials_unit_conversion`（Standard）与 `zta35g_sem_virtual_lab`（Managed） |
+| 当前 Tool | `materials_unit_conversion`（Standard）、`zta35g_sem_virtual_lab` 与 `ebsd_yield_strength_predictor`（Managed） |
 | 扩展底座 | 单一 Tool Registry、统一 ToolDefinition、LangChain Tool Adapter 与 ExecutorRouter |
-| 数据存储 | PostgreSQL 保存结构化事实，MinIO 保存生成图片 |
+| 数据存储 | PostgreSQL 保存结构化事实，MinIO 保存生成 SEM 图片及用户上传 EBSD 图片 |
 | 明确不包含 | 登录、多用户、Redis、后台 Worker、SSE/WebSocket、上传真实 SEM、多 Agent、动态插件和生产部署 |
 
 仓库当前代码、配置、迁移、测试和实际运行行为是事实来源。`AGENTS.md` 规定 Coding Agent 的
@@ -30,8 +31,16 @@
 - 失败 Tool Retry 与受限 Answer Regeneration 创建新 Run；回答再生成禁止执行工具。
 - 确认绑定具体 Invocation 和参数版本；生产目录禁止 Side-effect Tool，开发测试工具仅用于验证确认机制。
 - 聊天界面按 Run 展示工具结果、询问、最终回答和执行记录；刷新和轮询读取服务端状态。
-- Conversation 删除原子移除业务聚合，并通过持久化 cleanup 记录清理本项目生成对象；运行中的聚合拒绝删除。
+- Conversation 删除原子移除业务聚合，并通过持久化 cleanup 记录清理本项目生成对象及上传的 EBSD 图片；运行中的聚合拒绝删除。
 - Mock 或 DeepSeek/Qwen Provider；请求内执行，不提供 Worker、队列或断点接管。
+
+### EBSD 单图预测
+
+聊天输入区选择“上传 EBSD 图片”，预览成功后提交预测目标；缺图时通过补图恢复原运行。
+服务端实际解码，只接受单帧 RGB PNG/JPEG、正方形、边长 128–4096 像素、最大 10 MiB，
+不自动裁剪或改变配色。当前只支持 Inconel 625，输出屈服强度 MPa；数值原精度持久化，界面显示
+两位小数。图像编码要求与适用数据分布尚未核实，不提供置信区间，也不将输入图片标为生成产物。
+LLM 只接收文本和资产引用，不接收图片内容。移除草稿引用不删除存储图片，删除所属对话会清理它。
 
 ## 架构概览
 
@@ -50,7 +59,7 @@ PostgreSQL + MinIO       local Tool client adapter
 ```
 
 Backend 负责公共 API、Agent Loop、Tool Registry、Tool catalog、状态转换和持久化。Runtime
-只提供 health/ready（含受支持 Tool 元数据）与一次受控 execute；它是旧模型的兼容与依赖
+提供 SEM 与 EBSD 各自的 health/ready 和单次受控 execute 接口，共用进程、端口、GPU 和执行锁；它是旧模型的兼容与依赖
 隔离边界，不表示平台采用通用微服务架构。Backend 与真实 Runtime 不共享 Python 包。
 
 Tool 路由、绑定、`schema_hash`、Task/ToolRun 状态机、事务与重试语义见
@@ -138,6 +147,11 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 ```powershell
 .\scripts\dev\local-dev.ps1 Start -Runtime Real -Llm Provider
 ```
+
+启用 EBSD 时通过 `-EbsdModelRoot <外部研究目录>` 或环境变量 `EBSD_MODEL_ROOT` 指定含
+`model/save/CNN_1.pt` 的只读目录。加载前核对适配层内固定的 SHA-256；不复制权重到仓库。
+未配置或加载失败仅使 EBSD 不可用，SEM 可继续运行。EBSD 使用 FP32、eval、no_grad，
+保持原有 CUDA/TF32 设置；两工具忙时返回 BUSY，不自动重试。
 
 也可以独立组合 `-Runtime Mock|Real` 与 `-Llm Mock|Provider`。真实 Runtime 首次加载较慢时，
 可把 ready 等待上限从默认 300 秒调整到 10–900 秒：
@@ -266,14 +280,19 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 | 原 Run 恢复 | 在上一张卡片点击“补充信息”，输入“时效温度 730℃，时效时间 2 小时” | 原 Run 继续，保留累计步骤和预算；工具结果后再次决策并结束，1 次工具调用 |
 | 连续编排 | 新对话发送“对 ZTA35G 进行虚拟实验：固溶温度 1000℃，固溶时间 2 小时，时效温度 730℃，时效时间 2 小时。先预测力学性能，再调用单位换算工具，把预测的屈服强度从 MPa 转为 GPa。” | ZTA35G → 单位换算 → Finish，2 次工具调用；换算输入来自本次预测结果 |
 | 回答再生成 | 对已有成功工具结果的终态 Run 点击“重新生成回答” | 新 Run 引用原成功结果，0 次工具调用；原 Run 和工具产物不变 |
+| EBSD 单图预测 | 上传合规图片后发送“请预测这张 Inconel 625 EBSD 图片对应的屈服强度” | 1 次 EBSD 调用；展示屈服强度、MPa、输入图片和实验性限制，不显示延伸率或热处理条件 |
+| EBSD 缺图恢复 | 新对话不上传图片，发送“请预测 Inconel 625 的 EBSD 图片对应的屈服强度”，等待后通过“补充信息”上传图片并提交 | 缺图时不推理；补图后原 Run 继续，刷新仍能追溯输入与结果 |
+
+EBSD 的 Mock Runtime 返回固定模拟值并标注 Mock；验证真实 CNN 时使用 `-Runtime Real -Llm Provider`
+并配置 `-EbsdModelRoot`。不要用模拟值判断模型准确性；真实 SEM 与 EBSD 共用执行锁，BUSY 时显式重试。
 
 在等待补参和完成后分别刷新页面，应恢复服务端状态。网络结果不确定时使用“检查原提交”，不要
 新建同一个目标。测试中文输入法候选确认不会发送、Shift+Enter 换行，以及窄屏下补参和结果可操作。
 已经“已结束”的 Run 不能因修复代码而恢复；排除错误后创建新目标，或使用符合资格的显式重试。
 
-默认 Mock LLM 是固定规则：支持简单单位换算、ZTA35G 缺参询问和 JSON 参数增量，不支持任意中文
+默认 Mock LLM 是固定规则：支持简单单位换算、ZTA35G 缺参询问、EBSD 资产引用调用和 JSON 参数增量，不支持任意中文
 提取或上述多工具自然语言编排。其输出只验证协议和界面。确认、拒绝、过期及可重试失败用受控测试
-工具验证，默认两个工具不会触发确认。并发 CAS、事务、超时和 Token 预算边界以自动化测试为准。
+工具验证，默认注册的三个工具不会触发确认。并发 CAS、事务、超时和 Token 预算边界以自动化测试为准。
 
 ## 安全与数据边界
 
@@ -290,7 +309,7 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 
 ## 当前限制
 
-本项目不提供登录、多用户隔离、Redis、后台 Worker、SSE、WebSocket、文件上传、EBSD 输入、
+本项目不提供登录、多用户隔离、Redis、后台 Worker、SSE、WebSocket、通用附件系统、
 ML Training、Planner、多 Agent、动态插件上传或生产部署能力。ZTA35G Tool 只适用于 ZTA35G
 钛合金；不支持上传真实 SEM 后预测；只请求力学性能时仍会生成中间 SEM。对话记忆不跨
 Conversation，也暂不提供滚动摘要、记忆开关或管理界面。
@@ -340,3 +359,12 @@ Alembic 历史保留，新增 `0015` 建立 Agent 控制表并调整既有约束
 
 默认 ZTA35G 单次超时为 1200 秒（配置上限 86400 秒），实际调用仍受 Run 剩余活跃时间限制。
 本地 Vite 代理允许 3660 秒请求；没有额外生产反向代理。超时表示停止等待，不表示远端 GPU 已取消。
+
+### EBSD Runtime 独立验收
+
+在真实 Runtime 的 Python 3.8 环境中，设置 `EBSD_MODEL_ROOT` 和 `EBSD_REAL_MODEL_TEST=1`，
+运行 `python -m pytest zta35g-runtime/tests/compatibility/test_ebsd_http_gpu.py -q -s`。
+测试独立启动临时 HTTP 服务，不依赖 Backend、Provider、数据库或 MinIO。额外设置
+`EBSD_SEM_HTTP_TEST=1` 会在同一进程执行两轮完整 SEM → EBSD，并核对状态、BUSY、TF32 和权重。
+该选项包含完整 1000 步 SEM 推理，会长时间占用 GPU；不要与平台的 SEM 推理同时运行。
+普通 Runtime 测试默认跳过真实权重/GPU 验收。

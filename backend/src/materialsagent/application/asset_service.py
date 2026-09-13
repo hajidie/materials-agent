@@ -57,7 +57,7 @@ ImageDecoder = Callable[[ToolImagePayload], object]
 PngEncoder = Callable[[object], EncodedPng]
 _ENVIRONMENT_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,31}\Z")
 _ENCODING_RULE = "linear[-1,1]-to-uint8-half-up;png-gray8"
-MAX_PNG_BYTES = MAX_STORAGE_GET_BYTES
+MAX_PNG_BYTES = 1024 * 1024
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 _logger = logging.getLogger("materialsagent.asset_lifecycle")
 
@@ -637,6 +637,9 @@ class AssetService:
         asset_id: str,
     ) -> AssetContent:
         asset = self.get(actor_context, asset_id)
+        if asset.asset_type == "ebsd_image":
+            from .ebsd_assets import content
+            return content(self, asset)
         if asset.current_status != "AVAILABLE":
             raise ApplicationConflictError(task_id=asset.task_id)
         tool_run = self._get_source_tool_run(actor_context, asset)

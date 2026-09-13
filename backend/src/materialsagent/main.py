@@ -289,10 +289,15 @@ def create_app(
             pass
     runtime_config = parse_zta35g_runtime_config(resolved_settings)
     runtime_client = None
+    ebsd_client = None
     if runtime_config:
         runtime_client = LocalZTA35GToolClientAdapter(base_url=runtime_config.base_url,
             token=runtime_config.token.get_secret_value(), timeout_seconds=runtime_config.timeout_seconds)
-    resolved_tool_registry = tool_registry or build_tool_registry(runtime_client,
+    if runtime_config:
+        from materialsagent.infrastructure.tool_clients.local_ebsd import LocalEBSDToolClientAdapter
+        ebsd_client = LocalEBSDToolClientAdapter(base_url=runtime_config.base_url,
+            token=runtime_config.token.get_secret_value(), timeout_seconds=60)
+    resolved_tool_registry = tool_registry or build_tool_registry(runtime_client, ebsd_client=ebsd_client,
         enable_dev_fake_side_effect_tool=resolved_settings.enable_dev_fake_side_effect_tool)
     if resolved_settings.app_env == "production" and any(
         r.execution_profile is ToolExecutionProfile.SIDE_EFFECT for r in resolved_tool_registry.list_registered()
@@ -399,6 +404,8 @@ def create_app(
     app.state.tool_catalog_service = resolved_tool_catalog_service
     app.state.tool_execution_service = resolved_tool_execution_service
     app.state.tool_run_query_service = resolved_tool_run_query_service
+    if ebsd_client is not None:
+        ebsd_client.asset_service = resolved_asset_service
     app.state.asset_service = resolved_asset_service
     app.state.tool_result_query_service = resolved_tool_result_query_service
     app.state.tool_workflow_service = resolved_tool_workflow_service

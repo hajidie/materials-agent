@@ -43,7 +43,8 @@ from materialsagent.domain.ports.unit_of_work import PersistenceError
 
 UTC = timezone.utc
 BASE = datetime(2026, 7, 20, 8, 0, tzinfo=UTC)
-SCHEMA_HASH = "f821240f782ce788bc723fd1acd02a2e58cedbf68b70b1414e2accd16d989d07"
+# These fixtures exercise current execution; historical hashes remain in migration tests.
+SCHEMA_HASH = ToolRegistry((build_zta35g_tool_definition(),)).resolve("zta35g_sem_virtual_lab").schema_hash
 
 
 def _task() -> Task:

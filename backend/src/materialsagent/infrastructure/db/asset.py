@@ -12,6 +12,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     select,
+    and_, or_,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import SQLAlchemyError
@@ -33,8 +34,8 @@ class AssetRow(Base):
         CheckConstraint("length(btrim(actor_id)) > 0", name="ck_asset_actor_id_not_blank"),
         CheckConstraint("length(btrim(operation_id)) > 0", name="ck_asset_operation_id_not_blank"),
         CheckConstraint("current_status IN ('PENDING', 'AVAILABLE', 'FAILED', 'ORPHANED')", name="ck_asset_status_allowed"),
-        CheckConstraint("asset_type = 'sem_image'", name="ck_asset_type_sem_image"),
-        CheckConstraint("source_type = 'GENERATED' AND producer_tool_run_id IS NOT NULL", name="ck_asset_generated_source"),
+        CheckConstraint("asset_type IN ('sem_image', 'ebsd_image')", name="ck_asset_type_sem_image"),
+        CheckConstraint("(asset_type = 'sem_image' AND source_type = 'GENERATED' AND producer_tool_run_id IS NOT NULL AND task_id IS NOT NULL AND conversation_id IS NULL) OR (asset_type = 'ebsd_image' AND source_type = 'UPLOADED' AND producer_tool_run_id IS NULL AND task_id IS NULL AND conversation_id IS NOT NULL AND role = 'supporting')", name="ck_asset_generated_source"),
         CheckConstraint("role IN ('requested_output', 'intermediate', 'supporting')", name="ck_asset_role_allowed"),
         CheckConstraint("storage_identity_version IN ('LEGACY_DB_KEY', 'METADATA_V1')", name="ck_asset_storage_identity_version_allowed"),
         CheckConstraint("storage_bucket IS NULL OR length(btrim(storage_bucket)) > 0", name="ck_asset_storage_bucket_not_blank"),
@@ -70,9 +71,10 @@ class AssetRow(Base):
     )
 
     asset_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    task_id: Mapped[str] = mapped_column(ForeignKey("task.task_id", name="fk_asset_task", ondelete="CASCADE"), nullable=False)
-    producer_tool_run_id: Mapped[str] = mapped_column(ForeignKey("tool_run.tool_run_id", name="fk_asset_tool_run", ondelete="CASCADE"), nullable=False)
+    task_id: Mapped[str] = mapped_column(ForeignKey("task.task_id", name="fk_asset_task", ondelete="CASCADE"), nullable=True)
+    producer_tool_run_id: Mapped[str] = mapped_column(ForeignKey("tool_run.tool_run_id", name="fk_asset_tool_run", ondelete="CASCADE"), nullable=True)
     actor_id: Mapped[str] = mapped_column(ForeignKey("actor.actor_id", name="fk_asset_actor", ondelete="RESTRICT"), nullable=False)
+    conversation_id: Mapped[str | None] = mapped_column(ForeignKey("conversation.conversation_id", name="fk_asset_conversation", ondelete="CASCADE"), nullable=True)
     operation_id: Mapped[str] = mapped_column(Text, nullable=False)
     current_status: Mapped[str] = mapped_column(String(32), nullable=False)
     asset_type: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -127,13 +129,14 @@ class SQLAlchemyAssetRepository:
     def get_owned(self, asset_id: str, actor_id: str) -> Asset | None:
         statement = (
             select(AssetRow)
-            .join(ToolRunRow, ToolRunRow.tool_run_id == AssetRow.producer_tool_run_id)
-            .join(TaskRow, TaskRow.task_id == ToolRunRow.task_id)
+            .outerjoin(ToolRunRow, ToolRunRow.tool_run_id == AssetRow.producer_tool_run_id)
+            .outerjoin(TaskRow, TaskRow.task_id == ToolRunRow.task_id)
             .where(
                 AssetRow.asset_id == asset_id,
-                AssetRow.task_id == TaskRow.task_id,
-                AssetRow.actor_id == TaskRow.actor_id,
-                TaskRow.actor_id == actor_id,
+                or_(and_(AssetRow.asset_type == "sem_image", AssetRow.task_id == TaskRow.task_id,
+                    AssetRow.actor_id == TaskRow.actor_id, TaskRow.actor_id == actor_id),
+                    and_(AssetRow.asset_type == "ebsd_image", AssetRow.actor_id == actor_id,
+                        AssetRow.conversation_id.is_not(None))),
             )
         )
         try:
@@ -191,6 +194,7 @@ class SQLAlchemyAssetRepository:
             if row is None or row.current_status != expected_status:
                 return None
             immutable = (
+                "conversation_id",
                 "task_id",
                 "producer_tool_run_id",
                 "actor_id",
