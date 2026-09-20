@@ -23,6 +23,8 @@ class Conversation:
     title: str | None
     created_at: datetime
     updated_at: datetime
+    deletion_fence_operation_id: str | None = None
+    deletion_fence_version: int = 0
 
     def __post_init__(self) -> None:
         _require_non_blank(self.conversation_id, "conversation_id")

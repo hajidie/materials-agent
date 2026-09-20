@@ -20,6 +20,7 @@ dependencies = [
   "Pillow==12.3.0",
   "pydantic==2.13.4",
   "pydantic-settings==2.14.2",
+  "python-multipart==0.0.32",
   "psycopg[binary]==3.3.4",
   "SQLAlchemy==2.0.51",
   "tiktoken==0.13.0",
@@ -28,6 +29,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+mcp = ["mcp==1.30.0", "sse-starlette==3.0.3"]
 dev = [
   "pytest==9.1.1",
 ]
@@ -36,3 +38,6 @@ dev = [
 where = ["src"]
 include = ["materialsagent*"]
 namespaces = true
+
+[tool.setuptools.package-data]
+"materialsagent.application" = ["materials_ml_contracts.json"]

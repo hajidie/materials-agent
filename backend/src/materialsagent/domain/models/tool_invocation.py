@@ -217,8 +217,42 @@ class InvocationRun:
     updated_at: datetime
     completed_at: datetime | None
     version: int = 0
+    binding_snapshot: Mapping[str, object] | None = None
+    remote_operation: Mapping[str, object] | None = None
+    remote_receipt: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
+        for field_name in ("binding_snapshot", "remote_operation", "remote_receipt"):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(self, field_name, _controlled_object(value, field_name))
+        if self.executor_id == "mcp":
+            from materialsagent.domain.ports.mcp import MCPBinding
+            snapshot = dict(self.binding_snapshot or {})
+            local = {"tool_id": self.tool_id, "tool_version": self.tool_version,
+                     "schema_hash": self.schema_hash, "executor_id": "mcp"}
+            if any(snapshot.pop(k, None) != v for k, v in local.items()):
+                raise ValueError("Invalid MCP binding identity.")
+            try:
+                binding = MCPBinding(**snapshot)
+            except (TypeError, ValueError):
+                raise ValueError("Invalid MCP binding snapshot.") from None
+            if any(not isinstance(v, str) or not v.strip() for v in snapshot.values()):
+                raise ValueError("Invalid MCP binding values.")
+            if any(_SHA256.fullmatch(v) is None for v in (binding.endpoint_digest, binding.remote_schema_hash)):
+                raise ValueError("Invalid MCP binding digest.")
+            if self.remote_operation is not None:
+                op = self.remote_operation
+                if (set(op) != {"operation", "idempotency_key", "request_digest", "digest_version"}
+                        or _SHA256.fullmatch(str(op["request_digest"])) is None
+                        or not isinstance(op["idempotency_key"], str) or not 1 <= len(op["idempotency_key"]) <= 255
+                        or (op["operation"], op["digest_version"]) != {
+                            "train_tabular_regression": ("training.submit", "training-submit-v1"),
+                            "predict_with_model": ("prediction.submit", "prediction-request-v1"),
+                        }.get(binding.remote_tool_name)):
+                    raise ValueError("Invalid remote operation identity.")
+        elif any(getattr(self, f) is not None for f in ("binding_snapshot", "remote_operation", "remote_receipt")):
+            raise ValueError("Remote facts require an MCP binding.")
         for field_name in (
             "invocation_run_id",
             "actor_id",
@@ -305,7 +339,7 @@ class InvocationRun:
         ):
             raise ValueError("RUNNING requires an execution claim and lease.")
         if self.status is InvocationStatus.OUTCOME_UNKNOWN and (
-            self.execution_profile is not ToolExecutionProfile.SIDE_EFFECT
+            self.execution_profile is not ToolExecutionProfile.SIDE_EFFECT and self.executor_id != "mcp"
         ):
             raise ValueError("OUTCOME_UNKNOWN is Side-effect-only.")
         if self.execution_attempt_count < 0:

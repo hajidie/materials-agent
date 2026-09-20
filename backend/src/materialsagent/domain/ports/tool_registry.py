@@ -51,6 +51,42 @@ class ToolAction(StrEnum):
     RETRY = "RETRY"
 
 
+class ResourceProvider(StrEnum):
+    ML_RESOURCE = "ml_resource"
+    ASSET = "asset"
+
+
+class ResourceType(StrEnum):
+    DATASET = "dataset"
+    TRAINING_RUN = "training_run"
+    MODEL = "model"
+    PREDICTION = "prediction"
+    EBSD_IMAGE = "ebsd_image"
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceParameterSpec:
+    """Registry-owned mapping between model semantics and execution inputs."""
+
+    model_argument: str
+    execution_argument: str
+    expected_resource_type: ResourceType
+    provider: ResourceProvider
+    required: bool = True
+
+    def __post_init__(self) -> None:
+        for field_name in ("model_argument", "execution_argument"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field_name} must be non-blank text.")
+        if not isinstance(self.expected_resource_type, ResourceType):
+            raise ValueError("expected_resource_type is invalid.")
+        if not isinstance(self.provider, ResourceProvider):
+            raise ValueError("provider is invalid.")
+        if type(self.required) is not bool:
+            raise ValueError("required must be boolean.")
+
+
 JsonObject: TypeAlias = Mapping[str, object]
 ToolNormalizer: TypeAlias = Callable[[JsonObject, JsonObject | None], "ToolNormalization"]
 ToolContextProjector: TypeAlias = Callable[[JsonObject], JsonObject]
@@ -466,6 +502,7 @@ class ToolDefinition:
     output_schema: JsonObject = field(default_factory=dict)
     context_projection_version: str = "metadata-only-v1"
     confirmation_prompt: str | None = None
+    resource_parameters: tuple[ResourceParameterSpec, ...] = ()
 
     def __post_init__(self) -> None:
         input_schema = _controlled_json_object(
@@ -509,6 +546,15 @@ class ToolDefinition:
             or len(self.confirmation_prompt.encode("utf-8")) > 512
         ):
             raise ValueError("confirmation_prompt must be controlled text.")
+        if not isinstance(self.resource_parameters, tuple) or any(
+            not isinstance(item, ResourceParameterSpec)
+            for item in self.resource_parameters
+        ):
+            raise ValueError("resource_parameters must contain ResourceParameterSpec values.")
+        model_names = [item.model_argument for item in self.resource_parameters]
+        execution_names = [item.execution_argument for item in self.resource_parameters]
+        if len(model_names) != len(set(model_names)) or len(execution_names) != len(set(execution_names)):
+            raise ValueError("resource_parameters must not contain duplicate arguments.")
 
     @property
     def metadata(self) -> ToolMetadata:
@@ -644,6 +690,10 @@ class RegisteredTool:
     @property
     def context_projection_version(self) -> str:
         return self.definition.context_projection_version
+
+    @property
+    def resource_parameters(self) -> tuple[ResourceParameterSpec, ...]:
+        return self.definition.resource_parameters
 
     @property
     def ref(self) -> ToolRef:

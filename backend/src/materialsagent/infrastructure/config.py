@@ -70,6 +70,13 @@ class AppSettings(BaseSettings):
     agent_standard_timeout_seconds: float = Field(default=10, gt=0, le=3600)
     m5_dev_routes_enabled: bool = False
     enable_dev_fake_side_effect_tool: bool = False
+    enable_materials_ml_resources: bool = False
+    enable_materials_ml_resource_context: bool = False
+    enable_dev_materials_ml_tools: bool = False
+    materials_ml_mcp_url: str = "http://127.0.0.1:8200/mcp"
+    materials_ml_binding_version: str = "1"
+    materials_ml_mcp_token: SecretStr | None = None
+    materials_ml_resource_token: SecretStr | None = None
 
     @field_validator(
         "deepseek_api_key",
@@ -96,8 +103,28 @@ class AppSettings(BaseSettings):
 
     @model_validator(mode="after")
     def reject_dev_fake_in_production(self) -> "AppSettings":
+        if self.enable_materials_ml_resource_context and (self.app_env not in ("local", "test")
+                or not self.enable_materials_ml_resources or not self.enable_dev_materials_ml_tools):
+            raise ValueError("ML resource context requires local/test MCP and Resource capabilities.")
         if self.app_env == "production" and self.enable_dev_fake_side_effect_tool:
             raise ValueError("Development fake Side-effect Tool is forbidden in production.")
+        if self.enable_materials_ml_resources:
+            import re
+            if (self.app_env == "production" or self.materials_ml_resource_token is None
+                    or re.fullmatch(r"[A-Za-z0-9_-]{32,256}", self.materials_ml_resource_token.get_secret_value()) is None):
+                raise ValueError("Local ML resources require an explicit Resource credential.")
+            if self.materials_ml_mcp_token and self.materials_ml_mcp_token.get_secret_value() == self.materials_ml_resource_token.get_secret_value():
+                raise ValueError("Resource and MCP credentials must differ.")
+        if self.enable_dev_materials_ml_tools:
+            if self.app_env == "production":
+                raise ValueError("ML Side-effect Tools are forbidden in production.")
+            tokens = (self.materials_ml_mcp_token, self.materials_ml_resource_token)
+            import re
+            if (any(t is None or re.fullmatch(r"[A-Za-z0-9_-]{32,256}", t.get_secret_value()) is None for t in tokens)
+                    or tokens[0].get_secret_value() == tokens[1].get_secret_value()):
+                raise ValueError("Distinct MCP and Resource credentials are required.")
+            if not self.materials_ml_binding_version.strip():
+                raise ValueError("ML binding version is required.")
         return self
 
 
@@ -128,6 +155,13 @@ ENVIRONMENT_FIELDS = {
     "AGENT_STANDARD_TIMEOUT_SECONDS": "agent_standard_timeout_seconds",
     "M5_DEV_ROUTES_ENABLED": "m5_dev_routes_enabled",
     "ENABLE_DEV_FAKE_SIDE_EFFECT_TOOL": "enable_dev_fake_side_effect_tool",
+    "ENABLE_MATERIALS_ML_RESOURCES": "enable_materials_ml_resources",
+    "ENABLE_MATERIALS_ML_RESOURCE_CONTEXT": "enable_materials_ml_resource_context",
+    "ENABLE_DEV_MATERIALS_ML_TOOLS": "enable_dev_materials_ml_tools",
+    "MATERIALS_ML_MCP_URL": "materials_ml_mcp_url",
+    "MATERIALS_ML_BINDING_VERSION": "materials_ml_binding_version",
+    "MATERIALS_ML_MCP_TOKEN": "materials_ml_mcp_token",
+    "MATERIALS_ML_RESOURCE_TOKEN": "materials_ml_resource_token",
 }
 
 

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from backend.tests.agent_inspection import stored_run
 
 import base64
 import json
@@ -175,8 +176,8 @@ def _execute_asset(client, api_harness):
         return {"type": "Finish", "answer": "已生成结果。"} if payload["observations"] else {
             "type": "CallTool", "tool_name": "zta35g_sem_virtual_lab", "arguments": arguments}
     client.app.state.agent_runtime.model = MockAgentModel(respond)
-    run = client.post(f"/api/v1/conversations/{conversation['conversation_id']}/messages",
-        headers={"Idempotency-Key": "asset-valid-run"}, json={"mode": "NEW_RUN", "content_text": "生成图像和性能"}).json()["data"]["agent_run"]
+    run = stored_run(client, client.post(f"/api/v1/conversations/{conversation['conversation_id']}/messages",
+        headers= {"Idempotency-Key": "asset-valid-run"}, json={"mode": "NEW_RUN", "content_text": "生成图像和性能"}).json()["data"]["agent_run"])
     observation = next(o for o in run["observations"] if o["kind"] == "TOOL_RESULT")
     assert observation["artifacts"], run
     tool_run_id = observation["tool_run_id"]

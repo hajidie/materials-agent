@@ -27,6 +27,9 @@ from materialsagent.domain.ports.tool_registry import (
     ToolExecutionPolicy,
     ToolExecutionProfile,
     NeedsInputNormalization,
+    ResourceParameterSpec,
+    ResourceProvider,
+    ResourceType,
     ReadyNormalization,
     ToolStatus,
 )
@@ -379,6 +382,45 @@ def test_needs_input_normalization_rejects_semantically_empty_or_inconsistent_st
 def test_registry_rejects_executable_registration_without_normalizer() -> None:
     with pytest.raises(InvalidToolRegistrationError):
         ToolRegistry((definition(normalizer=None),))
+
+
+def test_registry_owns_and_validates_resource_parameter_contract() -> None:
+    spec = ResourceParameterSpec("dataset_reference", "dataset_id", ResourceType.DATASET,
+        ResourceProvider.ML_RESOURCE)
+    registration = definition(input_schema={"type": "object", "properties": {
+        "dataset_id": {"type": "string"}}, "required": ["dataset_id"]}, resource_parameters=(spec,))
+    registered = ToolRegistry((registration,)).resolve("fixture_tool")
+    assert registered.resource_parameters == (spec,)
+
+
+@pytest.mark.parametrize("specs,input_schema", [
+    ((ResourceParameterSpec("dataset_reference", "missing_id", ResourceType.DATASET,
+        ResourceProvider.ML_RESOURCE),), {"type": "object", "properties": {}}),
+    ((ResourceParameterSpec("dataset_reference", "dataset_id", ResourceType.DATASET,
+        ResourceProvider.ML_RESOURCE),), {"type": "object", "properties": {"dataset_id": {"type": "string"}}}),
+    ((ResourceParameterSpec("dataset_reference", "dataset_id", ResourceType.DATASET,
+        ResourceProvider.ML_RESOURCE),) * 2, {"type": "object", "properties": {
+            "dataset_id": {"type": "string"}}, "required": ["dataset_id"]}),
+    ((ResourceParameterSpec("dataset_id", "dataset_id", ResourceType.DATASET,
+        ResourceProvider.ML_RESOURCE),), {"type": "object", "properties": {
+            "dataset_id": {"type": "string"}}, "required": ["dataset_id"]}),
+    ((ResourceParameterSpec("dataset_reference", "dataset_id", ResourceType.DATASET,
+        ResourceProvider.ASSET),), {"type": "object", "properties": {
+            "dataset_id": {"type": "string"}}, "required": ["dataset_id"]}),
+    ((ResourceParameterSpec("image_reference", "asset_id", ResourceType.EBSD_IMAGE,
+        ResourceProvider.ML_RESOURCE),), {"type": "object", "properties": {
+            "asset_id": {"type": "string"}}, "required": ["asset_id"]}),
+])
+def test_registry_rejects_inconsistent_resource_parameter_contract(specs, input_schema) -> None:
+    with pytest.raises(ValueError):
+        ToolRegistry((definition(input_schema=input_schema, resource_parameters=specs),))
+
+
+def test_resource_parameter_rejects_unknown_provider_and_type_at_definition_boundary() -> None:
+    with pytest.raises(ValueError):
+        ResourceParameterSpec("dataset_reference", "dataset_id", ResourceType.DATASET, "unknown")
+    with pytest.raises(ValueError):
+        ResourceParameterSpec("dataset_reference", "dataset_id", "unknown", ResourceProvider.ML_RESOURCE)
 
 
 @pytest.mark.parametrize(

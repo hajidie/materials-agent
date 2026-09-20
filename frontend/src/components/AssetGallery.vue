@@ -11,6 +11,7 @@ defineOptions({ name: "AssetGallery" });
 
 const props = defineProps<{
   imageLabel?: string;
+  preview?: boolean;
   assets: readonly (
     | AssetSummary
     | DeepReadonly<AssetSummary>
@@ -94,9 +95,10 @@ function imageRenderKey(assetId: string): string {
   <section
     v-if="displayAssets.length > 0"
     class="asset-gallery"
+    :class="{ 'asset-gallery--preview': preview }"
     data-section="image"
   >
-    <h3>组织图像</h3>
+    <h3 v-if="!preview">组织图像</h3>
     <div class="asset-gallery__grid asset-gallery__grid--images">
       <figure
         v-for="entry in displayAssets"
@@ -135,7 +137,7 @@ function imageRenderKey(assetId: string): string {
             @load="markLoaded(entry.asset.asset_id)"
             @error="markFailed(entry.asset.asset_id)"
           />
-          <figcaption>
+          <figcaption v-if="!preview">
             <a :href="entry.attachmentUrl" download>下载图片</a>
           </figcaption>
         </template>

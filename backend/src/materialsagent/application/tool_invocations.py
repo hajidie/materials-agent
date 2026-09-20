@@ -35,6 +35,7 @@ from materialsagent.domain.ports.tool_registry import (
     ToolExecutionProfile,
 )
 from materialsagent.domain.ports.unit_of_work import PersistenceError, UnitOfWorkFactory
+from materialsagent.domain.ports.mcp import MCPBinding, MCPFailure
 
 
 Clock = Callable[[], datetime]
@@ -57,6 +58,8 @@ class ToolExecutorContext:
     actor_id: str
     conversation_id: str
     execution_claim_token: str
+    binding_snapshot: Mapping[str, object] | None = None
+    remote_operation: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,6 +213,16 @@ class ExecutorRouter:
             raise ValueError("Registered Tool references an unknown executor_id.") from None
         return executor.execute(registration, arguments, context)
 
+    def prepare(self, registration, arguments, context):
+        prepare = getattr(self._executors[registration.executor_id], "prepare", None)
+        return prepare(registration, arguments, context) if prepare else None
+
+    def lookup(self, registration, scope_id, operation):
+        lookup = getattr(self._executors[registration.executor_id], "lookup", None)
+        if lookup is None:
+            raise ApplicationValidationError()
+        return lookup(registration, scope_id, operation)
+
     def execute_managed(
         self,
         workflow_service: object,
@@ -349,6 +362,8 @@ class InvocationService:
         )
         run = InvocationRun(
             invocation_run_id=self._id_factory("inv"),
+            binding_snapshot=(registration.binding.execution_target.snapshot(registration)
+                if isinstance(registration.binding.execution_target, MCPBinding) else None),
             actor_id=actor.actor_id,
             conversation_id=resolved.proposal.conversation_id,
             source_message_id=resolved.proposal.source_message_id,
@@ -1225,6 +1240,28 @@ class InvocationService:
         run: InvocationRun,
         registration: RegisteredTool,
     ) -> InvocationRun:
+        if run.executor_id == "mcp":
+            # Historical dispatched identities are never prepared again.
+            run = self.get(actor, run.invocation_run_id).run
+            if run.status is not InvocationStatus.RUNNING or run.dispatch_started_at is not None:
+                return run
+            try:
+                operation = run.remote_operation or self._router.prepare(
+                    registration, run.proposed_arguments, self._executor_context(run))
+                with self._unit_of_work_factory() as uow:
+                    current = uow.invocation_runs.get_owned_for_update(run.invocation_run_id, actor.actor_id)
+                    if current is None:
+                        raise ResourceNotFoundError()
+                    if current.status is not InvocationStatus.RUNNING or current.dispatch_started_at is not None:
+                        return current
+                    frozen = replace(current, remote_operation=operation, updated_at=self._clock())
+                    run = uow.invocation_runs.update(frozen, expected_status=InvocationStatus.RUNNING,
+                                                    expected_claim_token=run.execution_claim_token)
+                    if run is None:
+                        raise ApplicationConflictError()
+                    uow.commit()
+            except MCPFailure as error:
+                return self._finalize_failure(actor, run, error.code)
         dispatch_at = self._clock()
         marked = replace(run, dispatch_started_at=dispatch_at, updated_at=dispatch_at)
         with self._unit_of_work_factory() as uow:
@@ -1241,21 +1278,38 @@ class InvocationService:
             output = self._router.execute(
                 registration,
                 saved.proposed_arguments,
-                ToolExecutorContext(
-                    invocation_run_id=saved.invocation_run_id,
-                    request_id=saved.request_id,
-                    idempotency_key=saved.idempotency_key,
-                    actor_id=saved.actor_id,
-                    conversation_id=saved.conversation_id,
-                    execution_claim_token=saved.execution_claim_token,
-                ),
+                self._executor_context(saved),
             )
+        except MCPFailure as error:
+            if error.unknown:
+                return self._finalize_unknown(actor, saved, receipt=error.receipt)
+            return self._finalize_failure(actor, saved, error.code, receipt=error.receipt)
         except TimeoutError:
             return self._finalize_unknown(actor, saved)
         except Exception:
-            if saved.execution_profile is ToolExecutionProfile.SIDE_EFFECT:
+            if saved.execution_profile is ToolExecutionProfile.SIDE_EFFECT or saved.executor_id == "mcp":
                 return self._finalize_unknown(actor, saved)
             return self._finalize_failure(actor, saved, "TOOL_EXECUTION_FAILED")
+        try:
+            return self._commit_output(actor, saved, output)
+        except (PersistenceError, ValueError):
+            if saved.executor_id != "mcp":
+                raise
+            # A commit acknowledgement is not the commit itself. Unknown only after checking durable facts.
+            with self._unit_of_work_factory() as uow:
+                current = uow.invocation_runs.get_owned(saved.invocation_run_id, actor.actor_id)
+            if current and current.status is not InvocationStatus.RUNNING:
+                return current
+            return self._finalize_unknown(actor, current or saved)
+
+    @staticmethod
+    def _executor_context(run):
+        return ToolExecutorContext(invocation_run_id=run.invocation_run_id, request_id=run.request_id,
+            idempotency_key=run.idempotency_key, actor_id=run.actor_id, conversation_id=run.conversation_id,
+            execution_claim_token=run.execution_claim_token, binding_snapshot=run.binding_snapshot,
+            remote_operation=run.remote_operation)
+
+    def _commit_output(self, actor, saved, output):
         completed_at = self._clock()
         result = InvocationResult(
             invocation_result_id=self._id_factory("invres"),
@@ -1294,6 +1348,7 @@ class InvocationService:
         actor: ActorContext,
         run: InvocationRun,
         error_code: str,
+        *, receipt: Mapping[str, object] | None = None,
     ) -> InvocationRun:
         completed_at = self._clock()
         with self._unit_of_work_factory() as uow:
@@ -1308,6 +1363,7 @@ class InvocationService:
                 completed_at=completed_at,
                 error_code=error_code,
                 safe_error_message="Tool execution failed.",
+                remote_receipt=receipt or current.remote_receipt,
             )
             saved = uow.invocation_runs.update(
                 failed,
@@ -1323,6 +1379,7 @@ class InvocationService:
         self,
         actor: ActorContext,
         run: InvocationRun,
+        *, receipt: Mapping[str, object] | None = None,
     ) -> InvocationRun:
         completed_at = self._clock()
         with self._unit_of_work_factory() as uow:
@@ -1335,8 +1392,10 @@ class InvocationService:
                 InvocationStatus.OUTCOME_UNKNOWN,
                 now=completed_at,
                 completed_at=completed_at,
-                error_code="SIDE_EFFECT_OUTCOME_UNKNOWN",
-                safe_error_message="The external side effect may have occurred; it was not retried.",
+                error_code="MCP_OUTCOME_UNKNOWN" if current.executor_id == "mcp" else "SIDE_EFFECT_OUTCOME_UNKNOWN",
+                remote_receipt=receipt or current.remote_receipt,
+                safe_error_message=("远端操作结果尚未确认，不能判断资源已创建或未创建，需要核查原操作回执。"
+                    if current.executor_id == "mcp" else "The external side effect may have occurred; it was not retried."),
             )
             saved = uow.invocation_runs.update(
                 unknown,
@@ -1356,7 +1415,63 @@ class InvocationService:
             raise ApplicationConflictError() from None
         if registration.ref != run.tool_ref or registration.executor_id != run.executor_id:
             raise ApplicationConflictError()
+        if run.executor_id == "mcp" and (not isinstance(registration.binding.execution_target, MCPBinding) or
+                registration.binding.execution_target.snapshot(registration) != run.binding_snapshot or
+                registration.execution_policy.value == "NONE"):
+            raise ApplicationConflictError()
         return registration
+
+    def reconcile_mcp(self, actor, invocation_run_id):
+        run = self.get(actor, invocation_run_id).run
+        if run.executor_id != "mcp" or not run.remote_operation or run.status is not InvocationStatus.OUTCOME_UNKNOWN:
+            raise ApplicationValidationError()
+        registration = self._current_registration(run)
+        try:
+            receipt = dict(self._router.lookup(registration, run.conversation_id, run.remote_operation))
+        except MCPFailure as error:
+            receipt = {"lookup_status": "CONFLICT" if error.code == "MCP_RECEIPT_CONFLICT" else "UNAVAILABLE",
+                       "error_code": error.code}
+        receipt["checked_at"] = self._clock().isoformat()
+        with self._unit_of_work_factory() as uow:
+            current = uow.invocation_runs.get_owned_for_update(run.invocation_run_id, actor.actor_id)
+            if current is None:
+                raise ResourceNotFoundError()
+            # Another lookup may already have newer remote facts. Never replace them with this stale response.
+            if current.version != run.version:
+                return self._public(uow, current)
+            if (current.remote_receipt and current.remote_receipt.get("lookup_status") == "FOUND"
+                    and receipt.get("lookup_status") != "FOUND"):
+                # A failed later lookup cannot erase a previously confirmed resource fact.
+                receipt = dict(current.remote_receipt) | {"last_check": receipt}
+            saved = uow.invocation_runs.update(replace(current, remote_receipt=receipt, updated_at=self._clock()),
+                expected_status=InvocationStatus.OUTCOME_UNKNOWN, expected_claim_token=run.execution_claim_token)
+            if saved is None:
+                raise ApplicationConflictError()
+            uow.commit()
+        return self.get(actor, invocation_run_id)
+
+    def recover_mcp(self, actor, *, cutoff, limit=20):
+        # Settle every interrupted dispatch locally in small transactions. Remote lookup is separately bounded.
+        while True:
+            with self._unit_of_work_factory() as uow:
+                finder = getattr(uow.invocation_runs, "find_mcp_recovery", None)
+                active = finder(actor.actor_id, cutoff, limit, ("RUNNING",)) if finder else []
+            if not active:
+                break
+            for run in active:
+                if run.dispatch_started_at:
+                    self._finalize_unknown(actor, run)
+                else:
+                    self._finalize_failure(actor, run, "MCP_PROCESS_INTERRUPTED_BEFORE_DISPATCH")
+        with self._unit_of_work_factory() as uow:
+            finder = getattr(uow.invocation_runs, "find_mcp_recovery", None)
+            runs = finder(actor.actor_id, self._clock(), limit, ("OUTCOME_UNKNOWN",)) if finder else []
+        for run in runs:
+            if run.status is InvocationStatus.OUTCOME_UNKNOWN and run.remote_operation:
+                try:
+                    self.reconcile_mcp(actor, run.invocation_run_id)
+                except (ApplicationConflictError, ApplicationValidationError):
+                    pass  # Drift prevents lookup; the immutable unknown fact remains.
 
     def _public(self, uow: object, run: InvocationRun) -> PublicInvocation:
         result = (

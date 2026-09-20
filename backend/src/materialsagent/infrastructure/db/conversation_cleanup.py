@@ -164,6 +164,30 @@ class SQLAlchemyConversationLifecycleRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
 
+    def require_closed_scope(self, actor, conversation, operation):
+        from .ml_resources import ResourceTransaction, lock_conversation
+        from materialsagent.application.errors import ApplicationConflictError
+        row = lock_conversation(self._session, actor, conversation)
+        records = ResourceTransaction(self._session, actor, conversation).rows("deletion", id=operation)
+        value = records[0]["document"] if records else {}
+        receipt = value.get("receipt", {})
+        if (row.deletion_fence_operation_id != operation or row.deletion_fence_version != value.get("fence_version")
+                or receipt.get("status") != "CLOSED" or receipt.get("cleanup_accepted") is not True
+                or receipt.get("scope_id") != conversation or receipt.get("operation_id") != operation):
+            raise ApplicationConflictError(code="ML_SCOPE_CLOSURE_UNCONFIRMED")
+
+    def require_unmanaged_scope(self, actor, conversation):
+        from .ml_resources import ResourceTransaction
+        from materialsagent.application.errors import ConversationBusyError
+        if ResourceTransaction(self._session, actor, conversation).rows("binding"):
+            raise ConversationBusyError(conversation_id=conversation)
+
+    def complete_scope_deletion(self, actor, conversation, operation, cleanup_ids):
+        from .ml_resources import ResourceTransaction
+        tx = ResourceTransaction(self._session, actor, conversation)
+        current = tx.rows("deletion", id=operation)[0]["document"]
+        tx.put("deletion", operation, {**current, "status": "COMPLETED", "cleanup_ids": list(cleanup_ids)}, status="COMPLETED")
+
     def _locked_tasks(
         self,
         *,
@@ -306,6 +330,12 @@ class SQLAlchemyConversationLifecycleRepository:
         process_cutoff: datetime,
     ) -> bool:
         try:
+            from .ml_resources import ResourceTransaction
+            from materialsagent.application.errors import ConversationBusyError
+            try:
+                ResourceTransaction(self._session, actor_id, conversation_id).assert_idle()
+            except ConversationBusyError:
+                return True
             from materialsagent.infrastructure.db.agent import AgentRunRow
             agent_activity = self._session.scalar(select(AgentRunRow.agent_run_id).where(
                 AgentRunRow.actor_id == actor_id, AgentRunRow.conversation_id == conversation_id,

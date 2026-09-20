@@ -4,6 +4,19 @@ import ChatComposer from "../../src/components/ChatComposer.vue";
 
 function composer() { return mount(ChatComposer, { props: { disabled: false, sending: false, completed: 0, waitingQuestion: null } }); }
 describe("Agent composer", () => {
+  it("omits helper copy while keeping validation and keyboard behavior", async () => {
+    const wrapper = composer();
+    expect(wrapper.text()).not.toContain("单张正方形");
+    expect(wrapper.text()).not.toContain("Shift+Enter");
+    expect(wrapper.get("textarea").attributes("aria-describedby")).toBeUndefined();
+    expect(wrapper.get('input[type="file"]').attributes("aria-describedby")).toBeUndefined();
+    await wrapper.get("textarea").trigger("keydown", { key: "Enter" });
+    expect(wrapper.get("textarea").attributes("aria-describedby")).toBe("composer-error");
+    expect(wrapper.get("#composer-error").text()).toContain("请输入消息");
+    await wrapper.get("textarea").setValue("研究目标");
+    await wrapper.get("textarea").trigger("keydown", { key: "Enter", shiftKey: true });
+    expect(wrapper.emitted("submit")).toBeUndefined();
+  });
   it("validates input and submits a goal", async () => {
     const wrapper = composer();
     await wrapper.get("form").trigger("submit");

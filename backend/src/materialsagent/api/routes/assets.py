@@ -94,25 +94,3 @@ def get_asset_content(
             "X-Content-Type-Options": "nosniff",
         },
     )
-
-
-@router.post("/api/v1/conversations/{conversation_id}/ebsd-images", response_model=AssetResponse)
-async def upload_ebsd(conversation_id: str, request: Request,
-    actor_context: Annotated[ActorContext, Depends(get_actor_context)],
-    service: Annotated[AssetService, Depends(get_asset_service)],
-    idempotency_key: Annotated[str, Header(alias="Idempotency-Key")]):
-    from materialsagent.application.ebsd_assets import upload, MAX_IMAGE_BYTES
-    from materialsagent.application.idempotency import validate_idempotency_key
-    from starlette.concurrency import run_in_threadpool
-    try:
-        key = validate_idempotency_key(idempotency_key)
-    except ValueError:
-        raise HTTPException(422, detail="INVALID_IDEMPOTENCY_KEY") from None
-    payload = bytearray()
-    async for chunk in request.stream():
-        payload.extend(chunk)
-        if len(payload) > MAX_IMAGE_BYTES:
-            raise HTTPException(413, detail="EBSD_IMAGE_TOO_LARGE")
-    asset = await run_in_threadpool(upload, service, actor_context, conversation_id, bytes(payload), key)
-    return AssetResponse(request_id=request.state.request_id,
-        data={**project_asset(asset), "content_url": f"/api/v1/assets/{asset.asset_id}/content"})

@@ -19,7 +19,6 @@ defineProps<{
 
 defineEmits<{
   create: [];
-  refresh: [];
   select: [conversationId: string];
   delete: [conversationId: string];
   "load-more": [];
@@ -35,7 +34,7 @@ function displayTitle(title: string | null): string {
   <aside class="conversation-sidebar" aria-label="对话列表">
     <header class="conversation-sidebar__header">
       <div>
-        <h1>高端金属材料组织图像智能体</h1>
+        <h1>材料智能助手</h1>
       </div>
       <button
         type="button"
@@ -45,16 +44,6 @@ function displayTitle(title: string | null): string {
         @click="$emit('create')"
       >
         {{ creating ? "创建中…" : "新建对话" }}
-      </button>
-      <button
-        type="button"
-        class="button button--secondary button--full"
-        data-action="refresh-conversations"
-        aria-label="刷新对话列表"
-        :disabled="loading"
-        @click="$emit('refresh')"
-      >
-        {{ loading ? "刷新中…" : "刷新对话列表" }}
       </button>
     </header>
 
@@ -83,6 +72,7 @@ function displayTitle(title: string | null): string {
               selectedConversationId === conversation.conversation_id,
           }"
           :data-conversation-id="conversation.conversation_id"
+          :title="displayTitle(conversation.title)"
           :aria-current="
             selectedConversationId === conversation.conversation_id
               ? 'true'
@@ -91,9 +81,6 @@ function displayTitle(title: string | null): string {
           @click="$emit('select', conversation.conversation_id)"
         >
           <strong>{{ displayTitle(conversation.title) }}</strong>
-          <span>
-            {{ conversation.last_activity_preview || "暂无消息" }}
-          </span>
         </button>
         <button
           type="button"

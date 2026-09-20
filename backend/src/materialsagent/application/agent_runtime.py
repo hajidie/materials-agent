@@ -14,6 +14,9 @@ from materialsagent.domain.models.agent import (
 from materialsagent.domain.ports.agent import (
     AgentConflictError, AgentFailure, AgentModelPort, AgentStore, AgentToolGateway,
 )
+from materialsagent.domain.models.ml_resource_context import model_observation, model_draft, PROTOCOL_VERSION
+from .context_framework import ContextFramework
+from .result_projection import project_result, FIELD_LABELS
 
 
 class FinalResponsePolicy:
@@ -25,7 +28,7 @@ class FinalResponsePolicy:
         if action.answer and action.answer.strip():
             return action.answer.strip()
         if len(observations) == 1:
-            presentation = observations[0].presentation
+            presentation = project_result(observations[0])
             text = presentation.get("text") or presentation.get("summary")
             if isinstance(text, str) and text.strip():
                 return text.strip()
@@ -45,7 +48,7 @@ class FinalAnswerGenerator:
     @staticmethod
     def generate(run, observations, step, model_call):
         return model_call("final_answer", {"goal": run.goal, "user_inputs": run.user_inputs,
-            "context": run.context, "observations": [o.agent_projection() for o in observations]}, step)
+            "context": run.context, "observations": [], "selected_observation_ids": [o.observation_id for o in observations]}, step)
 
 
 class AgentRuntime:
@@ -55,10 +58,13 @@ class AgentRuntime:
         self.process_id = process_id or identifier()
         self.monotonic = monotonic
         self.clock = clock
+        self.context_framework = ContextFramework()
 
     def advance(self, run_id: str, actor_id: str, *, waiting_version: int | None = None,
                 user_input: str | None = None, confirmation: bool | None = None) -> AgentRun:
         run = self.store.get(run_id, actor_id)
+        if run.resource_protocol_version != PROTOCOL_VERSION:
+            raise AgentFailure("CONVERSATION_UPGRADE_REQUIRED")
         if run.terminal or run.status == "RUNNING":
             return run
         resuming_arguments = False
@@ -77,6 +83,7 @@ class AgentRuntime:
         run.status, run.claim, run.process_id = "RUNNING", identifier(), self.process_id
         self.store.save(run)  # The only owner proceeds beyond this CAS.
         last = self.monotonic()
+        resources = getattr(self.tools, "resource_context", None)
 
         def persist() -> None:
             nonlocal last
@@ -99,7 +106,10 @@ class AgentRuntime:
 
         def model_call(role: str, payload: dict[str, Any], step: AgentStep) -> Any:
             check_budget()
-            request = self.model.prepare(role, payload, run.budget.max_llm_tokens - run.llm_tokens, remaining_time())
+            if resources is not None and role in {"agent_decision", "tool_arg_resolution"}:
+                payload = {**payload, "resource_context": resources.context(run)}
+            frame = self.context_framework.build(role, payload, run)
+            request = self.model.prepare(role, frame.payload, run.budget.max_llm_tokens - run.llm_tokens, remaining_time())
             call = ModelCall(step_id=step.step_id, role=role, prompt_digest=fingerprint(request.messages), output_limit=request.output_limit, input_reserved=request.input_estimate)
             run.calls.append(call)
             persist()
@@ -123,7 +133,7 @@ class AgentRuntime:
             check_budget()
             if response.error_code:
                 raise AgentFailure(response.error_code)
-            return response.value
+            return self.context_framework.output(frame, response.value, run)
 
         def argument_observation(step: AgentStep) -> None:
             draft = run.draft
@@ -198,8 +208,11 @@ class AgentRuntime:
                     raise AgentFailure("ARGUMENT_STATE_MISSING")
                 step = run.steps[-1]
                 delta = model_call("tool_arg_resolution", {
-                    "tool": self._tool(run.draft.tool_name), "draft": run.draft.model_dump(mode="json"),
+                    "tool": self._tool(run.draft.tool_name),
+                    "draft": model_draft(run.draft),
                     "user_input": user_input,
+                    "waiting_version": run.waiting_version, "question": run.waiting.model_dump(mode="json") if run.waiting else None,
+                    "goal": run.goal, "context": run.context,
                 }, step)
                 if not isinstance(delta, dict):
                     raise AgentFailure("ARGUMENT_PROTOCOL_ERROR")
@@ -223,7 +236,10 @@ class AgentRuntime:
                 payload = self._context(run)
                 raw = model_call("agent_decision", payload, step)
                 action = DecisionEngine.action(raw)
-                step.action = action
+                # The decoded proposal may temporarily contain trusted handles.
+                # Persist only business arguments; verified identities belong in
+                # the typed draft/execution bindings created below.
+                step.action = self._audit_action(action)
                 persist()
                 if isinstance(action, CallTool):
                     if run.tool_execution_disabled:
@@ -239,6 +255,10 @@ class AgentRuntime:
                         persist()
                         continue
                     draft = run.draft
+                    # A resolved intent question has been consumed. Keeping it in
+                    # subsequent Decision context can replay the user's answer
+                    # after the Tool result already satisfies the request.
+                    run.waiting = None
                     signature = fingerprint([draft.tool_name, draft.version, draft.schema_hash, draft.normalized])
                     duplicate = next((e for e in run.executions if e.execution_fingerprint == signature and e.status == "SUCCEEDED"), None)
                     if duplicate:
@@ -248,7 +268,7 @@ class AgentRuntime:
                         raise AgentFailure("TOOL_EXECUTION_BUDGET_EXCEEDED")
                     record = ExecutionRecord(action_id=step.step_id, tool_name=draft.tool_name,
                         version=draft.version, schema_hash=draft.schema_hash, arguments=draft.normalized,
-                        execution_fingerprint=signature)
+                        execution_fingerprint=signature, resource_bindings=draft.resource_bindings, unit_annotations=draft.unit_annotations)
                     if run.retry_execution:
                         if signature != run.retry_execution.execution_fingerprint:
                             raise AgentFailure("TOOL_RETRY_ARGUMENT_MISMATCH")
@@ -270,8 +290,6 @@ class AgentRuntime:
                         if run.tool_execution_disabled:
                             raise AgentFailure("TOOL_EXECUTION_DISABLED")
                         self._validate_question(run, action)
-                        # Public question wording cannot invent ranges/defaults not in the schema.
-                        action.question = "请补充或明确以下参数：" + "、".join(action.fields) + "。"
                     run.waiting = action
                     run.waiting_version += 1
                     run.status = "WAITING_FOR_USER"
@@ -285,9 +303,16 @@ class AgentRuntime:
                         answer = FinalAnswerGenerator.generate(run, selected, step, model_call)
                     if not isinstance(answer, str) or not answer.strip():
                         raise AgentFailure("FINAL_ANSWER_INVALID")
+                    # Preserve provenance even when a direct/model answer omits it.
+                    from .unit_resolution import project_units
+                    for observation in selected:
+                        for note in project_units({"notes": []}, observation.unit_annotations)["notes"]:
+                            if note not in answer:
+                                answer += "\n" + note
                     check_budget()
                     run.final_answer = FinalAnswer(step_id=step.step_id, text=answer.strip(),
                         observation_ids=[o.observation_id for o in selected], generated=generated)
+                    run.waiting = None
                     step.status, run.status = "COMPLETED", "SUCCEEDED"
                     persist()
         except AgentConflictError:
@@ -310,9 +335,25 @@ class AgentRuntime:
                 return tool
         raise AgentFailure("UNKNOWN_TOOL")
 
+    def _audit_action(self, action):
+        name = getattr(action, "tool_name", None)
+        if not name or not isinstance(action, (CallTool, AskUser)):
+            return action
+        tool = self._tool(name)
+        fields = {item["execution_argument"] for item in tool.get("resource_parameters", ())}
+        if not fields:
+            return action
+        value = action.model_dump(mode="json")
+        key = "arguments" if isinstance(action, CallTool) else "known_arguments"
+        value[key] = {field: item for field, item in value[key].items() if field not in fields}
+        return DecisionEngine.action(value)
+
     def _validate_question(self, run: AgentRun, action: AskUser) -> None:
         tool = self._tool(action.tool_name or "")
         fields = set(tool["schema"].get("properties", {}))
+        from materialsagent.domain.models.semantic_units import ANNOTATION_TOOLS
+        if tool["tool_name"] in ANNOTATION_TOOLS:
+            fields.add("semantic_annotations")
         if not set(action.fields) <= fields or len(set(action.fields)) != len(action.fields):
             raise AgentFailure("CLARIFICATION_FIELD_INVALID")
         if run.draft and run.draft.tool_name != action.tool_name:
@@ -336,18 +377,25 @@ class AgentRuntime:
     def _context(self, run: AgentRun) -> dict[str, Any]:
         return {
             "goal": run.goal, "conversation_context": run.context, "user_inputs": run.user_inputs,
-            "ebsd_asset_id": run.ebsd_asset_id,
+            "question": run.waiting.model_dump(mode="json") if run.waiting else None,
+            "waiting_version": run.waiting_version,
+            "execution_facts": [{"tool_name": e.tool_name, "arguments": e.arguments, "status": e.status,
+                "observation_id": e.observation_id} for e in run.executions],
             "run_status": run.status,
             "remaining_budget": {"action_steps": run.budget.max_action_steps - len(run.steps),
                 "tool_executions": run.budget.max_tool_executions - run.tool_executions,
                 "llm_tokens": run.budget.max_llm_tokens - run.llm_tokens,
                 "active_seconds": max(0, run.budget.max_active_seconds - run.active_seconds)},
-            "tools": [] if run.tool_execution_disabled else self.tools.catalog(),
+            # A draft already binds the only legal Tool until resolution/execution.
+            "tools": [] if run.tool_execution_disabled else [t for t in self.tools.catalog()
+                if run.draft is None or t["tool_name"] == run.draft.tool_name],
             "tool_execution_disabled": run.tool_execution_disabled,
             "retry_target": None if run.retry_execution is None else run.retry_execution.model_dump(mode="json"),
-            "draft": None if run.draft is None else run.draft.model_dump(mode="json"),
+            "draft": model_draft(run.draft),
             "actions": [s.action.model_dump(mode="json") for s in run.steps if s.action],
-            "observations": [o.agent_projection() for o in run.observations],
+            # The authoritative current draft replaces superseded clarification diagnostics.
+            # Full questions and argument Observations remain persisted in the trace.
+            "observations": [model_observation(o) for o in run.observations if o.kind == "TOOL_RESULT"],
         }
 
     @staticmethod

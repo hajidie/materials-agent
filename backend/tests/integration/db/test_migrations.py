@@ -30,7 +30,7 @@ IMMEDIATE_PREVIOUS_REVISION = "0006_asset"
 M8_REVISION = "0008_idempotency_record"
 M9_REVISION = "0009_timeline_query_indexes"
 M10_REVISION = "0010_registry_routing_state"
-EXPECTED_REVISION = "0016_ebsd_uploaded_assets"
+EXPECTED_REVISION = "0021_resource_ref_protocol"
 ALEMBIC_INI = Path(__file__).resolve().parents[3] / "alembic.ini"
 NEW_TASK_TIME_CHECKS = {
     "ck_task_started_at_not_before_created_at",
@@ -56,7 +56,7 @@ M8_TABLES = M7_TABLES | {
     "idempotency_record",
     "conversation_object_cleanup",
 }
-HEAD_TABLES = M8_TABLES | {"invocation_run", "invocation_result", "agent_run", "agent_submission", "agent_step", "agent_observation", "agent_execution", "agent_model_call", "agent_final_answer"}
+HEAD_TABLES = M8_TABLES | {"ml_scope_binding", "ml_resource_ref", "ml_resource_operation", "conversation_deletion", "invocation_run", "invocation_result", "agent_run", "agent_submission", "agent_step", "agent_observation", "agent_execution", "agent_model_call", "agent_final_answer"}
 
 
 def _make_alembic_config(settings: AppSettings) -> Config:
@@ -271,6 +271,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "safe_error_message",
             },
             "message": {
+                "event_key",
                 "message_id",
                 "conversation_id",
                 "task_id",
@@ -454,6 +455,9 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             },
             "invocation_run": {
                 "version",
+                "binding_snapshot",
+                "remote_operation",
+                "remote_receipt",
                 "invocation_run_id",
                 "actor_id",
                 "conversation_id",
@@ -494,6 +498,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "completed_at",
             },
         }
+        expected_columns["conversation"].update({"deletion_fence_operation_id", "deletion_fence_version", "ml_dataset_ordinal"})
         for table_name, column_names in expected_columns.items():
             assert set(_column_map(inspector, table_name)) == column_names
 
@@ -528,6 +533,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
         assert message_columns["task_id"]["nullable"] is True
         assert message_columns["structured_content"]["nullable"] is True
         assert message_columns["llm_call_id"]["nullable"] is True
+        assert message_columns["event_key"]["nullable"] is True
         assert isinstance(message_columns["structured_content"]["type"], JSONB)
         assert message_columns["created_at"]["type"].timezone is True
 
@@ -908,6 +914,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             },
             "invocation_run": {
                 "ck_invocation_attempt_count",
+                "ck_invocation_mcp_facts",
                 "ck_invocation_confirmation_expiry_required",
                 "ck_invocation_confirmation_fact_pairs",
                 "ck_invocation_confirmation_facts_exclusive",
@@ -968,6 +975,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
         } == {
             "uq_message_id_conversation": ["message_id", "conversation_id"],
             "uq_message_llm_call_id": ["llm_call_id"],
+            "uq_message_conversation_event": ["conversation_id", "event_key"],
         }
         assert {
             constraint["name"]: constraint["column_names"]

@@ -407,7 +407,7 @@ def test_committed_llm_toml_resolves_default_roles_and_keeps_secret_safe() -> No
     assert chat.model_name == "deepseek-flash"
     assert chat.max_tokens == 1024
     assert chat.context_window_tokens == 1_000_000
-    assert chat.prompt_limit_tokens == 16_384
+    assert chat.prompt_limit_tokens == 50_000
     assert chat.history_token_budget == 8_192
     assert chat.safety_margin_tokens == 1_024
     assert explanation.max_tokens == 768

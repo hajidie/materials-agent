@@ -106,6 +106,12 @@ class ConversationCleanupService:
             raise from_persistence_error(error, conversation_id=conversation_id) from None
 
     def delete(self, actor_context: ActorContext, conversation_id: str) -> ConversationDeletion:
+        coordinator = getattr(self, "ml_coordinator", None)
+        if coordinator is not None:
+            return coordinator.delete(actor_context, conversation_id)
+        return self._delete_local(actor_context, conversation_id)
+
+    def _delete_local(self, actor_context: ActorContext, conversation_id: str, *, closing_operation=None) -> ConversationDeletion:
         if not isinstance(conversation_id, str) or not conversation_id.strip():
             return ConversationDeletion(str(conversation_id), ())
         now = self._clock()
@@ -120,6 +126,13 @@ class ConversationCleanupService:
                 )
                 if conversation is None:
                     return ConversationDeletion(conversation_id, ())
+                if closing_operation is not None:
+                    unit_of_work.conversation_lifecycle.require_closed_scope(actor_context.actor_id, conversation_id, closing_operation)
+                elif conversation.deletion_fence_operation_id is not None:
+                    from .errors import ApplicationConflictError
+                    raise ApplicationConflictError(code="CONVERSATION_DELETE_PENDING")
+                elif callable(getattr(unit_of_work.conversation_lifecycle, "require_unmanaged_scope", None)):
+                    unit_of_work.conversation_lifecycle.require_unmanaged_scope(actor_context.actor_id, conversation_id)
                 from materialsagent.application.ebsd_assets import upload_in_progress
                 if upload_in_progress(conversation_id):
                     raise ConversationBusyError(conversation_id=conversation_id)
@@ -167,6 +180,9 @@ class ConversationCleanupService:
                     actor_context.actor_id,
                 ):
                     return ConversationDeletion(conversation_id, ())
+                if closing_operation is not None:
+                    unit_of_work.conversation_lifecycle.complete_scope_deletion(actor_context.actor_id, conversation_id,
+                        closing_operation, cleanup_ids)
                 unit_of_work.commit()
         except ConversationBusyError:
             raise
@@ -213,6 +229,15 @@ class ConversationCleanupService:
             summary.safety_blocked,
         )
         return summary
+
+    def drain_exact(self, cleanup_ids: tuple[str, ...]) -> CleanupDrainSummary:
+        """Upgrade cleanup is confined to the explicitly deleted aggregates."""
+        with self._unit_of_work_factory() as unit_of_work:
+            pending = [unit_of_work.conversation_object_cleanups.get(identity)
+                       for identity in dict.fromkeys(cleanup_ids)]
+        outcomes = [self._attempt(item) for item in pending if item and item.status == PENDING]
+        return CleanupDrainSummary(attempted=len(outcomes), completed=outcomes.count(COMPLETED),
+            pending=outcomes.count(PENDING), safety_blocked=outcomes.count(SAFETY_BLOCKED))
 
     def _attempt(self, cleanup: ConversationObjectCleanup) -> str:
         now = self._clock()

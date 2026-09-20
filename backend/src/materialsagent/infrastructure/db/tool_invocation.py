@@ -151,7 +151,8 @@ class InvocationRunRow(Base):
             name="ck_invocation_running_claim",
         ),
         CheckConstraint(
-            "status <> 'OUTCOME_UNKNOWN' OR execution_profile = 'SIDE_EFFECT'",
+            "status <> 'OUTCOME_UNKNOWN' OR execution_profile = 'SIDE_EFFECT' OR "
+            "(executor_id = 'mcp' AND binding_snapshot IS NOT NULL)",
             name="ck_invocation_outcome_unknown_profile",
         ),
         CheckConstraint(
@@ -160,6 +161,15 @@ class InvocationRunRow(Base):
             name="ck_invocation_dispatch_attempt",
         ),
         CheckConstraint("execution_attempt_count >= 0", name="ck_invocation_attempt_count"),
+        CheckConstraint(
+            "COALESCE((executor_id = 'mcp' AND binding_snapshot IS NOT NULL AND jsonb_typeof(binding_snapshot) = 'object' "
+            "AND binding_snapshot->>'executor_id' = 'mcp' AND binding_snapshot->>'tool_id' = tool_id "
+            "AND binding_snapshot->>'tool_version' = tool_version AND binding_snapshot->>'schema_hash' = schema_hash "
+            "AND (remote_operation IS NULL OR jsonb_typeof(remote_operation) = 'object') "
+            "AND (remote_receipt IS NULL OR jsonb_typeof(remote_receipt) = 'object')) OR "
+            "(executor_id <> 'mcp' AND binding_snapshot IS NULL AND remote_operation IS NULL AND remote_receipt IS NULL), false)",
+            name="ck_invocation_mcp_facts",
+        ),
         CheckConstraint(
             "(status IN ('SUCCEEDED', 'FAILED', 'DENIED', 'REJECTED', 'EXPIRED', 'OUTCOME_UNKNOWN')) "
             "= (completed_at IS NOT NULL)",
@@ -264,6 +274,9 @@ class InvocationRunRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    binding_snapshot: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    remote_operation: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    remote_receipt: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
 
 
 def _result_from_row(row: InvocationResultRow) -> InvocationResult:
@@ -278,6 +291,9 @@ def _result_from_row(row: InvocationResultRow) -> InvocationResult:
 
 def _run_from_row(row: InvocationRunRow) -> InvocationRun:
     return InvocationRun(
+        binding_snapshot=row.binding_snapshot,
+        remote_operation=row.remote_operation,
+        remote_receipt=row.remote_receipt,
         invocation_run_id=row.invocation_run_id,
         actor_id=row.actor_id,
         conversation_id=row.conversation_id,
@@ -355,6 +371,13 @@ class SQLAlchemyInvocationRunRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
 
+    def find_mcp_recovery(self, actor_id, cutoff, limit, statuses=("RUNNING", "OUTCOME_UNKNOWN")):
+        rows = self._session.scalars(select(InvocationRunRow).where(
+            InvocationRunRow.actor_id == actor_id, InvocationRunRow.executor_id == "mcp",
+            InvocationRunRow.status.in_(statuses), InvocationRunRow.updated_at < cutoff)
+            .order_by(InvocationRunRow.updated_at, InvocationRunRow.invocation_run_id).limit(limit)).all()
+        return [_run_from_row(row) for row in rows]
+
     def get(self, invocation_run_id: str) -> InvocationRun | None:
         try:
             row = self._session.get(InvocationRunRow, invocation_run_id)
@@ -375,6 +398,10 @@ class SQLAlchemyInvocationRunRepository:
             _raise_safe_persistence_error(error)
 
     def get_owned_for_update(self, invocation_run_id: str, actor_id: str) -> InvocationRun | None:
+        from .ml_resources import lock_conversation
+        parent = self.get_owned(invocation_run_id, actor_id)
+        if parent:
+            lock_conversation(self._session, actor_id, parent.conversation_id)
         try:
             row = self._session.scalar(
                 select(InvocationRunRow)
@@ -431,6 +458,13 @@ class SQLAlchemyInvocationRunRepository:
             _raise_safe_persistence_error(error)
 
     def add(self, run: InvocationRun) -> None:
+        from .ml_resources import lock_conversation, ResourceTransaction
+        lock_conversation(self._session, run.actor_id, run.conversation_id, writable=True)
+        if run.executor_id == "mcp":
+            b = run.binding_snapshot
+            ResourceTransaction(self._session, run.actor_id, run.conversation_id).bind(
+                {"service_id": b["server_id"], "binding_version": b["binding_version"], "endpoint_digest": b["endpoint_digest"]},
+                "invocation:" + run.invocation_run_id)
         try:
             self._session.add(InvocationRunRow(**_run_values(run)))
         except SQLAlchemyError as error:
@@ -443,6 +477,9 @@ class SQLAlchemyInvocationRunRepository:
         expected_status: InvocationStatus,
         expected_claim_token: str | None = None,
     ) -> InvocationRun | None:
+        from .ml_resources import lock_conversation
+        lock_conversation(self._session, run.actor_id, run.conversation_id,
+                          writable=run.status.value in ("PENDING", "RUNNING", "PENDING_CONFIRMATION"))
         predicates = [
             InvocationRunRow.invocation_run_id == run.invocation_run_id,
             InvocationRunRow.status == expected_status.value,
@@ -464,6 +501,9 @@ class SQLAlchemyInvocationRunRepository:
 
 def _run_values(run: InvocationRun, *, include_identity: bool = True) -> dict[str, object]:
     values: dict[str, object] = {
+        "binding_snapshot": _plain(run.binding_snapshot),
+        "remote_operation": _plain(run.remote_operation),
+        "remote_receipt": _plain(run.remote_receipt),
         "version": run.version,
         "actor_id": run.actor_id,
         "conversation_id": run.conversation_id,

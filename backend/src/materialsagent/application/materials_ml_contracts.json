@@ -1,0 +1,286 @@
+{
+  "analyze_tabular_dataset": {
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "dataset_id": {
+          "title": "Dataset Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "dataset_id"
+      ],
+      "title": "DatasetRequest",
+      "type": "object"
+    },
+    "outputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "contract_version": {
+          "title": "Contract Version",
+          "type": "string"
+        },
+        "resource": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resource"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        }
+      },
+      "required": [
+        "contract_version"
+      ],
+      "title": "ToolOutput",
+      "type": "object"
+    }
+  },
+  "train_tabular_regression": {
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "dataset_id": {
+          "title": "Dataset Id",
+          "type": "string"
+        },
+        "features": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Features",
+          "type": "array"
+        },
+        "target": {
+          "title": "Target",
+          "type": "string"
+        },
+        "algorithm": {
+          "default": "LR",
+          "description": "Canonical regression algorithm: LR means linear regression; RF means random forest regression (随机森林回归).",
+          "enum": [
+            "LR",
+            "RF"
+          ],
+          "title": "Algorithm",
+          "type": "string"
+        },
+        "test_size": {
+          "default": 0.2,
+          "title": "Test Size",
+          "type": "number"
+        },
+        "random_state": {
+          "default": 42,
+          "title": "Random State",
+          "type": "integer"
+        },
+        "units": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": "Units",
+          "type": "object"
+        }
+      },
+      "required": [
+        "dataset_id",
+        "features",
+        "target"
+      ],
+      "title": "TrainingRequest",
+      "type": "object"
+    },
+    "outputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "contract_version": {
+          "title": "Contract Version",
+          "type": "string"
+        },
+        "resource": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resource"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        }
+      },
+      "required": [
+        "contract_version"
+      ],
+      "title": "ToolOutput",
+      "type": "object"
+    }
+  },
+  "get_training_run": {
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "training_run_id": {
+          "title": "Training Run Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "training_run_id"
+      ],
+      "title": "RunRequest",
+      "type": "object"
+    },
+    "outputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "contract_version": {
+          "title": "Contract Version",
+          "type": "string"
+        },
+        "resource": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resource"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        }
+      },
+      "required": [
+        "contract_version"
+      ],
+      "title": "ToolOutput",
+      "type": "object"
+    }
+  },
+  "predict_with_model": {
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "model_id": {
+          "title": "Model Id",
+          "type": "string"
+        },
+        "input_dataset_id": {
+          "title": "Input Dataset Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "model_id",
+        "input_dataset_id"
+      ],
+      "title": "PredictionRequest",
+      "type": "object"
+    },
+    "outputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "contract_version": {
+          "title": "Contract Version",
+          "type": "string"
+        },
+        "resource": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resource"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        }
+      },
+      "required": [
+        "contract_version"
+      ],
+      "title": "ToolOutput",
+      "type": "object"
+    }
+  }
+}

@@ -45,7 +45,7 @@ describe("ConversationSidebar", () => {
     const wrapper = mountSidebar();
     const header = wrapper.get(".conversation-sidebar__header");
 
-    expect(header.get("h1").text()).toBe("高端金属材料组织图像智能体");
+    expect(header.get("h1").text()).toBe("材料智能助手");
     expect(header.find(".eyebrow").exists()).toBe(false);
     expect(header.text()).not.toContain("本地材料研究平台");
   });
@@ -81,18 +81,12 @@ describe("ConversationSidebar", () => {
     expect(create.text()).toContain("创建中");
   });
 
-  it("emits an explicit list refresh and disables only that read while loading", async () => {
+  it("does not show a manual list refresh in idle or loading states", async () => {
     const wrapper = mountSidebar();
-    const refresh = wrapper.get("[data-action=refresh-conversations]");
-
-    await refresh.trigger("click");
-    expect(wrapper.emitted("refresh")).toHaveLength(1);
-    expect(wrapper.emitted("create")).toBeUndefined();
-
+    expect(wrapper.text()).not.toContain("刷新对话列表");
     await wrapper.setProps({ loading: true });
-    expect(refresh.attributes()).toHaveProperty("disabled");
-    await refresh.trigger("click");
-    expect(wrapper.emitted("refresh")).toHaveLength(1);
+    expect(wrapper.find("[data-action=refresh-conversations]").exists()).toBe(false);
+    expect(wrapper.text()).toContain("正在加载对话");
   });
 
   it("emits the opaque selected Conversation id", async () => {
@@ -125,7 +119,7 @@ describe("ConversationSidebar", () => {
     expect(wrapper.find("[data-action=load-more]").exists()).toBe(false);
   });
 
-  it("uses safe title and preview fallbacks without exposing ids", () => {
+  it("uses safe title fallbacks without displaying message previews or ids", () => {
     const wrapper = mountSidebar({
       conversations: [
         conversation(
@@ -148,7 +142,7 @@ describe("ConversationSidebar", () => {
         .findAll("[data-conversation-id] strong")
         .map((entry) => entry.text()),
     ).toEqual(["新对话", "新对话"]);
-    expect(wrapper.text()).toContain("最近一条材料消息");
+    expect(wrapper.text()).not.toContain("最近一条材料消息");
     expect(wrapper.text()).not.toContain("internal-id-not-title");
   });
 
@@ -158,5 +152,14 @@ describe("ConversationSidebar", () => {
     expect(wrapper.text()).toContain("还没有对话");
     await wrapper.setProps({ loading: true });
     expect(wrapper.text()).toContain("正在加载对话");
+  });
+
+  it("retains the full long title for hover and accessible button text", () => {
+    const title = "预测 ZTA35G 性能并换算屈服强度。".repeat(20);
+    const wrapper = mountSidebar({ conversations: [conversation("long", title, "2026-07-24T00:00:00Z")] });
+    const item = wrapper.get("[data-conversation-id]");
+    expect(item.attributes("title")).toBe(title);
+    expect(item.get("strong").text()).toBe(title);
+    expect(item.find("span").exists()).toBe(false);
   });
 });

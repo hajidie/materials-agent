@@ -1,6 +1,7 @@
 import { computed, onUnmounted, ref, watch } from "vue";
 import { createMaterialsAgentApi } from "../api/client";
 import { agentRequest, AgentRequestError, type AgentRun } from "../api/agent";
+import type { Attachment } from "../api/artifacts";
 import type { ConversationListItem } from "../api/types";
 
 interface PendingOperation {
@@ -10,10 +11,13 @@ interface PendingOperation {
   conversationId: string | null;
   createKey?: string;
 }
-const PENDING_KEY = "materials-agent.pending-run.v1";
+const PENDING_KEY = "materials-agent.pending-run.v2";
 const SELECTED_KEY = "materials-agent.selected-conversation.v1";
 
 export function useAgentRuns() {
+  // Incompatible drafts must never replay the former message contract.
+  sessionStorage.removeItem("materials-agent.pending-run.v1");
+  sessionStorage.removeItem("materials-agent.ebsd-drafts.v1");
   const conversationsApi = createMaterialsAgentApi();
   const conversations = ref<ConversationListItem[]>([]);
   const selectedId = ref<string | null>(sessionStorage.getItem(SELECTED_KEY));
@@ -23,6 +27,7 @@ export function useAgentRuns() {
   const completed = ref(0);
   const error = ref<string | null>(null);
   const pending = ref<PendingOperation | null>(null);
+  const writeBlocked = ref(false);
   const nextCursor = ref<string | null>(null);
   const conversationCursor = ref<string | null>(null);
   const resumeTarget = ref<AgentRun | null>(null);
@@ -38,70 +43,99 @@ export function useAgentRuns() {
         pending.value = value;
       }
     }
-  } catch { error.value = "待提交操作无法读取，请检查当前运行状态。"; }
+  } catch { error.value = "待提交操作无法读取，请检查当前处理状态。"; }
   const uploading = ref(false);
   const canRetryUpload = ref(false);
   const uploadError = ref<string | null>(null);
   const draftKey = computed(() => `${selectedId.value ?? 'new'}:${resumeTarget.value?.agent_run_id ?? 'new'}`);
-  const drafts = ref<Record<string, { text: string; assetId?: string }>>({});
+  const DRAFT_KEY = "materials-agent.attachments-drafts.v2";
+  const drafts = ref<Record<string, { text: string; attachment?: Attachment }>>({});
   try {
-    const stored = JSON.parse(sessionStorage.getItem("materials-agent.ebsd-drafts.v1") ?? "{}");
+    const stored = JSON.parse(sessionStorage.getItem(DRAFT_KEY) ?? "{}");
     if (stored && typeof stored === "object" && !Array.isArray(stored)) {
-      drafts.value = Object.fromEntries(Object.entries(stored).filter(([, value]) => {
-        const item = value as { text?: unknown; assetId?: unknown } | null;
-        return item && typeof item.text === "string" && (item.assetId === undefined ||
-          (typeof item.assetId === "string" && /^asset_[A-Za-z0-9_-]{1,90}$/.test(item.assetId)));
-      })) as Record<string, { text: string; assetId?: string }>;
+      for (const [key, value] of Object.entries(stored)) {
+        const item = value as { text?: unknown; attachment?: Attachment };
+        if (typeof item?.text === "string" && (!item.attachment ||
+            (typeof item.attachment.attachment_id === "string" && typeof item.attachment.name === "string" &&
+              ["dataset", "ebsd_image"].includes(item.attachment.kind)))) drafts.value[key] = item as { text: string; attachment?: Attachment };
+      }
     }
   } catch { /* Discard invalid local drafts. */ }
   const draft = computed(() => drafts.value[draftKey.value] ?? { text: "" });
-  function saveDraft(value: { text: string; assetId?: string }) {
+  function saveDraft(value: { text: string; attachment?: Attachment }) {
     drafts.value[draftKey.value] = value;
-    sessionStorage.setItem("materials-agent.ebsd-drafts.v1", JSON.stringify(drafts.value));
+    sessionStorage.setItem(DRAFT_KEY, JSON.stringify(drafts.value));
   }
   function setDraftText(text: string) { if (!pending.value) saveDraft({ ...draft.value, text }); }
-  function removeEbsd() { saveDraft({ text: draft.value.text }); uploadError.value = null; canRetryUpload.value = false; uploadAttempt = null; }
-  watch(draftKey, () => { uploadError.value = null; canRetryUpload.value = false; });
-  let uploadAttempt: { file: File; key: string; createKey: string; conversationId: string | null } | null = null;
-  const busy = computed(() => sending.value || pending.value !== null || uploading.value);
+  function removeAttachment() { saveDraft({ text: draft.value.text }); uploadError.value = null; canRetryUpload.value = false; delete uploadAttempts[draftKey.value]; persistUploads(); }
+  const UPLOAD_KEY = "materials-agent.pending-upload.v2";
+  type UploadAttempt = { key: string; kind: "dataset" | "ebsd_image"; name: string; createKey: string; conversationId: string | null; context: string };
+  const uploadAttempts: Record<string, UploadAttempt> = {};
+  function persistUploads() { sessionStorage.setItem(UPLOAD_KEY, JSON.stringify(uploadAttempts)); }
+  try {
+    const values = JSON.parse(sessionStorage.getItem(UPLOAD_KEY) ?? "{}");
+    for (const value of Object.values(values) as UploadAttempt[]) {
+      if (value && typeof value.key === "string" && typeof value.name === "string" && typeof value.context === "string" && ["dataset", "ebsd_image"].includes(value.kind)) uploadAttempts[value.context] = value;
+    }
+  } catch { /* Invalid pending uploads cannot be replayed. */ }
+  function showPendingUpload() {
+    canRetryUpload.value = Boolean(uploadAttempts[draftKey.value]);
+    uploadError.value = canRetryUpload.value ? "上传结果尚未确认，请核查原请求。" : null;
+  }
+  watch(draftKey, showPendingUpload, { immediate: true });
+  const busy = computed(() => sending.value || pending.value !== null || uploading.value || writeBlocked.value);
 
-  async function retryEbsdUpload() { if (uploadAttempt) await uploadEbsd(uploadAttempt.file); }
+  async function checkUpload() {
+    const attempt = uploadAttempts[draftKey.value];
+    if (!attempt?.conversationId || busy.value) return;
+    uploading.value = true;
+    try {
+      const result = await agentRequest<{ attachment: Attachment | null; message: string }>(`/conversations/${encodeURIComponent(attempt.conversationId)}/attachments/reconcile`,
+        { body: { key: attempt.key, kind: attempt.kind, name: attempt.name } });
+      if (attempt.context !== draftKey.value) return;
+      if (result.attachment) {
+        saveDraft({ ...draft.value, attachment: result.attachment }); delete uploadAttempts[attempt.context]; persistUploads(); uploadError.value = null; canRetryUpload.value = false;
+      } else uploadError.value = result.message;
+    } catch { uploadError.value = "仍无法确认上传结果，请稍后核查原请求。"; }
+    finally { uploading.value = false; }
+  }
 
-  async function uploadEbsd(file: File) {
+  async function uploadAttachment(file: File) {
     if (busy.value) return;
-    uploadError.value = null;
-    canRetryUpload.value = false;
-    if (!['image/png', 'image/jpeg'].includes(file.type) || file.size === 0 || file.size > 10 * 1024 * 1024) {
-      uploadError.value = "请选择不超过 10 MiB 的 PNG/JPEG 图片。";
-      return;
+    if (uploadAttempts[draftKey.value]) { showPendingUpload(); return; }
+    uploadError.value = null; canRetryUpload.value = false;
+    const isCsv = file.name.toLowerCase().endsWith(".csv");
+    if ((!isCsv && !['image/png', 'image/jpeg'].includes(file.type)) || !file.size || file.size > (isCsv ? 20 : 10) * 1024 * 1024) {
+      uploadError.value = "请选择 CSV（不超过 20 MiB）或 PNG/JPEG 图片（不超过 10 MiB）。"; return;
     }
-    if (!uploadAttempt || uploadAttempt.file !== file || uploadAttempt.conversationId !== selectedId.value) {
-      uploadAttempt = { file, key: crypto.randomUUID(), createKey: crypto.randomUUID(), conversationId: selectedId.value };
-    }
-    const attempt = uploadAttempt;
+    const attempt: UploadAttempt = { key: crypto.randomUUID(), createKey: crypto.randomUUID(), conversationId: selectedId.value,
+      name: file.name, kind: isCsv ? "dataset" : "ebsd_image", context: draftKey.value };
     const originalDraft = { ...draft.value };
     uploading.value = true;
     try {
       if (!attempt.conversationId) {
         const created = await conversationsApi.createConversation(undefined, attempt.createKey);
         attempt.conversationId = created.data.conversation_id;
-        await select(attempt.conversationId, true);
-        saveDraft(originalDraft);
-        await refreshConversations();
+        await select(attempt.conversationId, true); saveDraft(originalDraft); await refreshConversations();
       }
-      const context = draftKey.value;
-      const response = await fetch(`/api/v1/conversations/${encodeURIComponent(attempt.conversationId)}/ebsd-images`, {
-        method: 'POST', headers: { 'Content-Type': file.type, 'Idempotency-Key': attempt.key }, body: file,
+      attempt.context = draftKey.value;
+      uploadAttempts[attempt.context] = attempt; persistUploads();
+      const form = new FormData(); form.append("file", file);
+      const response = await fetch(`/api/v1/conversations/${encodeURIComponent(attempt.conversationId)}/attachments`, {
+        method: 'POST', headers: { 'Idempotency-Key': attempt.key }, body: form,
       });
       const payload = await response.json();
-      if (context !== draftKey.value) return;
-      if (!response.ok || !/^asset_[A-Za-z0-9_-]{1,90}$/.test(payload.data?.asset_id ?? '')) {
-        throw new Error(response.status === 422 ? "图片必须是边长 128–4096 像素的正方形 RGB PNG/JPEG。" : "上传未完成，请重试原图片。");
+      if (attempt.context !== draftKey.value) return;
+      if (!response.ok) {
+        if (response.status >= 400 && response.status < 500) { delete uploadAttempts[attempt.context]; persistUploads(); }
+        throw new Error();
       }
-      saveDraft({ ...draft.value, assetId: payload.data.asset_id });
-      uploadAttempt = null;
-    } catch (cause) { canRetryUpload.value = true; uploadError.value = cause instanceof Error && !(cause instanceof TypeError) ? cause.message : "连接中断，请重试原图片。"; }
-    finally { uploading.value = false; }
+      if (!payload.data?.attachment) { showPendingUpload(); return; }
+      saveDraft({ ...draft.value, attachment: payload.data.attachment }); delete uploadAttempts[attempt.context]; persistUploads();
+    } catch {
+      canRetryUpload.value = Boolean(uploadAttempts[draftKey.value]);
+      uploadError.value = uploadAttempts[draftKey.value] ? "上传结果尚未确认，请核查原请求。" : "上传未完成，请检查文件格式。图片需为边长 128–4096 像素的正方形 RGB 图片。";
+    } finally { uploading.value = false; }
   }
 
 
@@ -147,7 +181,7 @@ export function useAgentRuns() {
     else sessionStorage.removeItem(SELECTED_KEY);
     loading.value = true;
     try { await refresh(); }
-    catch { error.value = "运行记录暂时无法加载，请刷新重试。"; }
+    catch { error.value = "对话暂时无法加载，请刷新重试。"; }
     finally { loading.value = false; }
   }
 
@@ -174,7 +208,7 @@ export function useAgentRuns() {
       if (operation.path.endsWith("/messages")) {
         const context = `${operation.conversationId}:${operation.body.agent_run_id ?? 'new'}`;
         delete drafts.value[context];
-        sessionStorage.setItem("materials-agent.ebsd-drafts.v1", JSON.stringify(drafts.value));
+        sessionStorage.setItem(DRAFT_KEY, JSON.stringify(drafts.value));
         completed.value++;
       }
       persistPending();
@@ -183,7 +217,7 @@ export function useAgentRuns() {
       catch { error.value = "提交已保存，列表暂时无法刷新。"; }
     } catch (cause) {
       const uncertain = !(cause instanceof AgentRequestError) || cause.uncertain;
-      error.value = uncertain ? "连接中断，执行结果尚不确定。可以检查原提交；这不会创建新的目标。" : `操作未完成（${cause.code}），请刷新状态后重试。`;
+      error.value = uncertain ? "连接中断，执行结果尚不确定。可以检查原提交；这不会创建新的目标。" : "操作未完成，请刷新状态后重试。";
       if (!uncertain) { pending.value = null; persistPending(); }
     } finally { sending.value = false; }
   }
@@ -198,7 +232,7 @@ export function useAgentRuns() {
       key: crypto.randomUUID(), conversationId: selectedId.value,
       ...(selectedId.value ? {} : { createKey: crypto.randomUUID() }),
     };
-    if (draft.value.assetId) pending.value.body.ebsd_asset_id = draft.value.assetId;
+    pending.value.body.attachments = draft.value.attachment ? [draft.value.attachment] : [];
     persistPending();
     await sendPending();
   }
@@ -223,10 +257,30 @@ export function useAgentRuns() {
   }
 
   async function remove(id: string) {
-    if (busy.value) return;
+    if (sending.value || pending.value || uploading.value) return;
     await conversationsApi.deleteConversation?.(id);
     for (const key of Object.keys(drafts.value)) if (key.startsWith(`${id}:`)) delete drafts.value[key];
-    sessionStorage.setItem("materials-agent.ebsd-drafts.v1", JSON.stringify(drafts.value));
+    sessionStorage.setItem(DRAFT_KEY, JSON.stringify(drafts.value));
+    if (selectedId.value === id) await select(null);
+    await refreshConversations();
+  }
+
+  async function ensureConversation(key: string) {
+    if (selectedId.value) return selectedId.value;
+    const originalGeneration = generation;
+    const oldDraft = { ...draft.value };
+    const created = await conversationsApi.createConversation(undefined, key);
+    if (generation === originalGeneration) {
+      await select(created.data.conversation_id);
+      if (generation === originalGeneration + 1) saveDraft(oldDraft);
+    }
+    await refreshConversations();
+    return created.data.conversation_id;
+  }
+
+  async function deleted(id: string) {
+    for (const key of Object.keys(drafts.value)) if (key.startsWith(`${id}:`)) delete drafts.value[key];
+    sessionStorage.setItem(DRAFT_KEY, JSON.stringify(drafts.value));
     if (selectedId.value === id) await select(null);
     await refreshConversations();
   }
@@ -239,7 +293,7 @@ export function useAgentRuns() {
     timer = setInterval(() => { void refresh().catch(() => undefined); }, 3000);
   }
   onUnmounted(() => { if (timer) clearInterval(timer); generation++; });
-  return { conversations, selectedId, runs, loading, sending, completed, busy, error, pending, nextCursor, conversationCursor,
-    uploading, uploadError, canRetryUpload, draft, setDraftText, uploadEbsd, retryEbsdUpload, removeEbsd,
+  return { conversations, selectedId, runs, loading, sending, completed, busy, writeBlocked, error, pending, nextCursor, conversationCursor, ensureConversation, deleted,
+    uploading, uploadError, canRetryUpload, draft, setDraftText, uploadAttachment, checkUpload, removeAttachment,
     resumeTarget, initialize, select, refresh, refreshConversations, submit, sendPending, confirm, retry, remove };
 }

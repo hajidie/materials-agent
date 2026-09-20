@@ -1,0 +1,6 @@
+name: materialsagent-ml
+channels:
+  - defaults
+dependencies:
+  - python=3.11
+  - pip

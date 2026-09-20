@@ -96,12 +96,18 @@ class SQLAlchemyAgentStore:
     def __init__(self, session_factory):
         self.sessions = session_factory
 
+    @staticmethod
+    def _run(document):
+        if document.get("resource_protocol_version") != "resource-ref-v1":
+            raise AgentFailure("CONVERSATION_UPGRADE_REQUIRED")
+        return AgentRun.model_validate(document)
+
     def get(self, run_id: str, actor_id: str) -> AgentRun:
         with self.sessions() as session:
             row = session.get(AgentRunRow, run_id)
             if row is None or row.actor_id != actor_id:
                 raise AgentFailure("AGENT_RUN_NOT_FOUND")
-            return AgentRun.model_validate(row.document)
+            return self._run(row.document)
 
     def list(self, conversation_id: str, actor_id: str, *, limit: int = 20, before: str | None = None) -> list[AgentRun]:
         with self.sessions() as session:
@@ -116,37 +122,61 @@ class SQLAlchemyAgentStore:
                 from sqlalchemy import tuple_
                 query = query.where(tuple_(AgentRunRow.created_at, AgentRunRow.agent_run_id) < (boundary.created_at, before))
             rows = session.scalars(query.order_by(AgentRunRow.created_at.desc(), AgentRunRow.agent_run_id.desc()).limit(limit)).all()
-            return [AgentRun.model_validate(row.document) for row in rows]
+            return [self._run(row.document) for row in rows]
 
     def submit(self, conversation_id: str, actor_id: str, content: str, key: str, *,
                run_id: str | None = None, waiting_version: int | None = None,
                budget: RunBudget | None = None, retry_source: AgentRun | None = None,
-               retry_type: str | None = None, retry_invocation_id: str | None = None, ebsd_asset_id: str | None = None) -> tuple[AgentRun, bool]:
+               retry_type: str | None = None, retry_invocation_id: str | None = None, attachments: list[dict] | None = None) -> tuple[AgentRun, bool]:
+        from materialsagent.domain.models.attachment import Attachment
+        attachments = [Attachment.model_validate(a).model_dump() for a in (attachments or [])]
+        if len(attachments) > 1:
+            raise AgentFailure("ATTACHMENT_LIMIT_EXCEEDED")
+        ebsd_asset_id = next((a["attachment_id"] for a in attachments if a["kind"] == "ebsd_image"), None)
         digest = fingerprint([content, run_id, waiting_version, retry_source.agent_run_id if retry_source else None, retry_type, retry_invocation_id])
-        if ebsd_asset_id is not None:
-            digest = fingerprint([digest, ebsd_asset_id])
+        digest = fingerprint([digest, attachments])
         try:
             with self.sessions.begin() as session:
                 conversation = session.scalar(select(ConversationRow).where(ConversationRow.conversation_id == conversation_id).with_for_update())
                 if conversation is None or conversation.actor_id != actor_id:
                     raise AgentFailure("CONVERSATION_NOT_FOUND")
+                from .ml_resources import lock_conversation
+                lock_conversation(session, actor_id, conversation_id, writable=True)
                 existing = session.scalar(select(AgentSubmissionRow).where(AgentSubmissionRow.conversation_id == conversation_id, AgentSubmissionRow.idempotency_key == key))
                 if existing:
                     if existing.payload_hash != digest:
                         raise AgentConflictError("Idempotency payload differs.")
                     row = session.get(AgentRunRow, existing.agent_run_id)
-                    return AgentRun.model_validate(row.document), True
+                    return self._run(row.document), True
+                incompatible = session.scalar(select(MessageRow.message_id).where(
+                    MessageRow.conversation_id == conversation_id,
+                    MessageRow.structured_content["contract"].astext.is_distinct_from("chat-v1")).limit(1))
+                if incompatible:
+                    raise AgentFailure("CONVERSATION_UPGRADE_REQUIRED")
+                incompatible_run = session.scalar(select(AgentRunRow.agent_run_id).where(
+                    AgentRunRow.conversation_id == conversation_id,
+                    AgentRunRow.document["resource_protocol_version"].as_string().is_distinct_from("resource-ref-v1")).limit(1))
+                if incompatible_run:
+                    raise AgentFailure("CONVERSATION_UPGRADE_REQUIRED")
                 if ebsd_asset_id is not None:
                     from materialsagent.infrastructure.db.asset import AssetRow
                     asset = session.get(AssetRow, ebsd_asset_id)
                     if (asset is None or asset.actor_id != actor_id or asset.conversation_id != conversation_id
                             or asset.asset_type != "ebsd_image" or asset.current_status != "AVAILABLE"):
                         raise AgentFailure("EBSD_ASSET_NOT_FOUND")
+                for attachment in attachments:
+                    if attachment["kind"] == "dataset":
+                        from .ml_resources import references
+                        ref = session.execute(select(references).where(references.c.id == attachment["attachment_id"],
+                            references.c.actor_id == actor_id, references.c.conversation_id == conversation_id,
+                            references.c.resource_type == "dataset")).first()
+                        if ref is None:
+                            raise AgentFailure("ATTACHMENT_NOT_FOUND")
                 if run_id:
                     row = session.get(AgentRunRow, run_id)
                     if row is None or row.actor_id != actor_id or row.conversation_id != conversation_id:
                         raise AgentFailure("AGENT_RUN_NOT_FOUND")
-                    run = AgentRun.model_validate(row.document)
+                    run = self._run(row.document)
                     if run.status != "WAITING_FOR_USER" or run.waiting_version != waiting_version:
                         raise AgentConflictError("Run is not waiting at this version.")
                     if run.accepted_waiting_version == waiting_version:
@@ -154,36 +184,37 @@ class SQLAlchemyAgentStore:
                             return run, True
                         raise AgentConflictError("A response already owns this waiting version.")
                     # Serialize input acceptance with the message, before request-hosted advancement.
-                    if ebsd_asset_id is not None:
-                        run.ebsd_asset_id = ebsd_asset_id
+                    if attachments:
+                        run.attachments = attachments
                     run.accepted_waiting_version = waiting_version
                     run.accepted_input_hash = digest
                     run.version += 1
                     row.version = run.version
                     row.document = run.model_dump(mode="json")
                 message_id = identifier()
+                if run_id:
+                    run.user_messages.append({"message_id": message_id, "text": content, "attachments": attachments})
+                    row.document = run.model_dump(mode="json")
                 session.add(MessageRow(message_id=message_id, conversation_id=conversation_id, actor_id=actor_id,
                     task_id=None, request_id=identifier(), role="USER", generation_source="USER", content_text=content,
-                    structured_content={"ebsd_asset_id": ebsd_asset_id} if ebsd_asset_id else None, llm_call_id=None, created_at=now()))
+                    structured_content={"contract": "chat-v1", "attachments": attachments}, llm_call_id=None, created_at=now()))
                 session.flush()
                 if not run_id:
                     if conversation.title is None:
                         conversation.title = content.strip().splitlines()[0][:60]
-                    history = session.scalars(select(AgentRunRow).where(AgentRunRow.conversation_id == conversation_id,
-                        AgentRunRow.actor_id == actor_id, AgentRunRow.status == "SUCCEEDED")
-                        .order_by(AgentRunRow.created_at.desc(), AgentRunRow.agent_run_id.desc()).limit(10)).all()
-                    context = []
-                    for item in reversed(history):
-                        previous = AgentRun.model_validate(item.document)
-                        if previous.final_answer:
-                            context.extend([{"role": "user", "content": previous.goal,
-                                "additional_inputs": previous.user_inputs, "agent_run_id": previous.agent_run_id},
-                                {"role": "assistant", "content": previous.final_answer.text,
-                                "agent_run_id": previous.agent_run_id}])
+                    history = session.scalars(select(MessageRow).where(MessageRow.conversation_id == conversation_id,
+                        MessageRow.actor_id == actor_id, MessageRow.message_id != message_id)
+                        .order_by(MessageRow.created_at.desc(), MessageRow.message_id.desc()).limit(20)).all()
+                    context = [{"role": item.role.lower(), "content": item.content_text,
+                        "additional_inputs": [{"name": attachment.get("name", "已上传文件"),
+                            "type": attachment.get("kind", "file")}
+                            for attachment in (item.structured_content or {}).get("attachments", [])
+                            if isinstance(attachment, dict)]} for item in reversed(history)]
                     run = AgentRun(conversation_id=conversation_id, actor_id=actor_id, source_message_id=message_id,
-                        goal=content, budget=budget or RunBudget(), context=context, ebsd_asset_id=ebsd_asset_id)
+                        goal=content, budget=budget or RunBudget(), context=context, attachments=attachments,
+                        user_messages=[{"message_id": message_id, "text": content, "attachments": attachments}])
                     if retry_source:
-                        run.ebsd_asset_id = retry_source.ebsd_asset_id
+                        run.attachments = list(retry_source.attachments)
                         run.user_inputs = list(retry_source.user_inputs)
                         run.source_agent_run_id = retry_source.agent_run_id
                         run.retry_type = retry_type
@@ -224,7 +255,10 @@ class SQLAlchemyAgentStore:
             row = session.get(AgentRunRow, run.agent_run_id)
             if row is None or row.actor_id != run.actor_id or row.version != version:
                 raise AgentConflictError("AgentRun version changed.")
-            previous = AgentRun.model_validate(row.document)
+            previous = self._run(row.document)
+            if run.status in ("PENDING", "RUNNING", "WAITING_FOR_CONFIRMATION"):
+                from .ml_resources import lock_conversation
+                lock_conversation(session, run.actor_id, run.conversation_id, writable=True)
             if previous.status == "RUNNING" and previous.claim != run.claim:
                 raise AgentConflictError("AgentRun execution claim changed.")
             run.validate_transition(previous)
@@ -267,19 +301,21 @@ class SQLAlchemyAgentStore:
                     session.add(AgentModelCallRow(call_id=call.call_id, agent_run_id=run.agent_run_id,
                         step_id=call.step_id, document=call.model_dump(mode="json")))
             if run.final_answer and previous.final_answer is None:
+                from materialsagent.application.chat_artifacts import run_artifacts
                 answer = run.final_answer
                 session.add(FinalAnswerRow(answer_id=answer.answer_id, agent_run_id=run.agent_run_id,
                     step_id=answer.step_id, document=answer.model_dump(mode="json")))
                 session.add(MessageRow(message_id=answer.answer_id, conversation_id=run.conversation_id, actor_id=run.actor_id,
                     task_id=None, request_id=run.agent_run_id, role="ASSISTANT", generation_source="AGENT",
-                    content_text=answer.text, structured_content={"agent_run_id": run.agent_run_id}, llm_call_id=None, created_at=answer.created_at))
+                    content_text=answer.text, structured_content={"contract": "chat-v1", "agent_run_id": run.agent_run_id,
+                        "artifacts": run_artifacts(session, run)}, llm_call_id=None, created_at=answer.created_at))
             owner.updated_at = max(owner.updated_at, run.updated_at)
         run.version = version + 1
 
     def recover_interrupted(self, process_id: str, *, repair=None) -> None:
         with self.sessions() as session:
             rows = session.scalars(select(AgentRunRow).where(AgentRunRow.status.in_(["PENDING", "RUNNING"]))).all()
-            runs = [AgentRun.model_validate(row.document) for row in rows]
+            runs = [self._run(row.document) for row in rows]
         for run in runs:
             if run.process_id != process_id:
                 if run.status == "RUNNING":

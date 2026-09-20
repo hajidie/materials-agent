@@ -38,7 +38,7 @@ timeout_seconds = 60
 temperature = 0.0
 max_tokens = 1024
 reasoning_mode = "disabled"
-prompt_limit_tokens = 16384
+prompt_limit_tokens =50000
 history_token_budget = 8192
 safety_margin_tokens = 1024
 

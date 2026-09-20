@@ -19,6 +19,8 @@ from materialsagent.domain.ports.tool_registry import (
     ToolRef,
     ToolExecutionProfile,
     PresentationMode,
+    ResourceProvider,
+    ResourceType,
     ToolStatus,
 )
 
@@ -167,6 +169,32 @@ class ToolRegistry:
             registration.binding.context_projector
         ):
             raise InvalidToolRegistrationError("Tool context projector is invalid.")
+        input_properties = definition.input_schema.get("properties", {})
+        input_required = set(definition.input_schema.get("required", ()))
+        if not isinstance(input_properties, Mapping) or not isinstance(
+            definition.input_schema.get("required", ()), (list, tuple)
+        ):
+            raise InvalidToolRegistrationError("Tool input schema is invalid.")
+        parameter_names = {item.model_argument for item in definition.resource_parameters}
+        execution_names = {item.execution_argument for item in definition.resource_parameters}
+        if (len(parameter_names) != len(definition.resource_parameters)
+                or len(execution_names) != len(definition.resource_parameters)):
+            raise InvalidToolRegistrationError("Duplicate resource parameter declaration.")
+        if parameter_names & execution_names:
+            raise InvalidToolRegistrationError("Resource model and execution arguments must be distinct.")
+        if parameter_names & (set(input_properties) - execution_names):
+            raise InvalidToolRegistrationError("Resource model argument collides with an execution field.")
+        for item in definition.resource_parameters:
+            if not _TOOL_ID.fullmatch(item.model_argument) or not _TOOL_ID.fullmatch(item.execution_argument):
+                raise InvalidToolRegistrationError("Resource parameter name is invalid.")
+            if item.execution_argument not in input_properties:
+                raise InvalidToolRegistrationError("Resource execution argument is missing from the input schema.")
+            if item.required != (item.execution_argument in input_required):
+                raise InvalidToolRegistrationError("Resource parameter requiredness does not match the input schema.")
+            if item.provider is ResourceProvider.ASSET and item.expected_resource_type is not ResourceType.EBSD_IMAGE:
+                raise InvalidToolRegistrationError("Asset resource type is unsupported.")
+            if item.provider is ResourceProvider.ML_RESOURCE and item.expected_resource_type is ResourceType.EBSD_IMAGE:
+                raise InvalidToolRegistrationError("ML resource type is unsupported.")
         try:
             input_schema_bytes = _canonical_schema_bytes(definition.input_schema)
             proposal_schema_bytes = _canonical_schema_bytes(definition.proposal_schema or {})
@@ -177,7 +205,20 @@ class ToolRegistry:
                 raise ValueError("Tool proposal schema exceeds the safe size limit.")
             if len(output_schema_bytes) > MAX_SCHEMA_BYTES:
                 raise ValueError("Tool output schema exceeds the safe size limit.")
-            schema_hash = hashlib.sha256(input_schema_bytes).hexdigest()
+            hash_input = input_schema_bytes
+            if definition.resource_parameters:
+                resource_contract = [
+                    {
+                        "model_argument": item.model_argument,
+                        "execution_argument": item.execution_argument,
+                        "expected_resource_type": item.expected_resource_type.value,
+                        "provider": item.provider.value,
+                        "required": item.required,
+                    }
+                    for item in definition.resource_parameters
+                ]
+                hash_input += _canonical_schema_bytes({"resource_parameters": resource_contract})
+            schema_hash = hashlib.sha256(hash_input).hexdigest()
         except (TypeError, ValueError):
             raise InvalidToolRegistrationError("Tool input schema is invalid.") from None
         return replace(

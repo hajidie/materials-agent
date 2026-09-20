@@ -7,6 +7,7 @@ from materialsagent.domain.ports.tool_registry import (
     ToolDefinition, ToolExecutionBinding, RegisteredTool, ToolStatus, ToolExecutionProfile,
     ExecutionMode, ToolExecutionPolicy, ExecutionPolicy, PresentationMode,
     ReadyNormalization, NeedsInputNormalization, InvalidNormalization,
+    ResourceParameterSpec, ResourceProvider, ResourceType,
 )
 
 TOOL_ID = "ebsd_yield_strength_predictor"
@@ -93,6 +94,9 @@ def build_ebsd_tool(client=None):
         supported_asset_types=metadata.supported_asset_types, limitations=metadata.limitations,
         execution_profile=ToolExecutionProfile.MANAGED, execution_mode=ExecutionMode.SYNC,
         executor_id="managed_runtime", tool_execution_policy=ToolExecutionPolicy(lifecycle_policy=ExecutionPolicy.ANY_TASK),
-        presentation_mode=PresentationMode.CUSTOM, presenter_id="ebsd_result", context_projection_version="ebsd-result-v1")
+        presentation_mode=PresentationMode.CUSTOM, presenter_id="ebsd_result", context_projection_version="ebsd-result-v1",
+        resource_parameters=(
+            ResourceParameterSpec("image_reference", "ebsd_asset_id", ResourceType.EBSD_IMAGE, ResourceProvider.ASSET),
+        ))
     return RegisteredTool(definition, ToolExecutionBinding(execution_target=tool, normalizer=normalize,
         context_projector=project, presenter=present, health_probe=tool.health_check))

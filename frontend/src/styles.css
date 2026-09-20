@@ -18,6 +18,7 @@
 .agent-trace { margin-top: 1rem; color: #465e50; font-size: .875rem; }
 .agent-trace summary { cursor: pointer; padding: .5rem 0; }
 .agent-run__actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+.conversation-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
 .composer textarea { resize: none; }
 
 *,
@@ -76,11 +77,13 @@ textarea:focus-visible {
 
 .conversation-list {
   display: grid;
+  flex-shrink: 0;
   gap: 0.5rem;
 }
 
 .conversation-list__row {
   display: grid;
+  height: 3rem;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   border: 1px solid transparent;
@@ -90,9 +93,11 @@ textarea:focus-visible {
 
 .conversation-list__item {
   display: grid;
-  gap: 0.35rem;
+  align-items: center;
+  min-width: 0;
+  height: 100%;
   width: 100%;
-  padding: 0.85rem;
+  padding: 0 0.85rem;
   border: 0;
   color: inherit;
   background: transparent;
@@ -125,15 +130,49 @@ textarea:focus-visible {
   background: #f9e8e4;
 }
 
-.conversation-list__item span {
+.conversation-list__item strong {
   overflow: hidden;
-  color: #607169;
-  font-size: 0.85rem;
+  font-size: 0.95rem;
+  font-weight: 500;
+  line-height: 1.5;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .app-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 100dvh;
+}
+
+.conversation-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 1rem;
+  padding: 1.25rem clamp(1rem, 4vw, 3rem);
+}
+
+.conversation-header h2 {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.app-main > .composer {
+  margin-top: auto;
+}
+
+.app-main--empty > .composer {
+  margin-block: auto;
+  border-top: 0;
+  background: transparent;
+}
+
+.ebsd-upload {
+  grid-column: 1;
   min-width: 0;
 }
 
@@ -484,9 +523,60 @@ textarea:focus-visible {
 
 .composer__form {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.5rem 0.75rem;
 }
+
+.composer__box {
+  min-width: 0;
+  padding: 0.75rem;
+  border: 1px solid #aebeb5;
+  border-radius: 1.25rem;
+  background: #fff;
+  box-shadow: 0 0.4rem 1.4rem rgb(22 47 36 / 5%);
+}
+
+.composer__toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.composer__add, .composer__remove {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 2.75rem;
+  height: 2.75rem;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  color: #294b3c;
+  background: transparent;
+  font-size: 1.75rem;
+  cursor: pointer;
+}
+
+.composer__add:hover { background: #edf4ef; }
+.composer__remove:hover { background: #256b4d; }
+.composer__add:disabled, .composer__remove:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.composer__attachments { margin-bottom: 0.75rem; }
+.composer__attachment { position: relative; width: 10rem; max-width: 100%; min-height: 10rem; }
+.composer__remove {
+  position: absolute;
+  top: -0.35rem;
+  right: -0.35rem;
+  width: 2rem;
+  height: 2rem;
+  color: #fff;
+  background: #1b2923;
+  font-size: 1.35rem;
+}
+.asset-gallery--preview { padding: 0; border: 0; }
+.asset-gallery--preview .asset-card__image { aspect-ratio: 1; object-fit: contain; }
+.asset-gallery--preview .image-placeholder { margin: 0; padding: 0.5rem; }
 
 .composer__form label,
 .composer__form textarea,
@@ -499,16 +589,14 @@ textarea:focus-visible {
   width: 100%;
   resize: none;
   padding: 0.8rem;
-  border: 1px solid #aebeb5;
+  border: 0;
   border-radius: 0.7rem;
   color: inherit;
   background: #fff;
 }
 
 .composer__form button[type="submit"] {
-  align-self: end;
-  grid-column: 2;
-  grid-row: 2;
+  min-width: 7rem;
 }
 
 .composer__hint,
@@ -668,6 +756,10 @@ textarea:focus-visible {
     min-height: 58vh;
   }
 
+  .app-main {
+    min-height: 58dvh;
+  }
+
   .message {
     max-width: 94%;
   }
@@ -688,3 +780,34 @@ textarea:focus-visible {
 }
 
 .ebsd-upload input[type="file"] { max-width: 100%; }
+/* The conversation is the workspace. Artifact details are message-owned. */
+.chat-turn { display: grid; gap: 1.25rem; padding: 1.5rem 0; border-bottom: 1px solid var(--border-color, #e4e9e6); }
+.chat-user { justify-self: end; max-width: min(85%, 44rem); padding: .85rem 1.1rem; border-radius: 1.1rem; background: #edf2ef; white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-user p { margin: 0 0 .5rem; }
+.chat-assistant { line-height: 1.75; min-width: 0; overflow-wrap: anywhere; }
+.chat-result { padding: 1.5rem 0; border-bottom: 1px solid #e4e9e6; }
+.chat-welcome { text-align: center; margin: auto 0 2.5rem; color: #47594e; }
+.chat-welcome h1 { font-size: clamp(1.5rem, 3vw, 2rem); font-weight: 550; }
+.chat-confirmation { padding: 1rem; background: #f4f7f5; border: 1px solid #dce5df; border-radius: .8rem; }
+.chat-confirmation > button + button { margin-left: .5rem; }
+.message-attachments { display: flex; flex-wrap: wrap; gap: .5rem; }
+.attachment-card { display: inline-flex; gap: 1rem; align-items: center; text-align: left; padding: .75rem 1rem; margin: .5rem .5rem .5rem 0; border: 1px solid #d5dfd8; border-radius: .7rem; background: #fff; color: #263d2e; cursor: pointer; max-width: 100%; overflow-wrap: anywhere; }
+.attachment-card span { color: #576d60; font-size: .82rem; white-space: nowrap; }
+.attachment-card:focus-visible, .artifact-viewer button:focus-visible { outline: 3px solid #78a68a; outline-offset: 3px; }
+.attachment-name { display: block; padding: .75rem 2rem .75rem .75rem; max-width: 20rem; overflow-wrap: anywhere; }
+.artifact-viewer { width: min(48rem, calc(100vw - 2rem)); max-height: calc(100dvh - 3rem); overflow: auto; padding: 1.5rem; border: 1px solid #d5dfd8; border-radius: 1rem; color: #243c2d; background: #fff; }
+.artifact-viewer::backdrop { background: rgb(20 35 26 / 40%); }
+.artifact-viewer > header { display: flex; justify-content: space-between; align-items: start; gap: 1rem; margin-bottom: 1rem; }
+.artifact-viewer h2 { font-size: 1.15rem; overflow-wrap: anywhere; margin: .5rem 0; }
+.artifact-viewer img { display: block; width: 100%; max-height: 65dvh; object-fit: contain; }
+.artifact-viewer footer { margin-top: 1rem; }
+.artifact-facts { display: grid; grid-template-columns: minmax(5rem, 1fr) 3fr; gap: .4rem 1rem; }
+.artifact-facts dt { color: #617167; }
+.artifact-facts dd { margin: 0; overflow-wrap: anywhere; }
+.artifact-metrics { display: flex; flex-wrap: wrap; gap: 1rem 2rem; }
+.artifact-metrics dt { color: #617167; font-size: .85rem; }
+.artifact-metrics dd { margin: .2rem 0; font-size: 1.35rem; font-variant-numeric: tabular-nums; }
+.artifact-table-wrap { max-width: 100%; overflow: auto; }
+.artifact-table-wrap table { width: 100%; border-collapse: collapse; text-align: left; }
+.artifact-table-wrap th, .artifact-table-wrap td { padding: .5rem; border-bottom: 1px solid #e4e9e6; }
+@media (max-width: 600px) { .chat-user { max-width: 94%; } .artifact-viewer { padding: 1rem; } }

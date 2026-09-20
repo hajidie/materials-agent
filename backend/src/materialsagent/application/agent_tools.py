@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import timezone
 from typing import Any
+from time import monotonic
 
 from materialsagent.application.context import ActorContext
 from materialsagent.application.errors import ApplicationConflictError, ApplicationError, from_persistence_error
@@ -337,6 +338,7 @@ class ToolArgResolver:
     """
     def __init__(self, registry, uow_factory, clock):
         self.registry, self.uow_factory, self.clock = registry, uow_factory, clock
+        self.resource_context = None
 
     def resolve(self, run, tool_name, arguments):
         registration = self.registry.resolve(tool_name)
@@ -347,13 +349,105 @@ class ToolArgResolver:
             bound_ref=registration.ref if previous else None)
         merged = {**(previous.arguments if previous else {}), **arguments}
         properties = plain(registration.definition.proposal_schema).get("properties", {})
+        from materialsagent.domain.models.semantic_units import ANNOTATION_TOOLS
+        if tool_name in ANNOTATION_TOOLS:
+            properties = {**properties, "semantic_annotations": {}}
         if not set(arguments) <= set(properties):
             raise AgentFailure("TOOL_ARGUMENT_FIELD_INVALID")
         issues = {}
         normalized = dict(merged)
+        annotations = normalized.pop("semantic_annotations", [])
+        if previous and tool_name == "materials_unit_conversion" and isinstance(annotations, list):
+            # Removing the annotation must not turn its inferred numeric unit
+            # into an unqualified execution fact. Keep the original provenance
+            # until the ordinary argument clarification resolves that unit.
+            keys = {(a.get("resource_parameter"), a.get("column")) for a in annotations if isinstance(a, dict)}
+            annotations = [*annotations, *(a for a in previous.arguments.get("semantic_annotations", [])
+                if (a["resource_parameter"], a["column"]) not in keys)]
+            if annotations:
+                merged["semantic_annotations"] = annotations
+        bindings = {}
+        resource_tool = bool(registration.resource_parameters)
+        if resource_tool and self.resource_context is None:
+            raise AgentFailure("RESOURCE_CONTEXT_DISABLED")
+        retry = run.retry_execution
+        if retry and (retry.tool_name != tool_name or retry.schema_hash != registration.schema_hash):
+            raise AgentFailure("TOOL_RETRY_SOURCE_MISMATCH")
+        if resource_tool and retry:
+            resource_fields = {item.execution_argument for item in registration.resource_parameters}
+            required_fields = {item.execution_argument for item in registration.resource_parameters if item.required}
+            frozen_fields = set(retry.resource_bindings)
+            if (set(arguments) & resource_fields or not required_fields <= frozen_fields
+                    or not frozen_fields <= resource_fields):
+                raise AgentFailure("TOOL_RETRY_ARGUMENT_MISMATCH")
+            bindings = retry.resource_bindings
+            for field, binding in bindings.items():
+                self.resource_context.verify(run, binding)
+                normalized[field] = binding.execution_value
+        elif resource_tool:
+            normalized, resource_issues, bindings = self.resource_context.resolve(
+                run, registration, normalized, previous
+            )
+            issues.update(resource_issues)
+        from materialsagent.application.unit_resolution import UnitResolutionPolicy
+        metadata_cache = {}
+        def unit_metadata(binding):
+            key = binding.platform_resource_id
+            if key not in metadata_cache:
+                from materialsagent.application.ml_resource_context import reads
+                with reads(min(10, run.budget.max_active_seconds - run.active_seconds)):
+                    metadata_cache[key] = self.resource_context.resources.resource(run.actor_id, run.conversation_id, key)
+            return metadata_cache[key]
+        confirmed_units = {}
+        if previous and tool_name == "materials_unit_conversion":
+            # A reply to the unit question is parsed by the existing argument
+            # model. Only the explicit from/to-unit delta can confirm a numeric
+            # unit, never an Invocation approval or a model annotation flag.
+            answering_units = bool(run.waiting and "semantic_annotations" in run.waiting.fields and run.user_inputs)
+            for item in previous.unit_annotations:
+                field = item["resource_parameter"]
+                if answering_units and field in arguments:
+                    confirmed_units[field] = arguments[field]
+                elif item["provenance"] == "confirmed" and normalized.get(field) == item["unit"]:
+                    confirmed_units[field] = item["unit"]
+        if previous and resource_tool:
+            # A confirmed unit is a trusted fact about one bound resource field.
+            # Later model proposals may restate an inference, but cannot demote
+            # that fact while the underlying binding identity is unchanged.
+            def binding_identity(binding):
+                return (binding.provider, binding.resource_type, binding.platform_resource_id,
+                        binding.execution_value, binding.identity_digest, binding.content_digest)
+
+            old_bindings = {value.model_argument: value for value in previous.resource_bindings.values()}
+            current_bindings = {value.model_argument: value for value in bindings.values()}
+            for item in previous.unit_annotations:
+                if item.get("provenance") != "confirmed":
+                    continue
+                parameter = item.get("resource_parameter")
+                old_binding = old_bindings.get(parameter)
+                current_binding = current_bindings.get(parameter)
+                if (old_binding is not None and current_binding is not None
+                        and binding_identity(old_binding) == binding_identity(current_binding)):
+                    confirmed_units[(parameter, item.get("column"))] = item.get("unit")
+        if previous and run.waiting and "semantic_annotations" in run.waiting.fields and run.user_inputs:
+            for item in annotations if isinstance(annotations, list) else ():
+                if not isinstance(item, dict):
+                    continue
+                key = (item.get("resource_parameter"), item.get("column"))
+                if any((old.get("resource_parameter"), old.get("column")) == key
+                       and old.get("requires_confirmation") for old in previous.unit_annotations):
+                    confirmed_units[key] = item.get("unit")
+        unit_annotations, unit_issues = UnitResolutionPolicy().annotations(tool_name, annotations, bindings,
+            metadata=unit_metadata, confirmed_units=confirmed_units)
+        if retry:
+            if annotations:
+                raise AgentFailure("TOOL_RETRY_ARGUMENT_MISMATCH")
+            unit_annotations = retry.unit_annotations
+        issues.update(unit_issues)
         normalizer = registration.binding.normalizer
         if normalizer:
-            value = normalizer(arguments, previous.normalized if previous else None)
+            value = normalizer({k: v for k, v in normalized.items() if k != "semantic_annotations"},
+                               previous.normalized if previous else None)
             normalized = plain(value.normalized_input)
             if isinstance(value, NeedsInputNormalization):
                 issues.update({field: "Missing" for field in value.missing_fields})
@@ -370,20 +464,23 @@ class ToolArgResolver:
         else:
             schema = plain(registration.definition.input_schema)
             for field in schema.get("required", []):
-                if field not in merged or merged[field] is None:
-                    issues[field] = "Missing"
+                if field not in normalized or normalized[field] is None:
+                    issues.setdefault(field, "Missing")
             for field, val in merged.items():
                 if isinstance(val, dict) and "candidates" in val:
                     issues[field] = "Ambiguous"
             if not issues:
                 try:
-                    normalized = plain(registration.binding.validator(merged))
+                    normalized = plain(registration.binding.validator(normalized))
                 except (TypeError, ValueError):
                     issues.update({field: "Invalid" for field in merged})
+        persisted_arguments = {key: value for key, value in merged.items()
+                               if key not in {item.execution_argument for item in registration.resource_parameters}}
         draft = ArgumentDraft(tool_name=tool_name, version=previous.version if previous else registration.version,
-            schema_hash=registration.schema_hash, arguments=merged, normalized=normalized, issues=issues,
+            unit_annotations=unit_annotations,
+            schema_hash=registration.schema_hash, arguments=persisted_arguments, normalized=normalized, issues=issues,
             task_id=previous.task_id if previous else None, revision_id=previous.revision_id if previous else None,
-            resolver_authoritative=True)
+            resolver_authoritative=True, resource_bindings=bindings)
         if registration.execution_profile is ToolExecutionProfile.MANAGED:
             if run.retry_execution:
                 with self.uow_factory() as uow:
@@ -439,18 +536,34 @@ class RegistryAgentGateway:
         self.registry, self.uow_factory = registry, uow_factory
         self.invocations, self.workflow, self.result_query = invocations, managed_workflow, result_query
         self.arg_resolver = ToolArgResolver(registry, uow_factory, invocations._clock)
+        self.resource_context = None
+        self.resource_registrar = None
 
     def catalog(self):
         result = []
         for entry in self.registry.routing_snapshot().entries:
             registration = self.registry.resolve(entry.tool_id)
+            if registration.resource_parameters and (
+                self.resource_context is None or not self.resource_context.supports(registration)
+            ):
+                continue
             result.append({"tool_name": entry.tool_id, "description": entry.description,
                 "schema": plain(entry.candidate_input_schema),
+                "resource_parameters": [{
+                    "model_argument": item.model_argument,
+                    "execution_argument": item.execution_argument,
+                    "expected_resource_type": item.expected_resource_type.value,
+                    "provider": item.provider.value,
+                    "required": item.required,
+                } for item in registration.resource_parameters],
                 "execution_profile": registration.execution_profile.value})
         return result
 
     def resolve(self, run, tool_name, arguments):
-        return self.arg_resolver.resolve(run, tool_name, arguments)
+        try:
+            return self.arg_resolver.resolve(run, tool_name, arguments)
+        except ApplicationError as error:
+            raise AgentFailure(error.code) from None
 
     def prepare(self, run, record):
         if run.tool_execution_disabled:
@@ -496,10 +609,30 @@ class RegistryAgentGateway:
         return record
 
     def execute(self, run, record, timeout):
+        deadline = monotonic() + timeout
         if run.tool_execution_disabled:
             raise AgentFailure("TOOL_EXECUTION_DISABLED")
         actor = ActorContext(actor_id=run.actor_id, user_id=None)
-        with tool_deadline(timeout), execution_owner(run.agent_run_id, run.version, run.claim):
+        try:
+            if self.resource_context:
+                self.resource_context.dispatch(run, record, timeout)
+            elif record.resource_bindings:
+                raise AgentFailure("ML_RESOURCE_CONTEXT_DISABLED")
+        except (ApplicationError, AgentFailure) as error:
+            # No remote dispatch has occurred. Converge the original pending Invocation.
+            with self.uow_factory() as uow:
+                current = uow.invocation_runs.get_owned_for_update(record.invocation_run_id, run.actor_id)
+                if current and current.status is InvocationStatus.PENDING:
+                    failed = current.transition(InvocationStatus.FAILED, now=now(), completed_at=now(),
+                        error_code=error.code, safe_error_message="Bound ML resource could not be verified.")
+                    if uow.invocation_runs.update(failed, expected_status=current.status) is None:
+                        raise AgentFailure("ML_RESOURCE_VERIFICATION_CONFLICT")
+                    uow.commit()
+            observation = self.repair(run, record)
+            if observation is None:
+                raise AgentFailure("ML_RESOURCE_VERIFICATION_FAILED") from None
+            return observation
+        with tool_deadline(max(.001, deadline - monotonic())), execution_owner(run.agent_run_id, run.version, run.claim):
             registration = self.registry.resolve(record.tool_name)
             if registration.execution_profile is ToolExecutionProfile.MANAGED:
                 self.invocations._drive_managed(actor, record.invocation_run_id, workflow_service=self.workflow,
@@ -509,6 +642,8 @@ class RegistryAgentGateway:
         observation = self.repair(run, record)
         if observation is None:
             raise AgentFailure("OBSERVATION_INCONSISTENT")
+        if self.resource_registrar:
+            self.resource_registrar.after_result(run, record, max(0, deadline - monotonic()))
         return observation
 
     def confirm(self, run, record, approved):
@@ -521,7 +656,8 @@ class RegistryAgentGateway:
 
     def repair(self, run, record):
         def tool_observation(**values):
-            return Observation(observation_id=fingerprint([run.agent_run_id, record.action_id, record.invocation_run_id]), **values)
+            return Observation(observation_id=fingerprint([run.agent_run_id, record.action_id, record.invocation_run_id]),
+                unit_annotations=record.unit_annotations, **values)
         actor = ActorContext(actor_id=run.actor_id, user_id=None)
         with self.uow_factory() as uow:
             invocation = uow.invocation_runs.get_owned(record.invocation_run_id, run.actor_id)
@@ -535,7 +671,9 @@ class RegistryAgentGateway:
                 if invocation.status in {InvocationStatus.FAILED, InvocationStatus.OUTCOME_UNKNOWN}:
                     return tool_observation(step_id=record.action_id, kind="TOOL_RESULT", status="FAILED", tool_name=record.tool_name,
                         invocation_run_id=invocation.invocation_run_id, error={"code": invocation.error_code,
-                        "retryable": invocation.status is InvocationStatus.FAILED})
+                        "retryable": invocation.status is InvocationStatus.FAILED and invocation.executor_id != "mcp",
+                        **({"outcome": "UNKNOWN", "message": invocation.safe_error_message}
+                           if invocation.status is InvocationStatus.OUTCOME_UNKNOWN and invocation.executor_id == "mcp" else {})})
                 return None
             task = uow.tasks.get_owned(invocation.task_id, run.actor_id)
             result = uow.tool_results.get_owned(task.selected_result_id, run.actor_id) if task and task.selected_result_id else None

@@ -113,6 +113,7 @@ class AgentStep(Contract):
 
 
 class Observation(Contract):
+    unit_annotations: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
     observation_id: str = Field(default_factory=identifier)
     step_id: str
     kind: Literal["TOOL_RESULT", "ARGUMENT_RESOLUTION"]
@@ -140,7 +141,30 @@ class Observation(Contract):
         return projection
 
 
+class ResourceBinding(Contract):
+    version: Literal["resource-binding-v1"] = "resource-binding-v1"
+    provider: Literal["ml_resource", "asset"]
+    resource_type: Literal["dataset", "training_run", "model", "prediction", "ebsd_image"]
+    model_argument: str = Field(min_length=1, max_length=128)
+    execution_argument: str = Field(min_length=1, max_length=128)
+    platform_resource_id: str = Field(min_length=1, max_length=128)
+    execution_value: str = Field(min_length=1, max_length=512)
+    identity_digest: str | None = Field(default=None, min_length=1, max_length=256)
+    content_digest: str | None = Field(default=None, min_length=1, max_length=256)
+    safe_description: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def provider_identity(self):
+        if self.provider == "ml_resource" and (not self.identity_digest or self.content_digest is not None):
+            raise ValueError("ML resource binding requires only an identity digest.")
+        if self.provider == "asset" and (not self.content_digest or self.identity_digest is not None):
+            raise ValueError("Asset binding requires only a content digest.")
+        return self
+
+
 class ArgumentDraft(Contract):
+    unit_annotations: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
+    resource_bindings: dict[str, ResourceBinding] = Field(default_factory=dict)
     tool_name: str
     version: str
     schema_hash: str
@@ -153,6 +177,8 @@ class ArgumentDraft(Contract):
 
 
 class ExecutionRecord(Contract):
+    unit_annotations: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
+    resource_bindings: dict[str, ResourceBinding] = Field(default_factory=dict)
     action_id: str
     tool_name: str
     version: str
@@ -182,6 +208,7 @@ class FinalAnswer(Contract):
 
 
 class AgentRun(Contract):
+    resource_protocol_version: Literal["resource-ref-v1"] = "resource-ref-v1"
     agent_run_id: str = Field(default_factory=identifier)
     conversation_id: str
     actor_id: str
@@ -206,7 +233,9 @@ class AgentRun(Contract):
     executions: list[ExecutionRecord] = Field(default_factory=list)
     calls: list[ModelCall] = Field(default_factory=list)
     user_inputs: list[str] = Field(default_factory=list)
-    ebsd_asset_id: str | None = None
+    attachments: list[dict[str, Any]] = Field(default_factory=list, max_length=1)
+    result_attachments: list[dict[str, Any]] = Field(default_factory=list)
+    user_messages: list[dict[str, Any]] = Field(default_factory=list)
     context: list[dict[str, Any]] = Field(default_factory=list)
     final_answer: FinalAnswer | None = None
     error_code: str | None = None

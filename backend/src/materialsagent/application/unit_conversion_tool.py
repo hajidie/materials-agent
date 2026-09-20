@@ -15,20 +15,11 @@ from materialsagent.domain.ports.tool_registry import (
     ToolExecutionProfile,
     ToolStatus,
 )
+from materialsagent.domain.models.semantic_units import UNIT_DIMENSIONS
 
 
 UNIT_CONVERSION_TOOL_ID = "materials_unit_conversion"
-_DIMENSION = {
-    "°C": "temperature",
-    "K": "temperature",
-    "°F": "temperature",
-    "s": "time",
-    "min": "time",
-    "h": "time",
-    "Pa": "pressure",
-    "MPa": "pressure",
-    "GPa": "pressure",
-}
+_DIMENSION = UNIT_DIMENSIONS
 
 
 def _validate(arguments: Mapping[str, object]) -> Mapping[str, object]:

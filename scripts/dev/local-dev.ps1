@@ -9,6 +9,7 @@ param(
     [string]$Llm = 'Mock',
     [string]$BackendPython,
     [string]$RuntimePython,
+    [string]$MaterialsMlPython,
     [string]$EbsdModelRoot = $env:EBSD_MODEL_ROOT,
     [ValidateRange(10, 900)]
     [int]$ReadyTimeoutSeconds = 300,
@@ -31,6 +32,8 @@ $ComposeArguments = @(
 )
 $ExpectedRoles = @{
     runtime = @{ port = 8100 }
+    ml_service = @{ port = 8200; marker = 'materials_ml_service.api' }
+    ml_worker = @{ port = 0; marker = 'materials_ml_service.worker' }
     backend = @{ port = 8000; marker = 'materialsagent.main:create_app' }
     frontend = @{ port = 3000; marker = '--strictPort' }
 }
@@ -40,17 +43,30 @@ $ForbiddenStateNames = @(
     'ZTA35G_RUNTIME_TOKEN',
     'POSTGRES_PASSWORD',
     'MINIO_SECRET_KEY',
+    'ML_DATABASE_URL',
+    'ML_MINIO_SECRET_KEY',
+    'ML_RESOURCE_TOKEN',
+    'ML_WORKER_TOKEN',
+    'ML_MCP_TOKEN',
     'TIMELINE_CURSOR_SIGNING_KEY'
 )
 
 function Get-RequiredPorts {
-    return @(5432, 9000, 9001, 8100, 8000, 3000)
+    param(
+        [bool]$MaterialsMlEnabled = $false
+    )
+
+    $ports = @(5432, 9000, 9001, 8100, 8000, 3000)
+    if ($MaterialsMlEnabled) {
+        $ports += 8200
+    }
+    return $ports
 }
 
 function Get-ExpectedCommandMarker {
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateSet('runtime', 'backend', 'frontend')]
+        [ValidateSet('runtime', 'ml_service', 'ml_worker', 'backend', 'frontend')]
         [string]$Role,
         [Parameter(Mandatory = $true)]
         [ValidateSet('mock', 'real')]
@@ -66,6 +82,66 @@ function Get-ExpectedCommandMarker {
         })
     }
     return [string]$ExpectedRoles[$Role].marker
+}
+
+function Get-ConfiguredMaterialsMlEnabled {
+    param(
+        [string]$Path = (Join-Path $RepoRoot '.env')
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $false
+    }
+    $featureNames = @(
+        'ENABLE_DEV_MATERIALS_ML_TOOLS',
+        'ENABLE_MATERIALS_ML_RESOURCES',
+        'ENABLE_MATERIALS_ML_RESOURCE_CONTEXT'
+    )
+    $values = @{}
+    foreach ($name in $featureNames) {
+        $values[$name] = $false
+    }
+    $seen = @{}
+    foreach ($line in Get-Content -LiteralPath $Path -Encoding utf8) {
+        $trimmed = $line.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed.StartsWith('#')) {
+            continue
+        }
+        $separator = $trimmed.IndexOf('=')
+        if ($separator -le 0) {
+            continue
+        }
+        $name = $trimmed.Substring(0, $separator).Trim()
+        if ($featureNames -notcontains $name) {
+            continue
+        }
+        if ($seen.ContainsKey($name)) {
+            throw "LOCAL_DEV_CONFIGURATION_INVALID duplicate=$name source=root_dotenv"
+        }
+        $seen[$name] = $true
+        $value = $trimmed.Substring($separator + 1).Trim()
+        if ($value -notmatch '^(?i:true|false)$') {
+            throw "LOCAL_DEV_CONFIGURATION_INVALID name=$name source=root_dotenv"
+        }
+        $values[$name] = $value.Equals('true', [StringComparison]::OrdinalIgnoreCase)
+    }
+    foreach ($name in $featureNames) {
+        $environmentValue = [Environment]::GetEnvironmentVariable(
+            $name,
+            [EnvironmentVariableTarget]::Process
+        )
+        if ($null -eq $environmentValue) {
+            continue
+        }
+        if ($environmentValue -notmatch '^(?i:true|false)$') {
+            throw "LOCAL_DEV_CONFIGURATION_INVALID name=$name source=process_environment"
+        }
+        $values[$name] = $environmentValue.Equals(
+            'true',
+            [StringComparison]::OrdinalIgnoreCase
+        )
+    }
+    return $values.Values -contains $true
 }
 
 function Test-PortInUse {
@@ -224,6 +300,26 @@ function Assert-PythonVersion {
     }
 }
 
+function Invoke-LocalDevPreflightStep {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Component,
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$Operation
+    )
+
+    try {
+        return & $Operation
+    }
+    catch {
+        $message = [string]$_.Exception.Message
+        if ($message -match '^LOCAL_DEV_[A-Z0-9_]+(?: .*)?$') {
+            throw $message
+        }
+        throw "LOCAL_DEV_PREFLIGHT_FAILED component=$Component"
+    }
+}
+
 function New-EphemeralRuntimeToken {
     $bytes = New-Object byte[] 32
     $generator = [Security.Cryptography.RandomNumberGenerator]::Create()
@@ -354,6 +450,153 @@ function New-LaunchProfile {
             TIMELINE_CURSOR_SIGNING_KEY = $null
         }
     }
+}
+
+function New-MaterialsMlLaunchProfile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Python,
+        [Parameter(Mandatory = $true)]
+        [string]$EnvironmentFile,
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[A-Za-z0-9_-]{32,256}$')]
+        [string]$WorkerToken
+    )
+
+    $isolatedNames = @(
+        'ML_DATABASE_URL',
+        'ML_MINIO_ENDPOINT',
+        'ML_MINIO_BUCKET',
+        'ML_MINIO_ACCESS_KEY',
+        'ML_MINIO_SECRET_KEY',
+        'ML_MINIO_SECURE',
+        'ML_RESOURCE_TOKEN',
+        'ML_WORKER_TOKEN',
+        'ML_MCP_ENABLED',
+        'ML_MCP_TOKEN',
+        'ML_NAMESPACE',
+        'ML_STORE_ID',
+        'ML_ENV_FILE',
+        'ML_SERVICE_URL',
+        'ML_ADMIN_DATABASE_URL',
+        'ML_ADMIN_MINIO_ACCESS_KEY',
+        'ML_ADMIN_MINIO_SECRET_KEY',
+        'DEEPSEEK_API_KEY',
+        'DASHSCOPE_API_KEY',
+        'ZTA35G_RUNTIME_TOKEN',
+        'POSTGRES_PASSWORD',
+        'MINIO_ACCESS_KEY',
+        'MINIO_SECRET_KEY'
+    )
+    $serviceEnvironment = @{}
+    $workerEnvironment = @{}
+    foreach ($name in $isolatedNames) {
+        $serviceEnvironment[$name] = $null
+        $workerEnvironment[$name] = $null
+    }
+    $serviceEnvironment['ML_ENV_FILE'] = $EnvironmentFile
+    $workerEnvironment['ML_SERVICE_URL'] = 'http://127.0.0.1:8200'
+    $workerEnvironment['ML_WORKER_TOKEN'] = $WorkerToken
+    $mlPythonPath = @(
+        (Join-Path $RepoRoot 'services\materials_ml\src'),
+        (Join-Path $RepoRoot 'packages\materials_storage\src')
+    ) -join [IO.Path]::PathSeparator
+    $serviceEnvironment['PYTHONPATH'] = $mlPythonPath
+    $workerEnvironment['PYTHONPATH'] = $mlPythonPath
+
+    return [PSCustomObject]@{
+        python = $Python
+        service_arguments = @('-m', 'materials_ml_service.api')
+        service_marker = 'materials_ml_service.api'
+        service_environment = $serviceEnvironment
+        worker_arguments = @('-m', 'materials_ml_service.worker')
+        worker_marker = 'materials_ml_service.worker'
+        worker_environment = $workerEnvironment
+        working_directory = $RepoRoot
+    }
+}
+
+function Invoke-PythonStdinProbe {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Python,
+        [Parameter(Mandatory = $true)]
+        [string]$Code,
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Environment
+    )
+
+    return Invoke-WithProcessEnvironment -Values $Environment -Operation {
+        # Windows PowerShell 5.1 rewrites quotes in multiline native -c
+        # arguments. Stdin keeps the probe identical across 5.1 and 7.x.
+        $output = @($Code | & $Python - 2>$null)
+        return [PSCustomObject]@{
+            exit_code = [int]$LASTEXITCODE
+            output = @($output)
+        }
+    }
+}
+
+function Get-MaterialsMlWorkerToken {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Python,
+        [Parameter(Mandatory = $true)]
+        [string]$EnvironmentFile,
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Environment,
+        [scriptblock]$Probe
+    )
+
+    if (
+        -not (Test-Path -LiteralPath $EnvironmentFile -PathType Leaf) -or
+        [string]$Environment['ML_ENV_FILE'] -cne [string]$EnvironmentFile
+    ) {
+        throw 'LOCAL_DEV_ML_CONFIGURATION_INVALID'
+    }
+
+    if ($null -eq $Probe) {
+        $Probe = {
+            param($python, $environment)
+            $probeCode = @'
+from materialsagent.infrastructure.config import load_settings as load_backend_settings
+from materials_ml_service.config import load_settings as load_ml_settings
+
+backend = load_backend_settings()
+service = load_ml_settings()
+if backend.materials_ml_mcp_url != "http://127.0.0.1:8200/mcp":
+    raise SystemExit(5)
+if backend.enable_materials_ml_resources:
+    if backend.materials_ml_resource_token is None or backend.materials_ml_resource_token.get_secret_value() != service.resource_token.get_secret_value():
+        raise SystemExit(3)
+if backend.enable_dev_materials_ml_tools:
+    if not service.mcp_enabled or backend.materials_ml_mcp_token is None or service.mcp_token is None:
+        raise SystemExit(4)
+    if backend.materials_ml_mcp_token.get_secret_value() != service.mcp_token.get_secret_value():
+        raise SystemExit(4)
+print(service.worker_token.get_secret_value())
+'@
+            return Invoke-PythonStdinProbe `
+                -Python $python `
+                -Code $probeCode `
+                -Environment $environment
+        }
+    }
+    $result = & $Probe $Python $Environment
+    if ([int]$result.exit_code -ne 0) {
+        $message = switch ([int]$result.exit_code) {
+            3 { 'LOCAL_DEV_ML_RESOURCE_CREDENTIAL_MISMATCH' }
+            4 { 'LOCAL_DEV_ML_MCP_CONFIGURATION_MISMATCH' }
+            5 { 'LOCAL_DEV_ML_ENDPOINT_MUST_BE_LOCAL' }
+            default { 'LOCAL_DEV_ML_CONFIGURATION_INVALID' }
+        }
+        throw $message
+    }
+    $lines = @($result.output | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+    if ($lines.Count -ne 1 -or [string]$lines[0] -notmatch '^[A-Za-z0-9_-]{32,256}$') {
+        throw 'LOCAL_DEV_ML_CONFIGURATION_INVALID'
+    }
+    return [string]$lines[0]
 }
 
 function Invoke-WithProcessEnvironment {
@@ -674,7 +917,7 @@ function Test-LocalDevState {
                 -RuntimeMode ([string]$State.runtime)
             $start = [DateTime]::MinValue
             if (
-                $role -notin @('runtime', 'backend', 'frontend') -or
+                $role -notin @('runtime', 'ml_service', 'ml_worker', 'backend', 'frontend') -or
                 -not $roles.Add($role) -or
                 [int]$record.pid -le 0 -or
                 -not [DateTime]::TryParse([string]$record.process_start_time, [ref]$start) -or
@@ -905,7 +1148,7 @@ function Invoke-TaskKill {
 function Start-ManagedProcess {
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateSet('runtime', 'backend', 'frontend')]
+        [ValidateSet('runtime', 'ml_service', 'ml_worker', 'backend', 'frontend')]
         [string]$Role,
         [Parameter(Mandatory = $true)]
         [string]$FilePath,
@@ -1075,6 +1318,23 @@ function Invoke-FrontendReadyProbe {
     }
 }
 
+function Invoke-MaterialsMlServiceReadyProbe {
+    try {
+        $live = Invoke-WebRequest `
+            -UseBasicParsing `
+            -Uri 'http://127.0.0.1:8200/health/live' `
+            -TimeoutSec 2
+        $ready = Invoke-WebRequest `
+            -UseBasicParsing `
+            -Uri 'http://127.0.0.1:8200/health/ready' `
+            -TimeoutSec 2
+        return $live.StatusCode -eq 200 -and $ready.StatusCode -eq 200
+    }
+    catch {
+        return $false
+    }
+}
+
 function Wait-ForReady {
     param(
         [Parameter(Mandatory = $true)]
@@ -1181,13 +1441,34 @@ finally:
     }
 }
 
+function Invoke-MaterialsMlMigration {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Profile,
+        [Parameter(Mandatory = $true)]
+        [string]$RunRelative
+    )
+
+    $runPath = Join-Path $RepoRoot $RunRelative
+    $exitCode = Invoke-QuietProcess `
+        -FilePath $Profile.python `
+        -Arguments @('-m', 'materials_ml_service.admin', 'migrate') `
+        -WorkingDirectory $Profile.working_directory `
+        -Environment $Profile.service_environment `
+        -StdoutPath (Join-Path $runPath 'ml-migration.stdout.log') `
+        -StderrPath (Join-Path $runPath 'ml-migration.stderr.log')
+    if ($exitCode -ne 0) {
+        throw 'LOCAL_DEV_ML_MIGRATION_FAILED'
+    }
+}
+
 function Get-StopProcessRecords {
     param(
         [AllowEmptyCollection()]
         [object[]]$Processes
     )
 
-    foreach ($role in @('frontend', 'backend', 'runtime')) {
+    foreach ($role in @('frontend', 'backend', 'ml_worker', 'ml_service', 'runtime')) {
         foreach ($record in @($Processes | Where-Object { $_.role -eq $role })) {
             Write-Output $record
         }
@@ -1298,7 +1579,14 @@ function Test-RecordedStackRunning {
         [string]$Docker
     )
 
-    if ([string]$State.phase -ne 'running' -or @($State.process).Count -ne 3) {
+    $roles = @($State.process | ForEach-Object { [string]$_.role })
+    $hasMlService = $roles -contains 'ml_service'
+    $hasMlWorker = $roles -contains 'ml_worker'
+    if (
+        [string]$State.phase -ne 'running' -or
+        $hasMlService -ne $hasMlWorker -or
+        @($State.process).Count -ne $(if ($hasMlService) { 5 } else { 3 })
+    ) {
         return $false
     }
     foreach ($record in @($State.process)) {
@@ -1322,13 +1610,34 @@ function Write-LocalDevSummary {
         [string]$Marker,
         [bool]$RuntimeReady = $true,
         [bool]$BackendReady = $true,
-        [bool]$FrontendReady = $true
+        [bool]$FrontendReady = $true,
+        [bool]$MaterialsMlServiceReady = $true,
+        [bool]$MaterialsMlWorkerReady = $true
     )
 
     $runtimeStatus = if ($RuntimeReady) { 'READY' } else { 'NOT_READY_OR_UNVERIFIED' }
     $backendStatus = if ($BackendReady) { 'READY' } else { 'NOT_READY_OR_UNVERIFIED' }
     $frontendStatus = if ($FrontendReady) { 'READY' } else { 'NOT_READY_OR_UNVERIFIED' }
     $dependencyStatus = if ($BackendReady) { 'READY' } else { 'NOT_READY_OR_UNVERIFIED' }
+    $materialsMlEnabled = @($State.process | Where-Object { $_.role -eq 'ml_service' }).Count -eq 1
+    $materialsMlServiceStatus = if (-not $materialsMlEnabled) {
+        'DISABLED'
+    }
+    elseif ($MaterialsMlServiceReady) {
+        'READY'
+    }
+    else {
+        'NOT_READY_OR_UNVERIFIED'
+    }
+    $materialsMlWorkerStatus = if (-not $materialsMlEnabled) {
+        'DISABLED'
+    }
+    elseif ($MaterialsMlWorkerReady) {
+        'RUNNING'
+    }
+    else {
+        'NOT_RUNNING_OR_UNVERIFIED'
+    }
     Write-Output (
         '{0} run_id={1} runtime={2} llm={3}' -f
         $Marker,
@@ -1339,6 +1648,8 @@ function Write-LocalDevSummary {
     Write-Output ("Frontend: $frontendStatus http://127.0.0.1:3000")
     Write-Output ("Backend: $backendStatus http://127.0.0.1:8000")
     Write-Output ("Runtime: $runtimeStatus http://127.0.0.1:8100")
+    Write-Output ("ML Service: $materialsMlServiceStatus http://127.0.0.1:8200")
+    Write-Output ("ML Worker: $materialsMlWorkerStatus")
     Write-Output ("PostgreSQL: $dependencyStatus 127.0.0.1:5432")
     Write-Output ("MinIO: $dependencyStatus http://127.0.0.1:9000 console=http://127.0.0.1:9001")
     Write-Output 'state=tmp/local-dev/state.json'
@@ -1392,8 +1703,11 @@ function Invoke-LocalDevStart {
     $docker = $null
     $runId = [Guid]::NewGuid().ToString('N')
     $runRelative = "tmp/local-dev/$runId"
+    $materialsMlEnabled = $false
 
     try {
+        $currentStage = 'feature_preflight'
+        $materialsMlEnabled = Get-ConfiguredMaterialsMlEnabled
         if (Test-Path -LiteralPath $StatePath -PathType Leaf) {
             try {
                 $existing = Read-LocalDevState
@@ -1407,17 +1721,24 @@ function Invoke-LocalDevStart {
                 return 2
             }
             if ($running) {
+                $existingMaterialsMlEnabled = @(
+                    $existing.process | Where-Object { $_.role -eq 'ml_service' }
+                ).Count -eq 1
                 if (
                     [string]$existing.runtime -ne $Runtime.ToLowerInvariant() -or
-                    [string]$existing.llm -ne $Llm.ToLowerInvariant()
+                    [string]$existing.llm -ne $Llm.ToLowerInvariant() -or
+                    $existingMaterialsMlEnabled -ne $materialsMlEnabled
                 ) {
                     Write-Output (
-                        'LOCAL_DEV_ALREADY_RUNNING runtime={0} llm={1} requested_runtime={2} requested_llm={3}' -f
+                        'LOCAL_DEV_ALREADY_RUNNING runtime={0} llm={1} ml={2} requested_runtime={3} requested_llm={4} requested_ml={5}' -f
                         $existing.runtime,
                         $existing.llm,
+                        $existingMaterialsMlEnabled.ToString().ToLowerInvariant(),
                         $Runtime.ToLowerInvariant(),
-                        $Llm.ToLowerInvariant()
+                        $Llm.ToLowerInvariant(),
+                        $materialsMlEnabled.ToString().ToLowerInvariant()
                     )
+                    Write-Output 'Run -Action Stop before changing the managed service set.'
                     return 2
                 }
                 $backendReady = Invoke-BackendReadyProbe
@@ -1428,13 +1749,34 @@ function Invoke-LocalDevStart {
                     $false
                 })
                 $frontendReady = Invoke-FrontendReadyProbe
+                $materialsMlServiceReady = $(if ($materialsMlEnabled) {
+                    Invoke-MaterialsMlServiceReadyProbe
+                }
+                else {
+                    $true
+                })
+                $materialsMlWorkerReady = $(if ($materialsMlEnabled) {
+                    $workerRecord = @($existing.process | Where-Object { $_.role -eq 'ml_worker' })[0]
+                    Test-ManagedProcess -Record $workerRecord
+                }
+                else {
+                    $true
+                })
                 Write-LocalDevSummary `
                     -State $existing `
                     -Marker 'LOCAL_DEV_ALREADY_RUNNING' `
                     -RuntimeReady $runtimeReady `
                     -BackendReady $backendReady `
-                    -FrontendReady $frontendReady
-                return $(if ($runtimeReady -and $backendReady -and $frontendReady) { 0 } else { 2 })
+                    -FrontendReady $frontendReady `
+                    -MaterialsMlServiceReady $materialsMlServiceReady `
+                    -MaterialsMlWorkerReady $materialsMlWorkerReady
+                return $(if (
+                    $runtimeReady -and
+                    $backendReady -and
+                    $frontendReady -and
+                    $materialsMlServiceReady -and
+                    $materialsMlWorkerReady
+                ) { 0 } else { 2 })
             }
             Write-Output 'LOCAL_DEV_STATE_REQUIRES_STOP'
             Write-Output 'Run -Action Stop; no new process was started.'
@@ -1442,28 +1784,96 @@ function Invoke-LocalDevStart {
         }
 
         $currentStage = 'port_preflight'
-        $occupied = @(Get-OccupiedPorts -Ports @(Get-RequiredPorts) | Sort-Object)
+        $occupied = @(
+            Get-OccupiedPorts `
+                -Ports @(Get-RequiredPorts -MaterialsMlEnabled $materialsMlEnabled) |
+                Sort-Object
+        )
         if ($occupied.Count -gt 0) {
             Write-Output ('LOCAL_DEV_PORT_CONFLICT ports={0} no_action_taken=true' -f ($occupied -join ','))
             return 3
         }
 
-        $currentStage = 'toolchain_preflight'
-        $backendPythonPath = Resolve-CondaEnvironmentPython `
-            -EnvironmentName 'materialsagent-backend' `
-            -ExplicitPath $BackendPython
-        Assert-PythonVersion -Python $backendPythonPath -ExpectedMajorMinor '3.11'
-        $runtimePythonPath = if ($Runtime -eq 'Real') {
-            Resolve-CondaEnvironmentPython `
-                -EnvironmentName 'materialsagent-zta35g' `
-                -ExplicitPath $RuntimePython
+        $currentStage = 'backend_python_preflight'
+        $backendPythonPath = Invoke-LocalDevPreflightStep `
+            -Component backend_python `
+            -Operation {
+                $resolved = Resolve-CondaEnvironmentPython `
+                    -EnvironmentName 'materialsagent-backend' `
+                    -ExplicitPath $BackendPython
+                Assert-PythonVersion -Python $resolved -ExpectedMajorMinor '3.11'
+                return $resolved
+            }
+        $currentStage = 'runtime_python_preflight'
+        $runtimePythonPath = Invoke-LocalDevPreflightStep `
+            -Component runtime_python `
+            -Operation {
+                $resolved = if ($Runtime -eq 'Real') {
+                    Resolve-CondaEnvironmentPython `
+                        -EnvironmentName 'materialsagent-zta35g' `
+                        -ExplicitPath $RuntimePython
+                }
+                else {
+                    $backendPythonPath
+                }
+                Assert-PythonVersion `
+                    -Python $resolved `
+                    -ExpectedMajorMinor $(if ($Runtime -eq 'Real') { '3.8' } else { '3.11' })
+                return $resolved
+            }
+        $materialsMlProfile = $null
+        if ($materialsMlEnabled) {
+            $currentStage = 'materials_ml_python_preflight'
+            $materialsMlPythonPath = Invoke-LocalDevPreflightStep `
+                -Component materials_ml_python `
+                -Operation {
+                    $resolved = Resolve-ExecutablePath -Path $(if (
+                        -not [string]::IsNullOrWhiteSpace($MaterialsMlPython)
+                    ) {
+                        $MaterialsMlPython
+                    }
+                    else {
+                        Join-Path $RepoRoot 'services\materials_ml\.venv\Scripts\python.exe'
+                    })
+                    Assert-PythonVersion -Python $resolved -ExpectedMajorMinor '3.11'
+                    return $resolved
+                }
+            $currentStage = 'materials_ml_configuration_preflight'
+            $materialsMlEnvironmentFile = Join-Path $RepoRoot 'services\materials_ml\.env'
+            if (-not (Test-Path -LiteralPath $materialsMlEnvironmentFile -PathType Leaf)) {
+                throw 'LOCAL_DEV_CONFIGURATION_MISSING name=ML_ENV_FILE source=services_materials_ml'
+            }
+            $probeEnvironment = @{
+                ML_ENV_FILE = $materialsMlEnvironmentFile
+                PYTHONPATH = @(
+                    (Join-Path $RepoRoot 'backend\src'),
+                    (Join-Path $RepoRoot 'services\materials_ml\src'),
+                    (Join-Path $RepoRoot 'packages\materials_storage\src')
+                ) -join [IO.Path]::PathSeparator
+            }
+            foreach ($name in @(
+                'ML_DATABASE_URL', 'ML_MINIO_ENDPOINT', 'ML_MINIO_BUCKET',
+                'ML_MINIO_ACCESS_KEY', 'ML_MINIO_SECRET_KEY', 'ML_MINIO_SECURE',
+                'ML_RESOURCE_TOKEN', 'ML_WORKER_TOKEN', 'ML_MCP_ENABLED',
+                'ML_MCP_TOKEN', 'ML_NAMESPACE', 'ML_STORE_ID', 'ML_SERVICE_URL',
+                'ML_ADMIN_DATABASE_URL', 'ML_ADMIN_MINIO_ACCESS_KEY',
+                'ML_ADMIN_MINIO_SECRET_KEY'
+            )) {
+                $probeEnvironment[$name] = $null
+            }
+            $workerToken = Invoke-LocalDevPreflightStep `
+                -Component materials_ml_configuration `
+                -Operation {
+                    Get-MaterialsMlWorkerToken `
+                        -Python $materialsMlPythonPath `
+                        -EnvironmentFile $materialsMlEnvironmentFile `
+                        -Environment $probeEnvironment
+                }
+            $materialsMlProfile = New-MaterialsMlLaunchProfile `
+                -Python $materialsMlPythonPath `
+                -EnvironmentFile $materialsMlEnvironmentFile `
+                -WorkerToken $workerToken
         }
-        else {
-            $backendPythonPath
-        }
-        Assert-PythonVersion `
-            -Python $runtimePythonPath `
-            -ExpectedMajorMinor $(if ($Runtime -eq 'Real') { '3.8' } else { '3.11' })
         $currentStage = 'configuration_preflight'
         if ($Llm -eq 'Provider') {
             Assert-ProviderRootConfiguration -BackendPython $backendPythonPath
@@ -1521,6 +1931,44 @@ function Invoke-LocalDevStart {
 
         $currentStage = 'database_and_bucket'
         Invoke-DatabaseAndBucketPreparation -Profile $profile -RunRelative $runRelative
+
+        if ($materialsMlEnabled) {
+            $currentStage = 'materials_ml_migration'
+            Invoke-MaterialsMlMigration `
+                -Profile $materialsMlProfile `
+                -RunRelative $runRelative
+
+            $currentStage = 'materials_ml_service_start'
+            $materialsMlServiceRecord = Start-ManagedProcess `
+                -Role ml_service `
+                -FilePath $materialsMlProfile.python `
+                -Arguments $materialsMlProfile.service_arguments `
+                -WorkingDirectory $materialsMlProfile.working_directory `
+                -CommandMarker $materialsMlProfile.service_marker `
+                -Port 8200 `
+                -RunRelative $runRelative `
+                -Environment $materialsMlProfile.service_environment
+            $state.process = @($state.process) + @($materialsMlServiceRecord)
+            Write-LocalDevState -State $state
+            Wait-ForReady `
+                -Name MaterialsMlService `
+                -Probe { Invoke-MaterialsMlServiceReadyProbe } `
+                -ProcessRecord $materialsMlServiceRecord `
+                -TimeoutSeconds ([Math]::Min($ReadyTimeoutSeconds, 120))
+
+            $currentStage = 'materials_ml_worker_start'
+            $materialsMlWorkerRecord = Start-ManagedProcess `
+                -Role ml_worker `
+                -FilePath $materialsMlProfile.python `
+                -Arguments $materialsMlProfile.worker_arguments `
+                -WorkingDirectory $materialsMlProfile.working_directory `
+                -CommandMarker $materialsMlProfile.worker_marker `
+                -Port 0 `
+                -RunRelative $runRelative `
+                -Environment $materialsMlProfile.worker_environment
+            $state.process = @($state.process) + @($materialsMlWorkerRecord)
+            Write-LocalDevState -State $state
+        }
 
         $currentStage = 'runtime_start'
         $runtimeRecord = Start-ManagedProcess `

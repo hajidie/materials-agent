@@ -745,6 +745,14 @@ def test_create_app_disposes_only_its_owned_business_engine(
     import materialsagent.main as main_module
     from materialsagent.application.readiness import ReadinessService
 
+    # This lifecycle-only test deliberately replaces the SQL session factory with an opaque object.
+    # Recovery needs a real repository and is exercised by the independent MCP restart acceptance.
+    monkeypatch.setattr(main_module.InvocationService, "recover_mcp", lambda *_args, **_kwargs: None)
+    from materialsagent.application.ml_resources import MLDeletionCoordinator
+    monkeypatch.setattr(MLDeletionCoordinator, "recover", lambda *_args: None)
+    from materialsagent.application.ml_resources import MLResources
+    monkeypatch.setattr(MLResources, "recover_uploads", lambda *_args: None)
+
     class FakeEngine:
         def __init__(self) -> None:
             self.disposed = False

@@ -75,6 +75,8 @@ def _upload(service, actor, conversation_id, payload, key):
         conversation = uow.conversations.get_owned_for_update(conversation_id, actor.actor_id)
         if conversation is None:
             raise ResourceNotFoundError()
+        if conversation.deletion_fence_operation_id is not None:
+            raise ApplicationConflictError(code="CONVERSATION_DELETE_PENDING")
         existing = uow.assets.get(asset_id)
         if existing is not None:
             if existing.operation_id != "ebsd_" + operation + "_" + digest:
@@ -104,6 +106,9 @@ def _upload(service, actor, conversation_id, payload, key):
     except StorageError:
         raise DependencyUnavailableError() from None
     with service._unit_of_work_factory() as uow:
+        conversation = uow.conversations.get_owned_for_update(conversation_id, actor.actor_id)
+        if conversation is None or conversation.deletion_fence_operation_id is not None:
+            raise ApplicationConflictError(code="CONVERSATION_DELETE_PENDING")
         current = uow.assets.get_for_update(asset_id)
         if current is None:
             raise ResourceNotFoundError()
@@ -128,6 +133,38 @@ def require_asset(service, actor, conversation_id, asset_id):
             or asset.conversation_id != conversation_id or asset.current_status != "AVAILABLE"):
         raise ResourceNotFoundError()
     return asset
+
+
+def reconcile_upload(service, actor, conversation_id, asset_id):
+    """Read the original object; never upload again after an uncertain response."""
+    asset = service.get(actor, asset_id)
+    if asset.conversation_id != conversation_id or asset.source_type != "UPLOADED" or asset.asset_type != "ebsd_image":
+        raise ResourceNotFoundError()
+    if asset.current_status != "PENDING":
+        return asset
+    metadata = service._storage.head(asset.object_key)
+    expected_hash = asset.operation_id.rsplit("_", 1)[-1]
+    if metadata is None or metadata.metadata != identity(asset) or metadata.sha256 != expected_hash:
+        return asset
+    payload = service._storage.get(asset.object_key, max_bytes=MAX_IMAGE_BYTES)
+    if sha256(payload).hexdigest() != expected_hash:
+        raise ApplicationConflictError()
+    media_type, width = inspect_image(payload)
+    with service._unit_of_work_factory() as uow:
+        conversation = uow.conversations.get_owned_for_update(conversation_id, actor.actor_id)
+        if conversation is None or conversation.deletion_fence_operation_id is not None:
+            raise ApplicationConflictError(code="CONVERSATION_DELETE_PENDING")
+        current = uow.assets.get_for_update(asset_id)
+        if current is None:
+            raise ResourceNotFoundError()
+        if current.current_status != "PENDING":
+            return current
+        available = replace(current, current_status="AVAILABLE", media_type=media_type, width=width, height=width,
+            bit_depth=8, sha256=expected_hash, size_bytes=len(payload), encoding_rule="ebsd-rgb-original-v1", available_at=service._clock())
+        if uow.assets.update(available, expected_status="PENDING") is None:
+            raise ApplicationConflictError()
+        uow.commit()
+        return available
 
 
 def content(service, asset):

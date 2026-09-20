@@ -40,4 +40,5 @@ def test_catalog_and_invocation_openapi_use_strict_safe_projection_dtos() -> Non
 
     assert components["AgentRunView"]["additionalProperties"] is False
     assert not {"actor_id", "claim", "process_id", "context"}.intersection(components["AgentRunView"]["properties"])
-    assert "Submission" in components and "CallTool" in components and "Finish" in components
+    assert "Submission" in components and "Attachment" in components
+    assert not {"calls", "draft", "steps", "resource_snapshot", "error_code"}.intersection(components["AgentRunView"]["properties"])

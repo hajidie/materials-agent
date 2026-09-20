@@ -1,33 +1,26 @@
-import type { AssetSummary, ResultSummary } from "./types";
+import type { Attachment, Presentation } from "./artifacts";
 export interface Observation {
   observation_id: string;
-  kind: "TOOL_RESULT" | "ARGUMENT_RESOLUTION";
+  kind: "TOOL_RESULT";
   status: string;
   tool_name: string;
-  data: Record<string, unknown>;
-  artifacts: AssetSummary[];
-  result_summary?: ResultSummary | null;
-  warnings: unknown[];
-  error: { code?: string; retryable?: boolean } | null;
-  invocation_run_id: string | null;
+  presentation: Presentation;
+  artifacts: Attachment[];
 }
-
 export interface AgentExecution {
   invocation_run_id: string;
   tool_name: string;
   status: string;
-  arguments: Record<string, unknown>;
+  confirmation: Array<{ label: string; value: unknown }>;
   confirmation_version: string | null;
   confirmation_expires_at: string | null;
   retryable: boolean;
 }
-
 export interface AgentRun {
   agent_run_id: string;
   conversation_id: string;
   source_message_id: string;
   goal: string;
-  ebsd_asset_id?: string | null;
   status: "PENDING" | "RUNNING" | "WAITING_FOR_USER" | "WAITING_FOR_CONFIRMATION" | "SUCCEEDED" | "TERMINATED";
   version: number;
   waiting_version: number;
@@ -35,13 +28,13 @@ export interface AgentRun {
   pending_execution: AgentExecution | null;
   executions: AgentExecution[];
   observations: Observation[];
-  steps: Array<{ step_id: string; number: number; status: string; action: { type: string; tool_name?: string } | null }>;
   final_answer: { text: string; answer_id: string } | null;
-  error_code: string | null;
-  llm_tokens: number;
-  tool_executions: number;
-  active_seconds: number;
+  error_message: string | null;
+  outcome_unknown: boolean;
+  attachments: Attachment[];
+  result_attachments: Attachment[];
   user_inputs: string[];
+  user_messages: Array<{ message_id: string; text: string; attachments: Attachment[] }>;
   created_at: string;
 }
 
@@ -56,6 +49,7 @@ export async function agentRequest<T>(path: string, options: { body?: unknown; k
   try {
     response = await fetch(`/api/v1${path}`, {
       method: options.body === undefined ? "GET" : "POST",
+      redirect: "error",
       headers: { "Content-Type": "application/json", ...(options.key ? { "Idempotency-Key": options.key } : {}) },
       ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
       ...(options.signal ? { signal: options.signal } : {}),
@@ -73,7 +67,9 @@ export async function agentRequest<T>(path: string, options: { body?: unknown; k
 
 
 export function toolLabel(name: string): string {
-  return ({ebsd_yield_strength_predictor: "EBSD 屈服强度预测", materials_unit_conversion: "材料单位换算", zta35g_sem_virtual_lab: "ZTA35G 虚拟实验"} as Record<string, string>)[name] ?? name;
+  return ({ebsd_yield_strength_predictor: "EBSD 屈服强度预测", materials_unit_conversion: "材料单位换算", zta35g_sem_virtual_lab: "ZTA35G 虚拟实验",
+    materials_ml_analyze_tabular_dataset: "表格数据分析", materials_ml_train_tabular_regression: "模型训练",
+    materials_ml_get_training_run: "训练状态查询", materials_ml_predict_with_model: "模型预测"} as Record<string, string>)[name] ?? name;
 }
 
 export function clarificationLabel(question: string): string {

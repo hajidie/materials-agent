@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from materialsagent.application.agent_runtime import AgentRuntime
-from materialsagent.domain.models.agent import AgentRun, ArgumentDraft, Observation, RunBudget, identifier
+from materialsagent.domain.models.agent import AgentRun, ArgumentDraft, CallTool, Observation, RunBudget, identifier
 from materialsagent.domain.ports.agent import AgentConflictError
 from materialsagent.infrastructure.llm.agent_model import MockAgentModel, normalize_usage
 from materialsagent.domain.ports.agent import PreparedAgentCall
@@ -68,6 +68,20 @@ def setup(responder, **kwargs):
     tools = Tools(store)
     runtime = AgentRuntime(store, MockAgentModel(responder), tools)
     return run, store, tools, runtime
+
+
+def test_persisted_action_drops_call_scoped_resource_handle_before_binding():
+    _, _, tools, runtime = setup(lambda *_: None)
+    tools.catalog = lambda: [{"tool_name": "predict", "schema": {"properties": {}},
+        "execution_profile": "STANDARD", "resource_parameters": [{
+            "model_argument": "dataset_reference", "execution_argument": "dataset_id",
+            "expected_resource_type": "dataset", "provider": "ml_resource", "required": True}]}]
+    action = CallTool(type="CallTool", tool_name="predict", arguments={"value": 2,
+        "dataset_id": {"provider": "ml_resource", "resource_type": "dataset",
+            "platform_resource_id": "private-reference"}})
+    persisted = runtime._audit_action(action)
+    assert persisted.arguments == {"value": 2}
+    assert action.arguments["dataset_id"]["platform_resource_id"] == "private-reference"
 
 
 def test_multi_tool_observation_loop_and_final_commit():
@@ -188,7 +202,7 @@ def test_confirmation_is_business_pause_and_duplicate_confirm_does_not_execute()
 
 def test_step_limit_does_not_call_provider_again():
     def respond(role, payload):
-        return {"type": "CallTool", "tool_name": "predict", "arguments": {"value": len(payload["actions"])}}
+        return {"type": "CallTool", "tool_name": "predict", "arguments": {"value": len(payload["observations"])}}
     run, _, tools, runtime = setup(respond, budget=RunBudget(max_action_steps=2))
     result = runtime.advance(run.agent_run_id, "actor")
     assert result.error_code == "AGENT_STEP_BUDGET_EXCEEDED"

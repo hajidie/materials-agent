@@ -271,8 +271,11 @@ Invoke-Test 'repeated-start Runtime readiness uses the Backend-owned token' {
 }
 
 Invoke-Test 'required ports and conflicts cover the complete local stack' {
-    $ports = @(Get-RequiredPorts | Sort-Object)
+    $ports = @(Get-RequiredPorts -MaterialsMlEnabled $false | Sort-Object)
     Assert-Equal ($ports -join ',') '3000,5432,8000,8100,9000,9001' 'Required ports'
+
+    $mlPorts = @(Get-RequiredPorts -MaterialsMlEnabled $true | Sort-Object)
+    Assert-Equal ($mlPorts -join ',') '3000,5432,8000,8100,8200,9000,9001' 'ML required ports'
 
     $occupied = @(
         Get-OccupiedPorts `
@@ -433,11 +436,13 @@ Invoke-Test 'state validation rejects broadened process markers' {
 Invoke-Test 'stop targets only recorded processes and run-owned Compose services' {
     $processes = @(
         [PSCustomObject]@{ role = 'runtime' },
+        [PSCustomObject]@{ role = 'ml_service' },
+        [PSCustomObject]@{ role = 'ml_worker' },
         [PSCustomObject]@{ role = 'frontend' },
         [PSCustomObject]@{ role = 'backend' }
     )
     $processOrder = @(Get-StopProcessRecords -Processes $processes)
-    Assert-Equal (($processOrder | ForEach-Object role) -join ',') 'frontend,backend,runtime' 'Process stop order'
+    Assert-Equal (($processOrder | ForEach-Object role) -join ',') 'frontend,backend,ml_worker,ml_service,runtime' 'Process stop order'
 
     $docker = @(
         [PSCustomObject]@{ service = 'postgresql'; started_by_this_run = $false },
@@ -499,6 +504,8 @@ Invoke-Test 'status summary never labels an unready service READY' {
     Assert-True ($lines -contains 'Runtime: NOT_READY_OR_UNVERIFIED http://127.0.0.1:8100') 'Runtime status was not honest.'
     Assert-True ($lines -contains 'Frontend: NOT_READY_OR_UNVERIFIED http://127.0.0.1:3000') 'Frontend status was not honest.'
     Assert-True ($lines -contains 'Backend: READY http://127.0.0.1:8000') 'Backend READY status was lost.'
+    Assert-True ($lines -contains 'ML Service: DISABLED http://127.0.0.1:8200') 'Disabled ML Service status was lost.'
+    Assert-True ($lines -contains 'ML Worker: DISABLED') 'Disabled ML Worker status was lost.'
 }
 
 Invoke-Test 'legacy Mock launcher preflight does not require the retired cursor secret' {
@@ -535,6 +542,88 @@ Invoke-Test 'legacy Mock launcher preflight does not require the retired cursor 
         }
         finally { Remove-Item -LiteralPath $fixturePath -Force }
     }
+}
+
+Invoke-Test 'ML profiles isolate Service and Worker credentials' {
+    $token = 'worker-token-canary-123456789012345'
+    $profile = New-MaterialsMlLaunchProfile `
+        -Python 'C:\tools\ml-python.exe' `
+        -EnvironmentFile 'C:\repo\services\materials_ml\.env' `
+        -WorkerToken $token
+    Assert-Equal $profile.service_environment['ML_ENV_FILE'] 'C:\repo\services\materials_ml\.env' 'Service env file'
+    Assert-True ($null -eq $profile.service_environment['ML_WORKER_TOKEN']) 'Service received a direct Worker token.'
+    Assert-Equal $profile.worker_environment['ML_WORKER_TOKEN'] $token 'Worker token'
+    Assert-Equal $profile.worker_environment['ML_SERVICE_URL'] 'http://127.0.0.1:8200' 'Worker Service URL'
+    foreach ($name in @(
+        'ML_ENV_FILE', 'ML_DATABASE_URL', 'ML_MINIO_ACCESS_KEY',
+        'ML_MINIO_SECRET_KEY', 'ML_RESOURCE_TOKEN', 'ML_MCP_TOKEN',
+        'ML_ADMIN_DATABASE_URL'
+    )) {
+        Assert-True ($profile.worker_environment.ContainsKey($name)) "Worker isolation does not control $name."
+        Assert-True ($null -eq $profile.worker_environment[$name]) "Worker retains $name."
+    }
+    Assert-True (-not (($profile.worker_arguments -join ' ').Contains($token))) 'Worker arguments contain its token.'
+}
+
+Invoke-Test 'ML feature detection reads only explicit boolean switches' {
+    $fixturePath = [IO.Path]::GetTempFileName()
+    try {
+        Set-Content -LiteralPath $fixturePath -Encoding UTF8 -Value @(
+            'ENABLE_DEV_MATERIALS_ML_TOOLS=false',
+            'ENABLE_MATERIALS_ML_RESOURCES=true',
+            'IGNORED_SECRET=must-not-be-read'
+        )
+        Assert-True (Get-ConfiguredMaterialsMlEnabled -Path $fixturePath) 'Enabled ML resources were ignored.'
+        Set-Content -LiteralPath $fixturePath -Encoding UTF8 -Value @(
+            'ENABLE_DEV_MATERIALS_ML_TOOLS=false',
+            'ENABLE_MATERIALS_ML_RESOURCES=false',
+            'ENABLE_MATERIALS_ML_RESOURCE_CONTEXT=false'
+        )
+        Assert-True (-not (Get-ConfiguredMaterialsMlEnabled -Path $fixturePath)) 'Disabled ML switches enabled the stack.'
+    }
+    finally {
+        Remove-Item -LiteralPath $fixturePath -Force
+    }
+}
+
+Invoke-Test 'toolchain preflight preserves safe codes and hides unexpected details' {
+    $safeMessage = $null
+    try {
+        Invoke-LocalDevPreflightStep -Component backend_python -Operation {
+            throw 'LOCAL_DEV_PYTHON_VERSION_MISMATCH expected=3.11'
+        }
+    }
+    catch {
+        $safeMessage = $_.Exception.Message
+    }
+    Assert-Equal $safeMessage 'LOCAL_DEV_PYTHON_VERSION_MISMATCH expected=3.11' 'Safe preflight code'
+
+    $mappedMessage = $null
+    try {
+        Invoke-LocalDevPreflightStep -Component materials_ml_python -Operation {
+            throw 'unexpected-detail-secret-canary'
+        }
+    }
+    catch {
+        $mappedMessage = $_.Exception.Message
+    }
+    Assert-Equal $mappedMessage 'LOCAL_DEV_PREFLIGHT_FAILED component=materials_ml_python' 'Mapped preflight code'
+    Assert-True (-not $mappedMessage.Contains('secret-canary')) 'Unexpected preflight detail leaked.'
+}
+
+Invoke-Test 'multiline Python probes preserve quotes through stdin' {
+    $python = Resolve-CondaEnvironmentPython -EnvironmentName 'materialsagent-backend'
+    $code = @'
+value = "http://127.0.0.1:8200/mcp"
+print("QUOTED_PROBE_OK" if value.endswith("/mcp") else "QUOTED_PROBE_BAD")
+'@
+    $result = Invoke-PythonStdinProbe `
+        -Python $python `
+        -Code $code `
+        -Environment @{}
+    Assert-Equal $result.exit_code 0 'Quoted probe exit code'
+    $probeOutput = @($result.output)[0]
+    Assert-Equal $probeOutput 'QUOTED_PROBE_OK' 'Quoted probe output'
 }
 
 Write-Output ("LOCAL_DEV_OFFLINE_TESTS_OK tests={0}" -f $script:Passed)

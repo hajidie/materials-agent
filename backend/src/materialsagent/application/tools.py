@@ -27,6 +27,7 @@ def build_tool_registry(
     ebsd_client: ToolClientPort | None = None,
     enable_dev_fake_side_effect_tool: bool = False,
     fake_side_effect_sink: FakeSideEffectSink | None = None,
+    ml_registrations: tuple[RegisteredTool, ...] = (),
 ) -> ToolRegistry:
     """Explicit production composition root for the safe production catalog."""
     registrations = [
@@ -40,7 +41,7 @@ def build_tool_registry(
                 fake_side_effect_sink or FakeSideEffectSink()
             )
         )
-    return ToolRegistry(tuple(registrations))
+    return ToolRegistry(tuple(registrations) + ml_registrations)
 
 
 class ToolCatalogService:

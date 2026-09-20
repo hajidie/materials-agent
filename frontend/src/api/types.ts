@@ -7,6 +7,7 @@ export interface ApiErrorDetail {
   field: string;
   code: string;
   message: string;
+  operation_id?: string;
 }
 
 export interface ApiResourceReference {

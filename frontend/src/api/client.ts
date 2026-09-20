@@ -145,6 +145,10 @@ function parseDetails(value: unknown): ApiErrorDetail[] | null {
   }
   const details: ApiErrorDetail[] = [];
   for (const item of value) {
+    if (isRecord(item) && Object.keys(item).length === 1 && typeof item.operation_id === "string") {
+      details.push({ field: "operation_id", code: "COORDINATION_OPERATION", message: item.operation_id, operation_id: item.operation_id });
+      continue;
+    }
     if (
       !isRecord(item) ||
       typeof item.field !== "string" ||

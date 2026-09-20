@@ -297,8 +297,31 @@ def create_app(
         from materialsagent.infrastructure.tool_clients.local_ebsd import LocalEBSDToolClientAdapter
         ebsd_client = LocalEBSDToolClientAdapter(base_url=runtime_config.base_url,
             token=runtime_config.token.get_secret_value(), timeout_seconds=60)
+    mcp_client = None
+    ml_registrations = ()
+    executors = (StandardSyncExecutor(), ManagedExecutor())
+    if resolved_settings.enable_dev_materials_ml_tools:
+        try:
+            from importlib.metadata import version
+            if version("mcp") != "1.30.0" or version("sse-starlette") != "3.0.3":
+                raise ValueError()
+            from materialsagent.infrastructure.tool_clients.mcp_client import MCPClient
+            from materialsagent.application.materials_ml_tools import build_ml_tools, LocalMLAuthorization
+            from materialsagent.application.tool_registry import ToolRegistry
+            from materialsagent.application.mcp_executor import MCPExecutor
+            mcp_client = MCPClient(url=resolved_settings.materials_ml_mcp_url,
+                token=resolved_settings.materials_ml_mcp_token.get_secret_value(),
+                resource_token=resolved_settings.materials_ml_resource_token.get_secret_value())
+            ml_registrations = build_ml_tools(binding_version=resolved_settings.materials_ml_binding_version,
+                                             endpoint_digest=mcp_client.endpoint_digest)
+            executors += (MCPExecutor(mcp_client),)
+        except Exception:
+            if mcp_client:
+                mcp_client.close()
+            raise ConfigurationError("ML MCP configuration or optional dependencies are unavailable.") from None
     resolved_tool_registry = tool_registry or build_tool_registry(runtime_client, ebsd_client=ebsd_client,
-        enable_dev_fake_side_effect_tool=resolved_settings.enable_dev_fake_side_effect_tool)
+        enable_dev_fake_side_effect_tool=resolved_settings.enable_dev_fake_side_effect_tool,
+        ml_registrations=ml_registrations)
     if resolved_settings.app_env == "production" and any(
         r.execution_profile is ToolExecutionProfile.SIDE_EFFECT for r in resolved_tool_registry.list_registered()
     ):
@@ -337,8 +360,11 @@ def create_app(
             resolved_tool_workflow_service = ManagedToolWorkflow(factory, resolved_tool_execution_service,
                 resolved_asset_service, resolved_result_service)
         authorization = ExactPermissionAuthorizationService((FAKE_SIDE_EFFECT_PERMISSION,)) if resolved_settings.enable_dev_fake_side_effect_tool else EmptyPermissionAuthorizationService()
+        if ml_registrations:
+            # Registry computes local schema hashes; grant only those reviewed identities.
+            authorization = LocalMLAuthorization(ToolRegistry(ml_registrations).list_registered(), authorization)
         resolved_invocation_service = resolved_invocation_service or InvocationService(factory, resolved_tool_registry,
-            ExecutorRouter((StandardSyncExecutor(), ManagedExecutor())), authorization=authorization,
+            ExecutorRouter(executors), authorization=authorization,
             clock=clock, id_factory=id_factory, managed_workflow_service=resolved_tool_workflow_service,
             lease_seconds=max(60, int(resolved_settings.zta35g_runtime_timeout_seconds) + 60))
     resolved_agent_store = agent_store or (SQLAlchemyAgentStore(session_factory) if session_factory else None)
@@ -362,12 +388,45 @@ def create_app(
         standard_timeout_seconds=resolved_settings.agent_standard_timeout_seconds,
         managed_timeout_seconds=resolved_settings.zta35g_runtime_timeout_seconds)
 
+    # The resource plane is independent of SDK Tool registration. Recovery survives feature flags.
+    from materialsagent.application.ml_resources import MLResources, MLDeletionCoordinator
+    from materialsagent.infrastructure.db.ml_resources import MLResourceRepository
+    from materialsagent.infrastructure.tool_clients.ml_resource_client import MLResourceClient
+    resource_sessions = session_factory or getattr(resolved_agent_store, "sessions", None)
+    ml_resources_service = ml_deletion_coordinator = None
+    if resource_sessions is not None:
+        resource_client = None
+        if resolved_settings.materials_ml_resource_token:
+            resource_client = MLResourceClient(resolved_settings.materials_ml_mcp_url,
+                resolved_settings.materials_ml_resource_token.get_secret_value(), resolved_settings.materials_ml_binding_version)
+        ml_resources_service = MLResources(MLResourceRepository(resource_sessions), resource_client)
+        if resolved_agent_runtime is not None and isinstance(resolved_agent_runtime.tools, RegistryAgentGateway):
+            from materialsagent.application.ml_resource_context import ResourceContextResolver, MLResourceResultRegistrar
+            context_resources = ml_resources_service if resolved_settings.enable_materials_ml_resource_context else None
+            context_service = ResourceContextResolver(
+                context_resources, resolved_tool_registry, resolved_unit_of_work_factory
+            )
+            resolved_agent_runtime.tools.resource_context = context_service
+            resolved_agent_runtime.tools.arg_resolver.resource_context = context_service
+            if context_resources is not None:
+                resolved_agent_runtime.tools.resource_registrar = MLResourceResultRegistrar(
+                    context_resources, resolved_invocation_service
+                )
+        elif resolved_settings.enable_materials_ml_resource_context:
+            raise ValueError("ML resource context requires the Registry Agent gateway.")
+        if resolved_conversation_cleanup_service is not None:
+            ml_deletion_coordinator = MLDeletionCoordinator(ml_resources_service, resolved_conversation_cleanup_service)
+            resolved_conversation_cleanup_service.ml_coordinator = ml_deletion_coordinator
+
     request_logger = configure_logging(resolved_settings.log_level)
     request_logger.disabled = False
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         try:
+            if resolved_actor_context and callable(getattr(resolved_invocation_service, "recover_mcp", None)):
+                from starlette.concurrency import run_in_threadpool
+                await run_in_threadpool(resolved_invocation_service.recover_mcp, resolved_actor_context, cutoff=process_cutoff)
             if resolved_agent_runtime is not None and hasattr(resolved_agent_runtime.store, "recover_interrupted"):
                 resolved_agent_runtime.store.recover_interrupted(resolved_agent_runtime.process_id, repair=resolved_agent_runtime.tools.repair)
             if (
@@ -383,8 +442,15 @@ def create_app(
                         "process_recovery status=database_unavailable"
                     )
                 resolved_conversation_cleanup_service.drain(limit=100)
+            if ml_deletion_coordinator is not None and resolved_actor_context is not None:
+                from starlette.concurrency import run_in_threadpool
+                await run_in_threadpool(ml_resources_service.recover_uploads, resolved_actor_context.actor_id)
+                await run_in_threadpool(ml_deletion_coordinator.recover, resolved_actor_context)
             yield
         finally:
+            if mcp_client is not None:
+                from starlette.concurrency import run_in_threadpool
+                await run_in_threadpool(mcp_client.close)
             if owned_engine is not None:
                 owned_engine.dispose()
             if owned_storage is not None:
@@ -400,6 +466,11 @@ def create_app(
     app.state.readiness_service = resolved_readiness_service
     app.state.actor_context = resolved_actor_context
     app.state.conversation_service = resolved_conversation_service
+    app.state.enable_materials_ml_resources = resolved_settings.enable_materials_ml_resources
+    app.state.enable_materials_ml_resource_context = resolved_settings.enable_materials_ml_resource_context
+    app.state.enable_dev_materials_ml_tools = resolved_settings.enable_dev_materials_ml_tools
+    app.state.ml_resources = ml_resources_service
+    app.state.ml_deletion_coordinator = ml_deletion_coordinator
     app.state.conversation_cleanup_service = resolved_conversation_cleanup_service
     app.state.tool_catalog_service = resolved_tool_catalog_service
     app.state.tool_execution_service = resolved_tool_execution_service
@@ -442,7 +513,13 @@ def create_app(
 
     app.include_router(health_router)
     app.include_router(assets_router)
+    from materialsagent.api.routes.attachments import router as attachments_router
+    from materialsagent.api.routes.chat_artifacts import router as chat_artifacts_router
+    app.include_router(attachments_router)
+    app.include_router(chat_artifacts_router)
     app.include_router(conversations_router)
+    from materialsagent.api.routes.ml_resources import router as ml_resources_router
+    app.include_router(ml_resources_router)
     app.include_router(tools_router)
     app.include_router(tool_results_router)
     from materialsagent.api.routes.agent_runs import router as agent_runs_router

@@ -1,3 +1,4 @@
+from backend.tests.agent_inspection import stored_run
 from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
@@ -44,14 +45,14 @@ def ebsd(api_harness):
 
 
 def upload(client, conversation, payload=None, key="image"):
-    return client.post(f"/api/v1/conversations/{conversation}/ebsd-images",
-        content=image_bytes() if payload is None else payload,
-        headers={"Idempotency-Key": key, "Content-Type": "image/png"})
+    return client.post(f"/api/v1/conversations/{conversation}/attachments",
+        files={"file": ("ebsd.png", image_bytes() if payload is None else payload, "image/png")},
+        headers={"Idempotency-Key": key})
 
 
 def submit(client, conversation, asset=None, key="run", **extra):
     return client.post(f"/api/v1/conversations/{conversation}/messages",
-        json={"mode": "NEW_RUN", "content_text": "预测 EBSD 屈服强度", **({"ebsd_asset_id": asset} if asset else {}), **extra},
+        json={"mode": "NEW_RUN", "content_text": "预测 EBSD 屈服强度", **({"attachments": [{"attachment_id": asset, "kind": "ebsd_image", "name": "ebsd.png"}]} if asset else {}), **extra},
         headers={"Idempotency-Key": key})
 
 
@@ -59,12 +60,12 @@ def test_ebsd_upload_managed_prediction_replay_history_and_cleanup(ebsd):
     client, conversation, storage, runtime = ebsd
     response = upload(client, conversation)
     assert response.status_code == 200, response.text
-    asset = response.json()["data"]["asset_id"]
-    assert upload(client, conversation).json()["data"]["asset_id"] == asset
+    asset = response.json()["data"]["attachment"]["attachment_id"]
+    assert upload(client, conversation).json()["data"]["attachment"]["attachment_id"] == asset
     assert upload(client, conversation, image_bytes(color=101)).status_code == 409
     response = submit(client, conversation, asset)
     assert response.status_code == 200, response.text
-    run = response.json()["data"]["agent_run"]
+    run = stored_run(client, response.json()["data"]["agent_run"])
     assert run["status"] == "SUCCEEDED", run
     result = run["observations"][0]["result_summary"]
     assert result["data"] == {"yield_strength": {"value": 400.0, "unit": "MPa"}}
@@ -75,8 +76,8 @@ def test_ebsd_upload_managed_prediction_replay_history_and_cleanup(ebsd):
     assert submit(client, conversation, asset).json()["data"]["idempotency_replayed"]
     assert runtime.execution_count == 1
     reloaded = client.get(f"/api/v1/agent-runs/{run['agent_run_id']}").json()["data"]
-    assert reloaded["ebsd_asset_id"] == asset
-    assert reloaded["observations"] == run["observations"]
+    assert reloaded["attachments"][0]["attachment_id"] == asset
+    assert stored_run(client, reloaded)["observations"] == run["observations"]
     regenerated = client.post(f"/api/v1/agent-runs/{run['agent_run_id']}/retry",
         json={"retry_type": "ANSWER_REGENERATION"}, headers={"Idempotency-Key": "answer"})
     assert regenerated.json()["data"]["agent_run"]["status"] == "SUCCEEDED", regenerated.text
@@ -99,12 +100,14 @@ def test_missing_image_resume_and_cross_conversation_rejection(ebsd, api_harness
     def responder(role, payload):
         draft = payload.get("draft")
         if role == "agent_decision" and draft and not draft["issues"]:
-            return {"type": "CallTool", "tool_name": draft["tool_name"], "arguments": draft["normalized"]}
+            # The validated binding is frozen in the draft; the model does not
+            # receive or echo its execution identity on the next decision.
+            return {"type": "CallTool", "tool_name": draft["tool_name"], "arguments": {}}
         return MockAgentModel._respond(role, payload)
     client.app.state.agent_runtime.model = MockAgentModel(responder)
-    run = submit(client, conversation).json()["data"]["agent_run"]
+    run = stored_run(client, submit(client, conversation).json()["data"]["agent_run"])
     assert run["status"] == "WAITING_FOR_USER", run
-    asset = upload(client, conversation).json()["data"]["asset_id"]
+    asset = upload(client, conversation).json()["data"]["attachment"]["attachment_id"]
     other = api_harness.persist_conversation("ebsd-test").conversation_id
     rejected = submit(client, other, asset)
     assert rejected.status_code != 200
@@ -119,10 +122,10 @@ def test_storage_failure_replays_original_upload_and_busy_is_explicit_retry(ebsd
     storage.unavailable = True
     assert upload(client, conversation).status_code == 503
     storage.unavailable = False
-    asset = upload(client, conversation).json()["data"]["asset_id"]
+    asset = upload(client, conversation).json()["data"]["attachment"]["attachment_id"]
     with runtime.execution_lock:
         response = submit(client, conversation, asset)
-    run = response.json()["data"]["agent_run"]
+    run = stored_run(client, response.json()["data"]["agent_run"])
     failed = next(e for e in run["executions"] if e["status"] == "FAILED")
     assert runtime.execution_count == 0
     response = client.post(f"/api/v1/agent-runs/{run['agent_run_id']}/retry",
@@ -171,12 +174,12 @@ def test_ebsd_provider_boundary_contains_text_and_references_only(ebsd):
         return Model()
     client.app.state.agent_runtime.model = AgentModelAdapter({role: _role("deepseek", role)
         for role in ("agent_decision", "tool_arg_resolution", "final_answer")}, factory=factory)
-    asset = upload(client, conversation).json()["data"]["asset_id"]
-    result = submit(client, conversation, asset).json()["data"]["agent_run"]
+    asset = upload(client, conversation).json()["data"]["attachment"]["attachment_id"]
+    result = stored_run(client, submit(client, conversation, asset).json()["data"]["agent_run"])
     assert result["status"] == "SUCCEEDED", result
     assert captured and all(type(message["content"]) is str for message in captured)
     wire = json.dumps(captured)
-    assert asset in wire
+    assert asset not in wire
     for forbidden in (base64.b64encode(image_bytes()).decode(), "data:image/", "image_url", "object_key", "storage_namespace"):
         assert forbidden not in wire
     assert runtime.execution_count == 1
@@ -186,13 +189,13 @@ def test_uploaded_asset_database_constraints_and_digest_guard(ebsd, api_harness)
     from sqlalchemy import text
     from sqlalchemy.exc import IntegrityError
     client, conversation, storage, runtime = ebsd
-    asset = upload(client, conversation).json()["data"]["asset_id"]
+    asset = upload(client, conversation).json()["data"]["attachment"]["attachment_id"]
     for mutation in ("source_type = 'GENERATED'", "conversation_id = NULL", "role = 'generated_sem'", "asset_type = 'sem_image'"):
         with pytest.raises(IntegrityError), api_harness.engine.begin() as connection:
             connection.execute(text(f"UPDATE asset SET {mutation} WHERE asset_id = :asset"), {"asset": asset})
     object_key, (payload, metadata) = next(iter(storage.objects.items()))
     storage.objects[object_key] = (b"corrupted", metadata)
-    run = submit(client, conversation, asset).json()["data"]["agent_run"]
+    run = stored_run(client, submit(client, conversation, asset).json()["data"]["agent_run"])
     assert runtime.execution_count == 0
     assert any(item["status"] == "FAILED" for item in run["executions"])
     assert not any((item.get("result_summary") or {}).get("data") for item in run["observations"])
@@ -202,7 +205,7 @@ def test_uploaded_asset_database_constraints_and_digest_guard(ebsd, api_harness)
 @pytest.mark.parametrize("connection_refused", [True, False])
 def test_unavailable_ebsd_runtime_requires_explicit_retry(ebsd, connection_refused):
     client, conversation, storage, runtime = ebsd
-    asset = upload(client, conversation).json()["data"]["asset_id"]
+    asset = upload(client, conversation).json()["data"]["attachment"]["attachment_id"]
     adapter = client.app.state.agent_runtime.tools.registry.resolve("ebsd_yield_strength_predictor").binding.execution_target.client
     pool = adapter._pool
     class OfflinePool:
@@ -212,7 +215,7 @@ def test_unavailable_ebsd_runtime_requires_explicit_retry(ebsd, connection_refus
             raise OSError("transport outcome uncertain")
     adapter._pool = OfflinePool()
     try:
-        run = submit(client, conversation, asset).json()["data"]["agent_run"]
+        run = stored_run(client, submit(client, conversation, asset).json()["data"]["agent_run"])
     finally:
         adapter._pool = pool
     failed = next(e for e in run["executions"] if e["status"] == "FAILED")

@@ -9,16 +9,35 @@ from materialsagent.api.dependencies import get_actor_context
 from materialsagent.application.context import ActorContext
 from materialsagent.application.idempotency import validate_idempotency_key
 from materialsagent.domain.models.agent import AgentRun
+from materialsagent.domain.models.attachment import Attachment
 from materialsagent.domain.ports.agent import AgentConflictError, AgentFailure
 
 router = APIRouter(tags=["agent-runs"])
 
 
 
-AgentRunView = create_model("AgentRunView", __config__=ConfigDict(extra="forbid"), **{
-    name: (field.annotation, field) for name, field in AgentRun.model_fields.items()
-    if name not in {"actor_id", "claim", "process_id", "context", "accepted_waiting_version", "accepted_input_hash"}
-})
+class AgentRunView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    agent_run_id: str
+    conversation_id: str
+    source_message_id: str
+    goal: str
+    status: str
+    version: int
+    waiting_version: int
+    waiting: dict | None
+    pending_execution: dict | None
+    executions: list[dict]
+    observations: list[dict]
+    final_answer: dict | None
+    error_message: str | None
+    outcome_unknown: bool
+    user_inputs: list[str]
+    user_messages: list[dict]
+    attachments: list[dict]
+    result_attachments: list[dict]
+    created_at: str
+
 
 class RunData(BaseModel):
     agent_run: AgentRunView
@@ -37,7 +56,7 @@ class Submission(BaseModel):
     model_config = ConfigDict(extra="forbid")
     mode: Literal["NEW_RUN", "RESUME_RUN"]
     content_text: str = Field(min_length=1, max_length=32768)
-    ebsd_asset_id: str | None = Field(default=None, pattern=r"^asset_[A-Za-z0-9_-]{1,90}$")
+    attachments: list[Attachment] = Field(default_factory=list, max_length=1)
     agent_run_id: str | None = None
     waiting_version: int | None = Field(default=None, ge=1)
 
@@ -72,7 +91,48 @@ def runtime_for(request):
 
 
 def public(run: AgentRun):
-    return run.model_dump(mode="json", exclude={"actor_id", "claim", "process_id", "context", "accepted_waiting_version", "accepted_input_hash"})
+    from materialsagent.application.result_projection import project_result, FIELD_LABELS
+    from materialsagent.application.context_framework import protect_text, internal_values
+    private = internal_values(run.model_dump(mode="json"))
+    def execution(record):
+        if record is None:
+            return None
+        facts = []
+        for key, value in record.arguments.items():
+            if key in record.resource_bindings:
+                value = record.resource_bindings[key].safe_description.get("name", "已确认的输入")
+            elif key.endswith("_id"):
+                value = "已上传的附件"
+            if key == "algorithm":
+                value = {"LR": "线性回归", "RF": "随机森林"}.get(value, value)
+            facts.append({"label": FIELD_LABELS.get(key, key), "value": protect_text(value, private)})
+        from materialsagent.application.unit_resolution import project_units
+        unit_notes = project_units({"notes": []}, record.unit_annotations)["notes"]
+        if unit_notes:
+            facts.append({"label": "单位说明（执行确认不等于单位确认）", "value": protect_text(unit_notes, private)})
+        return {"invocation_run_id": record.invocation_run_id, "tool_name": record.tool_name,
+            "status": record.status, "retryable": record.retryable, "confirmation_version": record.confirmation_version,
+            "confirmation_expires_at": record.confirmation_expires_at.isoformat() if record.confirmation_expires_at else None,
+            "confirmation": facts}
+    value = {key: getattr(run, key) for key in ("agent_run_id", "conversation_id", "source_message_id", "goal", "status", "version",
+        "waiting_version", "user_inputs", "user_messages", "attachments", "result_attachments")}
+    value.update(created_at=run.created_at.isoformat(),
+        waiting={"reason": run.waiting.reason, "question": protect_text(run.waiting.question, private)} if run.waiting else None,
+        pending_execution=execution(run.pending_execution), executions=[execution(e) for e in run.executions],
+        observations=[{"observation_id": o.observation_id, "kind": o.kind, "tool_name": o.tool_name,
+            "status": o.status, "presentation": protect_text(project_result(o), private),
+            "artifacts": [{"attachment_id": a["asset_id"], "kind": "image", "name": "结果图片"} for a in o.artifacts if a.get("asset_id")]
+            } for o in run.observations if o.kind == "TOOL_RESULT"],
+        final_answer={"text": protect_text(run.final_answer.text, private), "answer_id": run.final_answer.answer_id} if run.final_answer else None,
+        outcome_unknown=run.error_code == "MCP_OUTCOME_UNKNOWN" or any(e.status == "OUTCOME_UNKNOWN" for e in run.executions),
+        error_message={
+            "CONTEXT_BUDGET_EXCEEDED": "本次请求所需的上下文超出处理上限，未能继续。已上传的附件和已保存的结果仍保留。",
+            "LLM_TOKEN_BUDGET_EXCEEDED": "本次处理已达到推理额度上限，未能继续。已上传的附件和已保存的结果仍保留。",
+        }.get(run.error_code, "本次处理未完成，已保存的结果仍可查看。") if run.error_code else None)
+    if run.error_code == "TOOL_EXECUTION_FAILED" and any(o.kind == "TOOL_RESULT" and o.status == "FAILED" for o in run.observations):
+        # The projected failed result already explains this same failure.
+        value["error_message"] = None
+    return value
 
 
 def key_value(value):
@@ -89,10 +149,10 @@ def submit(conversation_id: str, body: Submission, request: Request,
     runtime = runtime_for(request)
     run, replayed = runtime.store.submit(conversation_id, actor.actor_id, body.content_text,
         key_value(idempotency_key), run_id=body.agent_run_id, waiting_version=body.waiting_version,
-        budget=request.app.state.agent_budget, **({"ebsd_asset_id": body.ebsd_asset_id} if body.ebsd_asset_id else {}))
+        budget=request.app.state.agent_budget, attachments=[a.model_dump() for a in body.attachments])
     if run.status == "PENDING" or (body.mode == "RESUME_RUN" and run.status == "WAITING_FOR_USER" and run.waiting_version == body.waiting_version):
         run = runtime.advance(run.agent_run_id, actor.actor_id, waiting_version=body.waiting_version,
-            user_input=(body.content_text + ("\nebsd_asset_id: " + body.ebsd_asset_id if body.ebsd_asset_id else "")) if body.mode == "RESUME_RUN" else None)
+            user_input=body.content_text if body.mode == "RESUME_RUN" else None)
     return {"request_id": request.state.request_id, "data": {"agent_run": public(run), "idempotency_replayed": replayed}}
 
 
@@ -112,6 +172,8 @@ def list_runs(conversation_id: str, request: Request, actor: Annotated[ActorCont
 @router.get("/api/v1/agent-runs/{run_id}/trace")
 def trace(run_id: str, request: Request, actor: Annotated[ActorContext, Depends(get_actor_context)],
           offset: Annotated[int, Query(ge=0)] = 0, limit: Annotated[int, Query(ge=1, le=100)] = 20):
+    if not getattr(request.app.state, "m5_dev_routes_enabled", False):
+        raise HTTPException(404, detail="NOT_FOUND")
     run = runtime_for(request).store.get(run_id, actor.actor_id)
     steps = run.steps[offset:offset + limit]
     ids = {s.step_id for s in steps}
@@ -146,6 +208,60 @@ def confirm(run_id: str, invocation_id: str, body: Confirmation, request: Reques
 def reject(run_id: str, invocation_id: str, body: Confirmation, request: Request,
            actor: Annotated[ActorContext, Depends(get_actor_context)]):
     return _confirmation(run_id, invocation_id, body, request, actor, False)
+
+
+def receipt_target(run_id, invocation_id, request, actor):
+    run = runtime_for(request).store.get(run_id, actor.actor_id)
+    records = [*run.executions, *([run.pending_execution] if run.pending_execution else [])]
+    if not any(r.invocation_run_id == invocation_id for r in records):
+        raise HTTPException(404, detail="INVOCATION_NOT_FOUND")
+    service = request.app.state.invocation_service
+    value = service.get(actor, invocation_id)
+    if value.run.conversation_id != run.conversation_id or value.run.executor_id != "mcp":
+        raise HTTPException(404, detail="INVOCATION_NOT_FOUND")
+    return service, value
+
+
+@router.get("/api/v1/agent-runs/{run_id}/invocations/{invocation_id}/receipt")
+def get_receipt(run_id: str, invocation_id: str, request: Request,
+                actor: Annotated[ActorContext, Depends(get_actor_context)]):
+    _, value = receipt_target(run_id, invocation_id, request, actor)
+    return {"request_id": request.state.request_id, "data": {"invocation_run_id": invocation_id,
+        "status": value.run.status.value, "remote_receipt": _receipt_json(value.run.remote_receipt)}}
+
+
+def _receipt_json(value):
+    from materialsagent.application.tool_invocations import _plain_json
+    return _plain_json(value)
+
+
+@router.post("/api/v1/agent-runs/{run_id}/invocations/{invocation_id}/reconcile")
+def reconcile_receipt(run_id: str, invocation_id: str, request: Request,
+                      actor: Annotated[ActorContext, Depends(get_actor_context)]):
+    service, _ = receipt_target(run_id, invocation_id, request, actor)
+    value = service.reconcile_mcp(actor, invocation_id)
+    registration = None
+    registrar = getattr(runtime_for(request).tools, "resource_registrar", None)
+    if registrar:
+        run = runtime_for(request).store.get(run_id, actor.actor_id)
+        record = next(r for r in [*run.executions, *([run.pending_execution] if run.pending_execution else [])]
+                      if r.invocation_run_id == invocation_id)
+        registration = registrar.explicit_reconcile(run, record)
+    return {"request_id": request.state.request_id, "data": {"invocation_run_id": invocation_id,
+        "status": value.run.status.value, "remote_receipt": _receipt_json(value.run.remote_receipt),
+        **({"registration": registration} if registrar else {})}}
+
+
+@router.post("/api/v1/agent-runs/{run_id}/resources/reconcile")
+def reconcile_resources(run_id: str, request: Request, actor: Annotated[ActorContext, Depends(get_actor_context)]):
+    runtime = runtime_for(request)
+    registrar = getattr(runtime.tools, "resource_registrar", None)
+    if registrar is None:
+        raise HTTPException(404, detail="RESOURCE_CONTEXT_DISABLED")
+    run = runtime.store.get(run_id, actor.actor_id)
+    known = [record for record in run.executions if request.app.state.invocation_service.get(
+        actor, record.invocation_run_id).run.status.value in ("SUCCEEDED", "FAILED")]
+    return {"data": [registrar.explicit_reconcile(run, record) for record in known]}
 
 
 @router.post("/api/v1/agent-runs/{run_id}/retry", response_model=SubmissionResponse)

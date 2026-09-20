@@ -59,6 +59,9 @@ class ConversationRow(Base):
         ),
         nullable=False,
     )
+    deletion_fence_operation_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ml_dataset_ordinal: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0", default=0)
+    deletion_fence_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0", default=0)
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -282,6 +285,7 @@ class MessageRow(Base):
         ),
         CheckConstraint("generation_source <> 'AGENT' OR role = 'ASSISTANT'", name="ck_message_agent_source_role"),
         UniqueConstraint("llm_call_id", name="uq_message_llm_call_id"),
+        UniqueConstraint("conversation_id", "event_key", name="uq_message_conversation_event"),
         UniqueConstraint(
             "message_id",
             "conversation_id",
@@ -296,6 +300,7 @@ class MessageRow(Base):
     )
 
     message_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    event_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     conversation_id: Mapped[str] = mapped_column(
         ForeignKey(
             "conversation.conversation_id",
@@ -453,6 +458,8 @@ def _conversation_from_row(row: ConversationRow) -> Conversation:
     return Conversation(
         conversation_id=row.conversation_id,
         actor_id=row.actor_id,
+        deletion_fence_operation_id=row.deletion_fence_operation_id,
+        deletion_fence_version=row.deletion_fence_version,
         title=row.title,
         created_at=row.created_at,
         updated_at=row.updated_at,
@@ -727,6 +734,8 @@ class SQLAlchemyMessageRepository:
         return [_message_from_row(row) for row in rows]
 
     def add(self, message: Message) -> None:
+        from .ml_resources import lock_conversation
+        lock_conversation(self._session, message.actor_id, message.conversation_id, writable=True)
         try:
             self._session.flush()
             self._session.add(
