@@ -10,18 +10,19 @@ function run(patch: Partial<AgentRun> = {}): AgentRun {
 const response = (data: unknown) => new Response(JSON.stringify({request_id: "req", data}), {status: 200});
 let items: AgentRun[]; let fail: boolean;
 let writes: Array<{url: string; body: Record<string, unknown>; key: string}>;
+let writeGate: Promise<void> | null;
 const wrappers: Array<ReturnType<typeof mount>> = [];
 async function show() {const wrapper = mount(App); wrappers.push(wrapper); await flushPromises(); return wrapper;}
 function button(wrapper: ReturnType<typeof mount>, text: string) {const found = wrapper.findAll("button").find(b => b.text() === text); if (!found) throw new Error(text); return found;}
 beforeEach(() => {
- sessionStorage.clear(); sessionStorage.setItem("materials-agent.selected-conversation.v1", "conv"); items = []; writes = []; fail = false;
+ sessionStorage.clear(); sessionStorage.setItem("materials-agent.selected-conversation.v1", "conv"); items = []; writes = []; fail = false; writeGate = null;
  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = String(input);
   if (url.endsWith("/results/reconcile")) return response({messages: [], pending: false});
   if (url.endsWith("/result-messages")) return response({items: []});
   if (url.endsWith("/ui-state")) return response({fence: {operation_id: null}});
   if (init?.method === "POST") {writes.push({url, body: JSON.parse(String(init.body)), key: new Headers(init.headers).get("Idempotency-Key") ?? ""});
-   if (url.endsWith("/conversations")) return response(conversation);
+   if (url.endsWith("/conversations")) return response(conversation); if (writeGate) await writeGate;
    if (fail) throw new TypeError("network"); items = [run()]; return response({agent_run: items[0]}); }
   if (url.includes("/agent-runs")) return response({items, next_cursor: null});
   return response({items: [conversation], next_cursor: null});
@@ -34,6 +35,9 @@ it("switches from a centered empty composer to the conversation layout", async (
  expect(w.text()).not.toContain("刷新运行状态");
  expect(w.text()).not.toContain("刷新对话列表");
  expect(w.text()).not.toContain("描述你的研究目标");
+ expect(w.find(".conversation-header").exists()).toBe(false);
+ expect(w.get(".conversation-scroll").find(".composer").exists()).toBe(false);
+ expect(w.get(".composer").element.parentElement).toBe(w.get("main").element);
  expect(w.find('[aria-label="对话消息"]').exists()).toBe(false);
  await w.get("textarea").setValue("1000 MPa 转 GPa");
  await w.get("form").trigger("submit"); await flushPromises();
@@ -46,6 +50,14 @@ it("reads persisted answers without writes", async () => {items = [run()]; const
 it("submits a goal and clears its acknowledged draft", async () => {
  const w = await show(); await w.get("textarea").setValue("1000 MPa 转 GPa"); await w.get("form").trigger("submit"); await flushPromises();
  expect(writes[0]?.body).toEqual({mode: "NEW_RUN", content_text: "1000 MPa 转 GPa", attachments: []}); expect((w.get("textarea").element as HTMLTextAreaElement).value).toBe("");
+});
+it("hides the global pending banner and sent draft while a submission is running", async () => {
+ let release = () => {}; writeGate = new Promise<void>(resolve => { release = resolve; });
+ const w = await show(); await w.get("textarea").setValue("研究目标"); await w.get("form").trigger("submit"); await flushPromises();
+ expect(w.text()).not.toContain("请求正在执行，进度会自动更新。");
+ expect(w.text()).not.toContain("检查原提交");
+ expect((w.get("textarea").element as HTMLTextAreaElement).value).toBe("");
+ release(); await flushPromises();
 });
 it("resumes the exact Run and waiting version", async () => {
  items = [run({status: "WAITING_FOR_USER", final_answer: null, waiting_version: 3, waiting: {reason: "TOOL_ARGUMENT_CLARIFICATION", question: "请提供温度"}})];

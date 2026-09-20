@@ -299,6 +299,31 @@ def test_zta_context_projection_uses_an_explicit_result_field_allowlist() -> Non
     }
 
 
+def test_zta_presenter_distinguishes_requested_sem_and_intermediate_sem() -> None:
+    presenter = build_zta35g_tool_definition().binding.presenter
+    assert presenter is not None
+    data = {
+        "yield_strength": {"value": 409.21694698327104, "unit": "MPa"},
+        "elongation": {"value": 2.920791509342433, "unit": "%"},
+    }
+
+    complete = presenter({"status": "SUCCEEDED",
+        "requested_outputs": ["sem_image", "mechanical_properties"],
+        "completed_outputs": ["sem_image", "mechanical_properties"], "failed_outputs": [], "data": data})
+    assert complete["summary"] == (
+        "SEM 图像已生成，可在结果图片中查看。屈服强度：409.2 MPa；延伸率：2.921 %。")
+
+    mechanical_only = presenter({"status": "SUCCEEDED", "requested_outputs": ["mechanical_properties"],
+        "completed_outputs": ["mechanical_properties"], "failed_outputs": [], "data": data})
+    assert "SEM 图像" not in mechanical_only["summary"]
+    assert "屈服强度：409.2 MPa" in mechanical_only["summary"]
+
+    partial = presenter({"status": "PARTIALLY_SUCCEEDED",
+        "requested_outputs": ["sem_image", "mechanical_properties"], "completed_outputs": ["sem_image"],
+        "failed_outputs": ["mechanical_properties"], "data": {}})
+    assert partial["summary"] == "SEM 图像已生成，可在结果图片中查看。力学性能预测未能完成。"
+
+
 @pytest.mark.parametrize(
     "factory",
     [

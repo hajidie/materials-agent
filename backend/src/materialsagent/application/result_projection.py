@@ -16,6 +16,10 @@ FIELD_LABELS = {"semantic_annotations": "请确认模型推断的字段单位", 
     "aging_temperature": "时效温度", "aging_time": "时效时间", "requested_outputs": "所需结果", "from_unit": "原始单位",
     "to_unit": "目标单位", "value": "数值", "material": "材料"}
 
+OUTPUT_STATES = frozenset({"SUCCEEDED", "PARTIALLY_SUCCEEDED", "FAILED"})
+ARTIFACT_ROLES = frozenset({"requested_output", "intermediate", "supporting"})
+IMAGE_MEDIA_TYPES = frozenset({"image/png", "image/jpeg"})
+
 
 def number(value):
     return type(value) in (int, float) and isfinite(value)
@@ -29,6 +33,49 @@ def warning_notes(values):
         if note not in notes:
             notes.append(note)
     return notes
+
+
+def project_output_outcome(observation):
+    """Project authoritative completion facts without result or storage identity."""
+    result = observation.result_summary
+    if not isinstance(result, Mapping):
+        return None
+    outcome = {
+        "status": observation.status if observation.status in OUTPUT_STATES else "UNKNOWN",
+        "requested_outputs": [],
+        "completed_outputs": [],
+        "failed_outputs": [],
+    }
+    for key in ("requested_outputs", "completed_outputs", "failed_outputs"):
+        values = result.get(key)
+        if (isinstance(values, (list, tuple)) and len(values) <= 32
+                and all(isinstance(item, str) and 0 < len(item) <= 128 for item in values)):
+            outcome[key] = list(values)
+    return outcome
+
+
+def project_result_artifacts(observation):
+    """Describe user-visible result assets; never expose IDs, URLs or digests."""
+    artifacts = []
+    for artifact in observation.artifacts[:16]:
+        if not isinstance(artifact, Mapping):
+            continue
+        role = artifact.get("role")
+        media_type = artifact.get("media_type")
+        if role not in ARTIFACT_ROLES or media_type not in IMAGE_MEDIA_TYPES:
+            continue
+        item = {
+            "kind": "sem_image" if observation.tool_name == "zta35g_sem_virtual_lab" else "image",
+            "role": role,
+            "available_to_user": artifact.get("status") == "AVAILABLE",
+            "media_type": media_type,
+        }
+        for key in ("width", "height"):
+            value = artifact.get(key)
+            if type(value) is int and 0 < value <= 16384:
+                item[key] = value
+        artifacts.append(item)
+    return artifacts
 
 
 def project_resource(resource, *, kind=None):

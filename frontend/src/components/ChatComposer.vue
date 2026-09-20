@@ -1,12 +1,24 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { nextTick, onMounted, ref, watch } from "vue";
 import type { Attachment } from "../api/artifacts";
 const props = defineProps<{ disabled: boolean; sending: boolean; completed: number; waitingQuestion: string | null; initialDraft?: string; attachment?: Attachment | undefined; uploading?: boolean; uploadError?: string | null; canRetryUpload?: boolean }>();
 const emit = defineEmits<{ submit: [text: string]; "cancel-resume": []; "update-draft": [text: string]; "upload": [file: File]; "remove-attachment": []; "check-upload": [] }>();
 const draft = ref(props.initialDraft ?? "");
 const invalid = ref(false);
 const fileInput = ref<HTMLInputElement | null>(null);
-watch(draft, value => emit("update-draft", value));
+const messageInput = ref<HTMLTextAreaElement | null>(null);
+const MIN_TEXTAREA_HEIGHT = 40;
+const MAX_TEXTAREA_HEIGHT = 192;
+function resizeTextarea() {
+  const input = messageInput.value;
+  if (!input) return;
+  input.style.height = "auto";
+  const contentHeight = input.scrollHeight;
+  input.style.height = `${Math.min(Math.max(contentHeight, MIN_TEXTAREA_HEIGHT), MAX_TEXTAREA_HEIGHT)}px`;
+  input.style.overflowY = contentHeight > MAX_TEXTAREA_HEIGHT ? "auto" : "hidden";
+}
+watch(draft, value => { emit("update-draft", value); void nextTick(resizeTextarea); });
+onMounted(() => { void nextTick(resizeTextarea); });
 function chooseFile(event: Event) {
   const input = event.target as HTMLInputElement;
   const selected = input.files?.[0];
@@ -15,6 +27,10 @@ function chooseFile(event: Event) {
 }
 watch(() => props.completed, () => { draft.value = ""; invalid.value = false; });
 watch(() => props.initialDraft, value => { if (value && !draft.value) draft.value = value; });
+watch(() => props.sending, sending => {
+  if (sending) { draft.value = ""; invalid.value = false; }
+  else if (props.initialDraft && !draft.value) draft.value = props.initialDraft;
+});
 function submit() {
   if (props.disabled || props.sending) return;
   invalid.value = !draft.value.trim() && !props.attachment;
@@ -29,7 +45,7 @@ function onKeydown(event: KeyboardEvent) {
   <section class="composer" aria-label="发送消息">
     <div v-if="waitingQuestion" class="supplement-banner"><p>正在补充：{{ waitingQuestion }}</p><button class="button button--text" :disabled="disabled" @click="$emit('cancel-resume')">改为新目标</button></div>
     <form class="composer__form" novalidate @submit.prevent="submit">
-      <label for="materialsagent-message">{{ waitingQuestion ? '补充信息' : '消息' }}</label>
+      <label class="visually-hidden" for="materialsagent-message">{{ waitingQuestion ? '补充信息' : '消息' }}</label>
       <div class="composer__box">
       <section v-if="attachment || uploading || uploadError" class="composer__attachments" aria-label="已添加的附件">
         <div v-if="attachment" class="composer__attachment">
@@ -40,14 +56,14 @@ function onKeydown(event: KeyboardEvent) {
         <p v-if="uploadError" class="field-error" role="alert">{{ uploadError }}</p>
         <button v-if="uploadError && canRetryUpload" class="button" type="button" :disabled="disabled" @click="$emit('check-upload')">核查原上传</button>
       </section>
-      <textarea class="resize-none" id="materialsagent-message" v-model="draft" rows="4" maxlength="32768" :disabled="disabled"
-        :aria-invalid="invalid" :aria-describedby="invalid ? 'composer-error' : undefined" @keydown="onKeydown" />
-      <p v-if="invalid" id="composer-error" class="field-error" role="alert">请输入消息后再发送。</p>
-      <div class="composer__toolbar">
+      <div class="composer__input-row">
       <input ref="fileInput" id="attachment-file" type="file" hidden accept=".csv,image/png,image/jpeg" :disabled="disabled" @change="chooseFile" />
       <button class="composer__add" type="button" aria-label="添加附件" title="添加附件" :disabled="disabled" @click="fileInput?.click()">+</button>
+      <textarea ref="messageInput" class="resize-none" id="materialsagent-message" v-model="draft" rows="1" maxlength="32768" :disabled="disabled"
+        :aria-invalid="invalid" :aria-describedby="invalid ? 'composer-error' : undefined" @input="resizeTextarea" @keydown="onKeydown" />
       <button class="button button--primary" type="submit" :disabled="disabled" :aria-busy="sending">{{ sending ? '正在执行…' : waitingQuestion ? '补充并继续' : '发送' }}</button>
       </div>
+      <p v-if="invalid" id="composer-error" class="field-error" role="alert">请输入消息后再发送。</p>
       </div>
     </form>
   </section>

@@ -46,7 +46,7 @@ def internal_values(value):
     def visit(item):
         if isinstance(item, Mapping):
             for key, val in item.items():
-                if (key.endswith("_id") or key in {"id", "object_key", "storage_path", "remote_identity_digest",
+                if ((key.endswith("_id") and key != "tool_id") or key in {"id", "object_key", "storage_path", "remote_identity_digest",
                         "identity_digest", "content_digest", "execution_value", "schema_hash"}) and isinstance(val, str) and val:
                     found.add(val)
                 if key == "mapping" and isinstance(val, Mapping):
@@ -128,8 +128,20 @@ class ContextFramework:
             value["question"] = {"question": run.waiting.question,
                 "fields": [aliases.get(field, field) for field in run.waiting.fields]}
         if "execution_facts" in value:
-            value["execution_facts"] = [{"tool_name": o.tool_name, "source": by_id[o.observation_id],
-                "result": model_observation(o)["presentation"]} for o in run.observations if o.kind == "TOOL_RESULT"]
+            value["execution_facts"] = []
+            for observation in run.observations:
+                if observation.kind != "TOOL_RESULT":
+                    continue
+                projected = model_observation(observation)
+                fact = {
+                    "tool_name": observation.tool_name,
+                    "source": by_id[observation.observation_id],
+                    "artifacts": projected["artifacts"],
+                    "result": projected["presentation"],
+                }
+                if "outcome" in projected:
+                    fact["outcome"] = projected["outcome"]
+                value["execution_facts"].append(fact)
         if "retry_target" in value:
             target = run.retry_execution
             bound_fields = set(target.resource_bindings) if target else set()

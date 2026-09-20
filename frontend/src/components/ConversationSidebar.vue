@@ -34,7 +34,7 @@ function displayTitle(title: string | null): string {
   <aside class="conversation-sidebar" aria-label="对话列表">
     <header class="conversation-sidebar__header">
       <div>
-        <h1>材料智能助手</h1>
+        <h1>组织图像专用大模型智能体</h1>
       </div>
       <button
         type="button"

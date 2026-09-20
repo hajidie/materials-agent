@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import ResultPresentation from "./ResultPresentation.vue";
+import MessageAttachment from "./MessageAttachment.vue";
 import { clarificationLabel, toolLabel } from "../api/agent";
 import type { AgentRun } from "../api/agent";
 import type { Attachment } from "../api/artifacts";
@@ -19,7 +20,9 @@ function valueText(value: unknown): string {
 <template>
   <article class="chat-turn">
     <section v-for="message in run.user_messages" :key="message.message_id" class="chat-user" aria-label="你的消息"><p>{{ message.text }}</p>
-      <button v-for="attachment in message.attachments" :key="attachment.attachment_id" class="attachment-card" @click="$emit('artifact', { message: message.message_id, attachment })">{{ attachment.name }} <span>查看详情</span></button>
+      <MessageAttachment v-for="attachment in message.attachments" :key="attachment.attachment_id"
+        :conversation-id="run.conversation_id" :message-id="message.message_id" :attachment="attachment"
+        @open="$emit('artifact', { message: message.message_id, attachment })" />
     </section>
     <section class="chat-assistant" aria-label="助手回复">
       <p v-if="run.status === 'RUNNING' || run.status === 'PENDING'" class="muted" role="status">正在处理你的请求…</p>
@@ -34,7 +37,9 @@ function valueText(value: unknown): string {
       </section>
       <p v-if="run.final_answer" class="agent-answer">{{ run.final_answer.text }}</p>
       <template v-else><ResultPresentation v-for="observation in run.observations" :key="observation.observation_id" :value="observation.presentation" /></template>
-      <div v-if="run.final_answer" class="message-attachments"><button v-for="attachment in resultAttachments" :key="attachment.attachment_id" class="attachment-card" @click="$emit('artifact', { message: run.final_answer!.answer_id, attachment })">{{ attachment.name }} <span>查看详情</span></button></div>
+      <div v-if="run.final_answer" class="message-attachments"><MessageAttachment v-for="attachment in resultAttachments" :key="attachment.attachment_id"
+        :conversation-id="run.conversation_id" :message-id="run.final_answer!.answer_id" :attachment="attachment"
+        @open="$emit('artifact', { message: run.final_answer!.answer_id, attachment })" /></div>
       <p v-if="run.outcome_unknown" class="field-error" role="alert">暂时无法确认结果，请核查原操作。不会重复执行。</p>
       <p v-else-if="run.error_message" class="field-error" role="alert">{{ run.error_message }}</p>
       <p v-if="receipt" role="status">{{ receipt }}</p>

@@ -45,7 +45,7 @@ describe("ConversationSidebar", () => {
     const wrapper = mountSidebar();
     const header = wrapper.get(".conversation-sidebar__header");
 
-    expect(header.get("h1").text()).toBe("材料智能助手");
+    expect(header.get("h1").text()).toBe("组织图像专用大模型智能体");
     expect(header.find(".eyebrow").exists()).toBe(false);
     expect(header.text()).not.toContain("本地材料研究平台");
   });

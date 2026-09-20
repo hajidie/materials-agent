@@ -90,14 +90,23 @@ def proposal_catalog(catalog):
 
 
 def model_observation(observation, enabled=True):
-    from materialsagent.application.result_projection import project_result
+    from materialsagent.application.result_projection import (
+        project_output_outcome,
+        project_result,
+        project_result_artifacts,
+    )
     value = project_result(observation)
-    return {
+    result = {
         "kind": "TOOL_RESULT",
         "tool_name": observation.tool_name,
+        "artifacts": project_result_artifacts(observation),
         "data": value["facts"],
         "presentation": {key: item for key, item in value.items() if key != "facts"},
     }
+    outcome = project_output_outcome(observation)
+    if outcome is not None:
+        result["outcome"] = outcome
+    return result
 
 
 def model_draft(draft, enabled=True):

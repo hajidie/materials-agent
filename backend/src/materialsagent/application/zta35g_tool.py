@@ -270,6 +270,37 @@ def _context_projection(value: Mapping[str, object]) -> Mapping[str, object]:
     }
 
 
+def _present(value: Mapping[str, object]) -> Mapping[str, object]:
+    """Deterministic user summary from the committed output contract."""
+    completed = value.get("completed_outputs")
+    failed = value.get("failed_outputs")
+    completed = completed if isinstance(completed, (list, tuple)) else ()
+    failed = failed if isinstance(failed, (list, tuple)) else ()
+    parts: list[str] = []
+    if "sem_image" in completed:
+        parts.append("SEM 图像已生成，可在结果图片中查看。")
+    elif "sem_image" in failed:
+        parts.append("SEM 图像未能生成。")
+    data = value.get("data")
+    if "mechanical_properties" in completed and isinstance(data, Mapping):
+        quantities = []
+        for field_name, label in (("yield_strength", "屈服强度"), ("elongation", "延伸率")):
+            item = data.get(field_name)
+            if isinstance(item, Mapping):
+                number = item.get("value")
+                unit = item.get("unit")
+                if type(number) in (int, float) and isinstance(unit, str):
+                    quantities.append(f"{label}：{number:.4g} {unit}")
+        if quantities:
+            parts.append("；".join(quantities) + "。")
+    elif "mechanical_properties" in failed:
+        parts.append("力学性能预测未能完成。")
+    return {
+        "title": "ZTA35G SEM 虚拟实验结果",
+        "summary": "".join(parts) or "处理结果已保存。",
+    }
+
+
 def build_zta35g_tool_definition(client: ToolClientPort | None = None) -> RegisteredTool:
     metadata = _zta35g_metadata()
     tool: MaterialTool = ZTA35GMaterialTool(metadata, client or _UnavailableToolClient())
@@ -321,6 +352,7 @@ def build_zta35g_tool_definition(client: ToolClientPort | None = None) -> Regist
             execution_target=tool,
             normalizer=_normalizer,
             context_projector=_context_projection,
+            presenter=_present,
             health_probe=tool.health_check,
         ),
     )

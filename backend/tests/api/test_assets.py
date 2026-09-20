@@ -180,6 +180,7 @@ def _execute_asset(client, api_harness):
         headers= {"Idempotency-Key": "asset-valid-run"}, json={"mode": "NEW_RUN", "content_text": "生成图像和性能"}).json()["data"]["agent_run"])
     observation = next(o for o in run["observations"] if o["kind"] == "TOOL_RESULT")
     assert observation["artifacts"], run
+    assert "SEM 图像已生成" in observation["presentation"]["summary"]
     tool_run_id = observation["tool_run_id"]
     with create_session_factory(api_harness.engine)() as session:
         tool_run = session.get(ToolRunRow, tool_run_id)

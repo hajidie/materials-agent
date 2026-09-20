@@ -57,6 +57,72 @@ def test_synthesis_accepts_only_projected_facts_and_local_source_labels():
             framework.output(frame, invalid, run)
 
 
+@pytest.mark.parametrize("role", ["agent_decision", "final_answer"])
+def test_sem_result_projection_preserves_output_and_safe_image_facts(role):
+    framework = ContextFramework()
+    run = AgentRun(conversation_id="conversation-private", actor_id="actor-private",
+        source_message_id="message-private", goal="生成 SEM 图像并预测力学性能")
+    observation = Observation(step_id="step-private", tool_name="zta35g_sem_virtual_lab",
+        kind="TOOL_RESULT", status="SUCCEEDED",
+        data={"yield_strength": {"value": 409.2, "unit": "MPa"},
+              "elongation": {"value": 2.921, "unit": "%"}},
+        result_summary={"result_id": "result-private", "tool_run_id": "tool-run-private",
+            "tool_id": "zta35g_sem_virtual_lab", "status": "SUCCEEDED",
+            "requested_outputs": ["sem_image", "mechanical_properties"],
+            "completed_outputs": ["sem_image", "mechanical_properties"], "failed_outputs": [],
+            "data": {}, "warnings": [], "provenance": {}, "error": None,
+            "tool_version": "0.1.0", "schema_hash": "a" * 64, "created_at": "2026-09-20T00:00:00Z"},
+        presentation={"summary": "SEM 图像已生成，可在结果图片中查看。屈服强度：409.2 MPa；延伸率：2.921 %。"},
+        artifacts=[{"asset_id": "asset-private", "status": "AVAILABLE", "role": "requested_output",
+            "media_type": "image/png", "width": 512, "height": 512, "bit_depth": 8,
+            "size_bytes": 1024, "sha256": "b" * 64, "content_url": "/private/content"}])
+    run.observations = [observation]
+    payload = {"goal": run.goal, "observations": [],
+        "selected_observation_ids": [observation.observation_id]}
+    if role == "agent_decision":
+        payload.update(execution_facts=[], tools=[])
+    frame = framework.build(role, payload, run)
+    projected = frame.payload["observations"][0]
+
+    assert projected["tool_name"] == "zta35g_sem_virtual_lab"
+    assert projected["outcome"] == {
+        "status": "SUCCEEDED",
+        "requested_outputs": ["sem_image", "mechanical_properties"],
+        "completed_outputs": ["sem_image", "mechanical_properties"],
+        "failed_outputs": [],
+    }
+    assert projected["artifacts"] == [{
+        "kind": "sem_image", "role": "requested_output", "available_to_user": True,
+        "media_type": "image/png", "width": 512, "height": 512,
+    }]
+    if role == "agent_decision":
+        assert frame.payload["execution_facts"][0]["outcome"] == projected["outcome"]
+        assert frame.payload["execution_facts"][0]["artifacts"] == projected["artifacts"]
+    wire = json.dumps(frame.payload, ensure_ascii=False)
+    for forbidden in ("result-private", "tool-run-private", "asset-private", "/private/content", "b" * 64):
+        assert forbidden not in wire
+
+
+def test_intermediate_sem_is_not_projected_as_requested_output():
+    from materialsagent.domain.models.ml_resource_context import model_observation
+    observation = Observation(step_id="step", tool_name="zta35g_sem_virtual_lab",
+        kind="TOOL_RESULT", status="SUCCEEDED",
+        data={"yield_strength": {"value": 409.2, "unit": "MPa"},
+              "elongation": {"value": 2.921, "unit": "%"}},
+        result_summary={"status": "SUCCEEDED", "requested_outputs": ["mechanical_properties"],
+            "completed_outputs": ["mechanical_properties"], "failed_outputs": []},
+        artifacts=[{"status": "AVAILABLE", "role": "intermediate", "media_type": "image/png"}])
+
+    projected = model_observation(observation)
+
+    assert projected["outcome"]["requested_outputs"] == ["mechanical_properties"]
+    assert projected["outcome"]["completed_outputs"] == ["mechanical_properties"]
+    assert projected["artifacts"] == [{
+        "kind": "sem_image", "role": "intermediate", "available_to_user": True,
+        "media_type": "image/png",
+    }]
+
+
 def test_provider_cannot_emit_internal_resource_parameters():
     framework, run = ContextFramework(), example()
     frame = framework.build("agent_decision", {"tools": [{"tool_name": "materials_ml_get_training_run", "schema": {

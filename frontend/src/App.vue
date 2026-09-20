@@ -8,6 +8,7 @@ import { agentRequest, clarificationLabel } from "./api/agent";
 import { useAgentRuns } from "./composables/useAgentRuns";
 import { useChatArtifacts } from "./composables/useChatArtifacts";
 import ArtifactViewer from "./components/ArtifactViewer.vue";
+import MessageAttachment from "./components/MessageAttachment.vue";
 import type { ArtifactTarget, Attachment } from "./api/artifacts";
 import { ApiResponseError } from "./api/errors";
 import type { AgentRun } from "./api/agent";
@@ -27,7 +28,6 @@ const deleteId = ref<string | null>(null);
 const deleting = ref(false);
 const deleteError = ref<string | null>(null);
 const candidate = computed(() => agent.conversations.value.find(c => c.conversation_id === deleteId.value));
-const selected = computed(() => agent.conversations.value.find(c => c.conversation_id === agent.selectedId.value));
 onMounted(() => { void agent.initialize(); });
 async function submit(text: string) {
   await agent.submit(text);
@@ -85,11 +85,11 @@ function safely(promise: Promise<unknown>) { void promise.catch(() => { agent.er
       @create="safely(agent.select(null))" @select="safely(agent.select($event))" @delete="deleteId = $event"
       @load-more="safely(agent.refreshConversations(true))" />
     <main class="app-main" :class="{ 'app-main--empty': agent.runs.value.length === 0 && !agent.loading.value }">
-      <header class="conversation-header"><h2>{{ selected?.title || '材料智能助手' }}</h2></header>
+      <section class="conversation-scroll">
       <section v-if="chat.fence.value" class="global-error" role="status"><p>对话删除待核查，新工作已暂停。关闭提示或重新打开页面不会解除禁令。</p><p v-if="deleteError">{{ deleteError }}</p><button class="button" :disabled="deleting" @click="safely(reconcileDelete())">核查对话删除</button></section>
-      <section v-if="agent.error.value || agent.pending.value" class="global-error" role="status">
-        <p>{{ agent.error.value || (agent.sending.value ? '请求正在执行，进度会自动更新。' : '有一项提交尚未确认结果。') }}</p>
-        <button v-if="agent.pending.value" class="button" :disabled="agent.sending.value || !!chat.fence.value" @click="safely(agent.sendPending())">检查原提交</button>
+      <section v-if="agent.error.value || (agent.pending.value && !agent.sending.value)" class="global-error" role="status">
+        <p>{{ agent.error.value || '有一项提交尚未确认结果。' }}</p>
+        <button v-if="agent.pending.value && !agent.sending.value" class="button" :disabled="!!chat.fence.value" @click="safely(agent.sendPending())">检查原提交</button>
       </section>
       <p v-if="agent.loading.value" role="status">正在加载对话…</p>
       <button v-if="agent.nextCursor.value" class="button" @click="safely(agent.refresh(true))">加载更早的消息</button>
@@ -100,13 +100,16 @@ function safely(promise: Promise<unknown>) { void promise.catch(() => { agent.er
             @regenerate="safely(agent.retry(item.run))" @retry="safely(agent.retry(item.run, $event))"
             @artifact="view($event)" @reconcile="safely(reconcileRun(item.run, $event))" />
           <article v-else-if="item.result" class="chat-assistant chat-result" aria-label="完成结果"><p class="agent-answer">{{ item.result.text }}</p>
-            <button v-for="attachment in item.result.artifacts" :key="attachment.attachment_id" class="attachment-card" @click="view({ message: item.result.message_id, attachment })">{{ attachment.name }} <span>查看详情</span></button>
+            <MessageAttachment v-for="attachment in item.result.artifacts" :key="attachment.attachment_id"
+              :conversation-id="agent.selectedId.value!" :message-id="item.result.message_id" :attachment="attachment"
+              @open="view({ message: item.result.message_id, attachment })" />
           </article>
         </template>
       </section>
       <section v-else-if="!agent.loading.value" class="chat-welcome"><h1>今天想研究什么？</h1><p>描述你的问题，或添加实验数据和 EBSD 图片。</p></section>
       <p v-if="chat.pending.value" class="muted" role="status">正在处理已提交的数据，完成后会在这里显示结果。</p>
       <section v-if="chat.notice.value" role="status"><p>{{ chat.notice.value }}</p><button class="button" :disabled="!!chat.fence.value" @click="safely(chat.observe(true))">核查结果</button></section>
+      </section>
       <ChatComposer :key="`${agent.selectedId.value}:${agent.resumeTarget.value?.agent_run_id ?? 'new'}`" :disabled="agent.busy.value" :sending="agent.sending.value" :completed="agent.completed.value"
         :waiting-question="agent.resumeTarget.value?.waiting ? clarificationLabel(agent.resumeTarget.value.waiting.question) : null"
         :initial-draft="composerText"
