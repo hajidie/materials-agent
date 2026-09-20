@@ -106,7 +106,16 @@ function safely(promise: Promise<unknown>) { void promise.catch(() => { agent.er
           </article>
         </template>
       </section>
-      <section v-else-if="!agent.loading.value" class="chat-welcome"><h1>今天想研究什么？</h1><p>你可以询问组织图像相关的问题</p></section>
+      <section v-else-if="!agent.loading.value" class="chat-welcome">
+        <span class="chat-welcome__mark" aria-hidden="true">
+          <svg viewBox="0 0 48 48" focusable="false">
+            <path d="M24 6.5 27.1 18l11.4 3.1-11.4 3.1L24 35.5l-3.1-11.3L9.5 21.1 20.9 18 24 6.5Z" />
+            <circle cx="37" cy="10.5" r="3.5" />
+          </svg>
+        </span>
+        <h1>今天想研究什么？</h1>
+        <p>你可以询问组织图像相关的问题</p>
+      </section>
       <p v-if="chat.pending.value" class="muted" role="status">正在处理已提交的数据，完成后会在这里显示结果。</p>
       <section v-if="chat.notice.value" role="status"><p>{{ chat.notice.value }}</p><button class="button" :disabled="!!chat.fence.value" @click="safely(chat.observe(true))">核查结果</button></section>
       </section>

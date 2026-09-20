@@ -61,10 +61,15 @@ function onKeydown(event: KeyboardEvent) {
       </section>
       <div class="composer__input-row">
       <input ref="fileInput" id="attachment-file" type="file" hidden accept=".csv,image/png,image/jpeg" :disabled="disabled" @change="chooseFile" />
-      <button class="composer__add" type="button" aria-label="添加附件" title="添加附件" :disabled="disabled" @click="fileInput?.click()">+</button>
+      <button class="composer__add" type="button" aria-label="添加附件" title="添加附件" :disabled="disabled" @click="fileInput?.click()">
+        <svg aria-hidden="true" viewBox="0 0 20 20" focusable="false"><path d="M10 3.75v12.5M3.75 10h12.5" /></svg>
+      </button>
       <textarea ref="messageInput" class="resize-none" id="materialsagent-message" v-model="draft" rows="1" maxlength="32768" :disabled="disabled"
         :aria-invalid="invalid" :aria-describedby="invalid ? 'composer-error' : undefined" @input="resizeTextarea" @keydown="onKeydown" />
-      <button class="button button--primary" type="submit" :disabled="disabled" :aria-busy="sending">{{ sending ? '正在执行…' : waitingQuestion ? '补充并继续' : '发送' }}</button>
+      <button class="button button--primary composer__submit" type="submit" :disabled="disabled" :aria-busy="sending">
+        <span>{{ sending ? '正在执行…' : waitingQuestion ? '补充并继续' : '发送' }}</span>
+        <svg v-if="!sending" aria-hidden="true" viewBox="0 0 20 20" focusable="false"><path d="m4 10 11-6-3.25 12-2.2-4.35L4 10Zm5.55 1.65L15 4" /></svg>
+      </button>
       </div>
       <p v-if="invalid" id="composer-error" class="field-error" role="alert">请输入消息后再发送。</p>
       </div>

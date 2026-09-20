@@ -33,7 +33,13 @@ function displayTitle(title: string | null): string {
 <template>
   <aside class="conversation-sidebar" aria-label="对话列表">
     <header class="conversation-sidebar__header">
-      <div>
+      <div class="brand-lockup">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 32 32" focusable="false">
+            <path d="M16 4.75 18.2 12l7.05 2.2-7.05 2.2L16 23.5l-2.2-7.1-7.05-2.2L13.8 12 16 4.75Z" />
+            <circle cx="24.5" cy="7.5" r="2.25" />
+          </svg>
+        </span>
         <h1>组织图像专用大模型智能体</h1>
       </div>
       <button
@@ -43,7 +49,10 @@ function displayTitle(title: string | null): string {
         :disabled="creating || createDisabled"
         @click="$emit('create')"
       >
-        {{ creating ? "创建中…" : "新建对话" }}
+        <svg v-if="!creating" aria-hidden="true" viewBox="0 0 20 20" focusable="false">
+          <path d="M10 4v12M4 10h12" />
+        </svg>
+        <span>{{ creating ? "创建中…" : "新建对话" }}</span>
       </button>
     </header>
 
@@ -90,7 +99,10 @@ function displayTitle(title: string | null): string {
           :disabled="createDisabled"
           @click="$emit('delete', conversation.conversation_id)"
         >
-          删除
+          <svg aria-hidden="true" viewBox="0 0 20 20" focusable="false">
+            <path d="M4.5 6.5h11M8 3.75h4M6.25 6.5l.6 9h6.3l.6-9M8.25 9v4.25M11.75 9v4.25" />
+          </svg>
+          <span>删除</span>
         </button>
       </div>
     </nav>
