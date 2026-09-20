@@ -66,7 +66,7 @@ def present(result):
             "resource_id": resource.get("id"), "status": resource.get("status")}
 
 
-def build_ml_tools(*, binding_version, endpoint_digest):
+def build_ml_tools(*, binding_version, endpoint_digest, health_probe=None):
     registrations = []
     for name, contract in CONTRACTS.items():
         tool_id = "materials_ml_" + name
@@ -96,7 +96,9 @@ def build_ml_tools(*, binding_version, endpoint_digest):
             remote_tool_name=name, remote_schema_hash=sha256(canonical(
                 {"input": contract["inputSchema"], "output": contract["outputSchema"]})).hexdigest())
         registrations.append(RegisteredTool(definition, ToolExecutionBinding(execution_target=binding,
-            validator=validator_for(contract["inputSchema"]), codec=lambda value: value, presenter=present)))
+            validator=validator_for(contract["inputSchema"]), codec=lambda value: value, presenter=present,
+            health_probe=(None if health_probe is None else
+                lambda binding=binding: health_probe(binding)))))
     return tuple(registrations)
 
 

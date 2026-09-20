@@ -35,6 +35,7 @@ it("switches from a centered empty composer to the conversation layout", async (
  expect(w.text()).not.toContain("刷新运行状态");
  expect(w.text()).not.toContain("刷新对话列表");
  expect(w.text()).not.toContain("描述你的研究目标");
+ expect(w.get(".chat-welcome p").text()).toBe("你可以询问组织图像相关的问题");
  expect(w.find(".conversation-header").exists()).toBe(false);
  expect(w.get(".conversation-scroll").find(".composer").exists()).toBe(false);
  expect(w.get(".composer").element.parentElement).toBe(w.get("main").element);

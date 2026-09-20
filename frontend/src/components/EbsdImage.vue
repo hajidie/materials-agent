@@ -4,7 +4,7 @@ import AssetGallery from "./AssetGallery.vue";
 import { agentRequest } from "../api/agent";
 import type { AssetSummary } from "../api/types";
 
-const props = defineProps<{ assetId: string; preview?: boolean }>();
+const props = defineProps<{ assetId: string; preview?: boolean; imageLabel?: string }>();
 const image = ref<AssetSummary | null>(null);
 const error = ref(false);
 let generation = 0;
@@ -24,7 +24,7 @@ onUnmounted(() => { generation++; });
 </script>
 <template>
   <section aria-label="EBSD 输入图片">
-    <AssetGallery v-if="image" :assets="[image]" :preview="preview" image-label="用户上传的 EBSD 输入图片" />
+    <AssetGallery v-if="image" :assets="[image]" :preview="preview" :image-label="imageLabel ?? '用户上传的 EBSD 输入图片'" />
     <p v-else-if="!error" role="status">正在加载 EBSD 图片…</p>
     <div v-else role="status"><p>EBSD 图片暂时无法加载。</p><button type="button" class="button" @click="load">重试加载图片</button></div>
   </section>

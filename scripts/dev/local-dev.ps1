@@ -144,6 +144,80 @@ function Get-ConfiguredMaterialsMlEnabled {
     return $values.Values -contains $true
 }
 
+function Get-RootDotenvEbsdModelRoot {
+    param(
+        [string]$Path = (Join-Path $RepoRoot '.env')
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $null
+    }
+    $value = $null
+    $seen = $false
+    foreach ($line in Get-Content -LiteralPath $Path -Encoding utf8) {
+        $trimmed = $line.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed.StartsWith('#')) {
+            continue
+        }
+        $separator = $trimmed.IndexOf('=')
+        if ($separator -le 0) {
+            continue
+        }
+        $name = $trimmed.Substring(0, $separator).Trim()
+        if ($name -cne 'EBSD_MODEL_ROOT') {
+            continue
+        }
+        if ($seen) {
+            throw 'LOCAL_DEV_CONFIGURATION_INVALID duplicate=EBSD_MODEL_ROOT source=root_dotenv'
+        }
+        $seen = $true
+        $value = $trimmed.Substring($separator + 1).Trim()
+        if (
+            $value.Length -ge 2 -and
+            (($value.StartsWith('"') -and $value.EndsWith('"')) -or
+            ($value.StartsWith("'") -and $value.EndsWith("'")))
+        ) {
+            $value = $value.Substring(1, $value.Length - 2)
+        }
+    }
+    return $value
+}
+
+function Resolve-EbsdModelRoot {
+    param(
+        [AllowNull()]
+        [string]$ConfiguredPath,
+        [string]$DotenvPath = (Join-Path $RepoRoot '.env')
+    )
+
+    $candidate = $ConfiguredPath
+    if ([string]::IsNullOrWhiteSpace($candidate)) {
+        $candidate = Get-RootDotenvEbsdModelRoot -Path $DotenvPath
+    }
+    if ([string]::IsNullOrWhiteSpace($candidate)) {
+        throw 'LOCAL_DEV_CONFIGURATION_MISSING name=EBSD_MODEL_ROOT source=parameter_process_or_root_dotenv'
+    }
+    try {
+        $resolved = if ([IO.Path]::IsPathRooted($candidate)) {
+            [IO.Path]::GetFullPath($candidate)
+        }
+        else {
+            [IO.Path]::GetFullPath((Join-Path $RepoRoot $candidate))
+        }
+    }
+    catch {
+        throw 'LOCAL_DEV_CONFIGURATION_INVALID name=EBSD_MODEL_ROOT reason=invalid_path'
+    }
+    if (-not (Test-Path -LiteralPath $resolved -PathType Container)) {
+        throw 'LOCAL_DEV_CONFIGURATION_INVALID name=EBSD_MODEL_ROOT reason=directory_not_found'
+    }
+    $weights = Join-Path $resolved 'model\save\CNN_1.pt'
+    if (-not (Test-Path -LiteralPath $weights -PathType Leaf)) {
+        throw 'LOCAL_DEV_CONFIGURATION_INVALID name=EBSD_MODEL_ROOT reason=weights_missing'
+    }
+    return $resolved
+}
+
 function Test-PortInUse {
     param(
         [Parameter(Mandatory = $true)]
@@ -345,7 +419,9 @@ function New-LaunchProfile {
         [Parameter(Mandatory = $true)]
         [string]$BackendPython,
         [Parameter(Mandatory = $true)]
-        [string]$RuntimePython
+        [string]$RuntimePython,
+        [AllowNull()]
+        [string]$ResolvedEbsdModelRoot
     )
 
     $backendEnvironment = @{
@@ -359,6 +435,7 @@ function New-LaunchProfile {
         ZTA35G_RUNTIME_URL = 'http://127.0.0.1:8100'
         ZTA35G_RUNTIME_TIMEOUT_SECONDS = '1200'
         ZTA35G_RUNTIME_TOKEN = $RuntimeToken
+        EBSD_MODEL_ROOT = $null
     }
     if ($Llm -eq 'Mock') {
         $backendEnvironment['DEEPSEEK_API_KEY'] = ''
@@ -387,12 +464,15 @@ function New-LaunchProfile {
     if ($Runtime -eq 'Real' -and -not (Test-Path -LiteralPath $modelRoot -PathType Container)) {
         throw 'LOCAL_DEV_CONFIGURATION_MISSING name=ZTA35G_MODEL_ROOT source=repository_default'
     }
+    if ($Runtime -eq 'Real' -and [string]::IsNullOrWhiteSpace($ResolvedEbsdModelRoot)) {
+        throw 'LOCAL_DEV_CONFIGURATION_MISSING name=EBSD_MODEL_ROOT source=launch_profile'
+    }
     $runtimeEnvironment = @{
         ZTA35G_RUNTIME_PORT = '8100'
         PYTHONPATH = $runtimeSource
         ZTA35G_RUNTIME_TOKEN = $RuntimeToken
         ZTA35G_MODEL_ROOT = $(if ($Runtime -eq 'Real') { [IO.Path]::GetFullPath($modelRoot) } else { $null })
-        EBSD_MODEL_ROOT = $(if ($Runtime -eq 'Real' -and $EbsdModelRoot) { [IO.Path]::GetFullPath($EbsdModelRoot) } else { $null })
+        EBSD_MODEL_ROOT = $(if ($Runtime -eq 'Real') { $ResolvedEbsdModelRoot } else { $null })
         DEEPSEEK_API_KEY = $null
         DASHSCOPE_API_KEY = $null
         POSTGRES_PASSWORD = $null
@@ -434,6 +514,7 @@ function New-LaunchProfile {
             DASHSCOPE_API_KEY = $null
             ZTA35G_RUNTIME_TOKEN = $null
             ZTA35G_MODEL_ROOT = $null
+            EBSD_MODEL_ROOT = $null
             POSTGRES_PASSWORD = $null
             MINIO_ACCESS_KEY = $null
             MINIO_SECRET_KEY = $null
@@ -447,6 +528,7 @@ function New-LaunchProfile {
             DASHSCOPE_API_KEY = $null
             ZTA35G_RUNTIME_TOKEN = $null
             ZTA35G_MODEL_ROOT = $null
+            EBSD_MODEL_ROOT = $null
             TIMELINE_CURSOR_SIGNING_KEY = $null
         }
     }
@@ -1225,25 +1307,36 @@ function Start-ManagedProcess {
 function Invoke-RuntimeReadyProbe {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Token
+        [string]$Token,
+        [bool]$RequireEbsd = $false,
+        [scriptblock]$Request
     )
 
     if ([string]::IsNullOrWhiteSpace($Token)) {
         return $false
     }
+    if ($null -eq $Request) {
+        $Request = {
+            param($uri, $headers)
+            Invoke-WebRequest `
+                -UseBasicParsing `
+                -Uri $uri `
+                -Headers $headers `
+                -TimeoutSec 2
+        }
+    }
     try {
         $headers = @{ 'X-ZTA35G-Runtime-Token' = $Token }
-        $live = Invoke-WebRequest `
-            -UseBasicParsing `
-            -Uri 'http://127.0.0.1:8100/internal/v1/health/live' `
-            -Headers $headers `
-            -TimeoutSec 2
-        $ready = Invoke-WebRequest `
-            -UseBasicParsing `
-            -Uri 'http://127.0.0.1:8100/internal/v1/health/ready' `
-            -Headers $headers `
-            -TimeoutSec 2
-        return $live.StatusCode -eq 200 -and $ready.StatusCode -eq 200
+        $live = & $Request 'http://127.0.0.1:8100/internal/v1/health/live' $headers
+        $ready = & $Request 'http://127.0.0.1:8100/internal/v1/health/ready' $headers
+        if ($live.StatusCode -ne 200 -or $ready.StatusCode -ne 200) {
+            return $false
+        }
+        if ($RequireEbsd) {
+            $ebsd = & $Request 'http://127.0.0.1:8100/internal/v1/ebsd/health/ready' $headers
+            return $ebsd.StatusCode -eq 200
+        }
+        return $true
     }
     catch {
         return $false
@@ -1252,27 +1345,34 @@ function Invoke-RuntimeReadyProbe {
 
 function Invoke-RuntimeReadyViaBackendProbe {
     param(
+        [string[]]$ToolIds = @('zta35g_sem_virtual_lab'),
         [scriptblock]$Request
     )
 
     if ($null -eq $Request) {
         $Request = {
+            param($toolId)
             Invoke-WebRequest `
                 -UseBasicParsing `
-                -Uri 'http://127.0.0.1:8000/api/v1/tools/zta35g_sem_virtual_lab' `
+                -Uri "http://127.0.0.1:8000/api/v1/tools/$toolId" `
                 -TimeoutSec 4
         }
     }
     try {
-        $response = & $Request
-        if ([int]$response.StatusCode -ne 200) {
-            return $false
+        foreach ($toolId in $ToolIds) {
+            $response = & $Request $toolId
+            if ([int]$response.StatusCode -ne 200) {
+                return $false
+            }
+            $payload = [string]$response.Content | ConvertFrom-Json
+            if (
+                [string]$payload.data.tool_id -cne $toolId -or
+                [string]$payload.data.availability -cne 'AVAILABLE'
+            ) {
+                return $false
+            }
         }
-        $payload = [string]$response.Content | ConvertFrom-Json
-        return (
-            [string]$payload.data.tool_id -ceq 'zta35g_sem_virtual_lab' -and
-            [string]$payload.data.availability -ceq 'AVAILABLE'
-        )
+        return $true
     }
     catch {
         return $false
@@ -1704,10 +1804,26 @@ function Invoke-LocalDevStart {
     $runId = [Guid]::NewGuid().ToString('N')
     $runRelative = "tmp/local-dev/$runId"
     $materialsMlEnabled = $false
+    $resolvedEbsdModelRoot = $null
+    $runtimeToolIds = @(
+        'materials_unit_conversion',
+        'zta35g_sem_virtual_lab'
+    )
+    if ($Runtime -eq 'Real') {
+        $runtimeToolIds += 'ebsd_yield_strength_predictor'
+    }
 
     try {
         $currentStage = 'feature_preflight'
         $materialsMlEnabled = Get-ConfiguredMaterialsMlEnabled
+        if ($materialsMlEnabled) {
+            $runtimeToolIds += @(
+                'materials_ml_analyze_tabular_dataset',
+                'materials_ml_get_training_run',
+                'materials_ml_predict_with_model',
+                'materials_ml_train_tabular_regression'
+            )
+        }
         if (Test-Path -LiteralPath $StatePath -PathType Leaf) {
             try {
                 $existing = Read-LocalDevState
@@ -1743,7 +1859,7 @@ function Invoke-LocalDevStart {
                 }
                 $backendReady = Invoke-BackendReadyProbe
                 $runtimeReady = $(if ($backendReady) {
-                    Invoke-RuntimeReadyViaBackendProbe
+                    Invoke-RuntimeReadyViaBackendProbe -ToolIds $runtimeToolIds
                 }
                 else {
                     $false
@@ -1878,6 +1994,10 @@ function Invoke-LocalDevStart {
         if ($Llm -eq 'Provider') {
             Assert-ProviderRootConfiguration -BackendPython $backendPythonPath
         }
+        if ($Runtime -eq 'Real') {
+            $resolvedEbsdModelRoot = Resolve-EbsdModelRoot `
+                -ConfiguredPath $EbsdModelRoot
+        }
         $npm = Get-Command 'npm.cmd' -CommandType Application -ErrorAction SilentlyContinue |
             Select-Object -First 1
         if ($null -eq $npm) {
@@ -1892,7 +2012,8 @@ function Invoke-LocalDevStart {
             -Llm $Llm `
             -RuntimeToken $runtimeToken `
             -BackendPython $backendPythonPath `
-            -RuntimePython $runtimePythonPath
+            -RuntimePython $runtimePythonPath `
+            -ResolvedEbsdModelRoot $resolvedEbsdModelRoot
         $dockerIdentity = Get-DockerIdentity
         $docker = $dockerIdentity.executable
 
@@ -1984,7 +2105,11 @@ function Invoke-LocalDevStart {
         Write-LocalDevState -State $state
         Wait-ForReady `
             -Name Runtime `
-            -Probe { Invoke-RuntimeReadyProbe -Token $runtimeToken } `
+            -Probe {
+                Invoke-RuntimeReadyProbe `
+                    -Token $runtimeToken `
+                    -RequireEbsd ($Runtime -eq 'Real')
+            } `
             -ProcessRecord $runtimeRecord `
             -TimeoutSeconds $ReadyTimeoutSeconds
 
@@ -2003,6 +2128,13 @@ function Invoke-LocalDevStart {
         Wait-ForReady `
             -Name Backend `
             -Probe { Invoke-BackendReadyProbe } `
+            -ProcessRecord $backendRecord `
+            -TimeoutSeconds ([Math]::Min($ReadyTimeoutSeconds, 120))
+
+        $currentStage = 'runtime_tools_ready'
+        Wait-ForReady `
+            -Name RuntimeTools `
+            -Probe { Invoke-RuntimeReadyViaBackendProbe -ToolIds $runtimeToolIds } `
             -ProcessRecord $backendRecord `
             -TimeoutSeconds ([Math]::Min($ReadyTimeoutSeconds, 120))
 

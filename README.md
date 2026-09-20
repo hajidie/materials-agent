@@ -154,10 +154,12 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 .\scripts\dev\local-dev.ps1 Start -Runtime Real -Llm Provider
 ```
 
-启用 EBSD 时通过 `-EbsdModelRoot <外部研究目录>` 或环境变量 `EBSD_MODEL_ROOT` 指定含
-`model/save/CNN_1.pt` 的只读目录。加载前核对适配层内固定的 SHA-256；不复制权重到仓库。
-未配置或加载失败仅使 EBSD 不可用，SEM 可继续运行。EBSD 使用 FP32、eval、no_grad，
-保持原有 CUDA/TF32 设置；两工具忙时返回 BUSY，不自动重试。
+真实 Runtime 同时要求 SEM 与 EBSD 就绪。EBSD 目录按 `-EbsdModelRoot <外部研究目录>`、进程环境
+`EBSD_MODEL_ROOT`、根 `.env` 中 `EBSD_MODEL_ROOT` 的顺序解析；目录必须包含
+`model/save/CNN_1.pt`。本机只需在被 Git 忽略的根 `.env` 配置一次，之后上述启动命令会同时加载
+SEM 与 EBSD，并在两者任一未就绪时让启动失败而不是留下部分可用的栈。加载前核对适配层内固定的
+SHA-256；不复制权重到仓库。EBSD 使用 FP32、eval、no_grad，保持原有 CUDA/TF32 设置；两工具忙时
+返回 BUSY，不自动重试。
 
 也可以独立组合 `-Runtime Mock|Real` 与 `-Llm Mock|Provider`。真实 Runtime 首次加载较慢时，
 可把 ready 等待上限从默认 300 秒调整到 10–900 秒：

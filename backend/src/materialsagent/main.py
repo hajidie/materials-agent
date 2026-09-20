@@ -313,7 +313,8 @@ def create_app(
                 token=resolved_settings.materials_ml_mcp_token.get_secret_value(),
                 resource_token=resolved_settings.materials_ml_resource_token.get_secret_value())
             ml_registrations = build_ml_tools(binding_version=resolved_settings.materials_ml_binding_version,
-                                             endpoint_digest=mcp_client.endpoint_digest)
+                                             endpoint_digest=mcp_client.endpoint_digest,
+                                             health_probe=mcp_client.readiness)
             executors += (MCPExecutor(mcp_client),)
         except Exception:
             if mcp_client:

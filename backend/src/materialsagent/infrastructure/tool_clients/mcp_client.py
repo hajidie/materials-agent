@@ -6,6 +6,7 @@ from hashlib import sha256
 import json
 import logging
 from time import monotonic
+from types import SimpleNamespace
 from urllib.parse import quote, urlsplit
 
 import anyio
@@ -216,6 +217,7 @@ class MCPClient:
         self.base = url[:-4]
         self.endpoint_digest = sha256(url.encode()).hexdigest()
         self.created_sessions = 0
+        self._readiness_cache = {}
         # SDK debug/validation exceptions can include untrusted arguments. Never propagate them to logs.
         logger = logging.getLogger("mcp")
         logger.addHandler(logging.NullHandler()); logger.propagate = False
@@ -265,6 +267,25 @@ class MCPClient:
             raise MCPFailure("MCP_IDENTITY_INVALID")
         return {k: v for k, v in response.items() if k != "scope_id"} | {
             "idempotency_key": "ml-invocation:" + context.invocation_run_id}
+
+    def readiness(self, binding):
+        cache_key = (binding.remote_tool_name, binding.remote_schema_hash)
+        now = monotonic()
+        cached = self._readiness_cache.get(cache_key)
+        if cached is not None and cached[0] > now:
+            return cached[1]
+        context = SimpleNamespace(
+            conversation_id="mcp-readiness",
+            invocation_run_id="mcp-readiness",
+            remote_operation=None,
+        )
+        try:
+            self.invoke(binding, {}, context, check_only=True)
+            status = "AVAILABLE"
+        except Exception:
+            status = "UNAVAILABLE"
+        self._readiness_cache[cache_key] = (now + 5, status)
+        return status
 
     def call(self, binding, arguments, context):
         return self.invoke(binding, arguments, context)

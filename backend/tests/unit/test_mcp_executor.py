@@ -6,6 +6,7 @@ pytest.importorskip("mcp")
 
 from materialsagent.application.materials_ml_tools import build_ml_tools, LocalMLAuthorization
 from materialsagent.application.mcp_executor import MCPExecutor
+from materialsagent.application.tools import ToolCatalogService
 from materialsagent.application.tool_invocations import InvocationService, ExecutorRouter
 from materialsagent.application.tool_registry import ToolRegistry
 from materialsagent.application.agent_tools import RegistryAgentGateway
@@ -58,6 +59,45 @@ def setup(name="train_tabular_regression", *, authorized=True):
         "dataset_id": "dataset", "features": ["x"], "target": "y"}
     public = service.create_from_proposal(ACTOR, _resolved(registration, args), request_id="req", idempotency_key="key")
     return store, registry, client, service, public.run
+
+
+def test_ml_catalog_health_probes_validate_each_pinned_mcp_binding():
+    checked = []
+    registry = ToolRegistry(build_ml_tools(
+        binding_version="1",
+        endpoint_digest="b" * 64,
+        health_probe=lambda binding: checked.append(binding.remote_tool_name) or "AVAILABLE",
+    ))
+
+    entries = ToolCatalogService(registry).list_entries()
+
+    assert {entry["availability"] for entry in entries} == {"AVAILABLE"}
+    assert set(checked) == {
+        "analyze_tabular_dataset",
+        "train_tabular_regression",
+        "get_training_run",
+        "predict_with_model",
+    }
+
+
+def test_mcp_readiness_is_safe_and_briefly_cached():
+    from materialsagent.infrastructure.tool_clients import mcp_client as module
+
+    client = object.__new__(module.MCPClient)
+    client._readiness_cache = {}
+    calls = []
+    client.invoke = lambda binding, arguments, context, check_only: calls.append(
+        (binding.remote_tool_name, arguments, context.conversation_id, check_only)
+    )
+    binding = SimpleNamespace(remote_tool_name="analyze_tabular_dataset", remote_schema_hash="a" * 64)
+
+    assert client.readiness(binding) == "AVAILABLE"
+    assert client.readiness(binding) == "AVAILABLE"
+    assert calls == [("analyze_tabular_dataset", {}, "mcp-readiness", True)]
+
+    failing = SimpleNamespace(remote_tool_name="get_training_run", remote_schema_hash="b" * 64)
+    client.invoke = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("private detail"))
+    assert client.readiness(failing) == "UNAVAILABLE"
 
 
 def test_write_confirmation_and_frozen_identity_precede_network_dispatch():

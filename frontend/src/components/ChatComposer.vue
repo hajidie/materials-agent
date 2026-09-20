@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { nextTick, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import type { Attachment } from "../api/artifacts";
+import EbsdImage from "./EbsdImage.vue";
 const props = defineProps<{ disabled: boolean; sending: boolean; completed: number; waitingQuestion: string | null; initialDraft?: string; attachment?: Attachment | undefined; uploading?: boolean; uploadError?: string | null; canRetryUpload?: boolean }>();
 const emit = defineEmits<{ submit: [text: string]; "cancel-resume": []; "update-draft": [text: string]; "upload": [file: File]; "remove-attachment": []; "check-upload": [] }>();
 const draft = ref(props.initialDraft ?? "");
 const invalid = ref(false);
 const fileInput = ref<HTMLInputElement | null>(null);
 const messageInput = ref<HTMLTextAreaElement | null>(null);
+const imageAttachment = computed(() => props.attachment && ["ebsd_image", "image"].includes(props.attachment.kind) ? props.attachment : null);
 const MIN_TEXTAREA_HEIGHT = 40;
 const MAX_TEXTAREA_HEIGHT = 192;
 function resizeTextarea() {
@@ -48,8 +50,9 @@ function onKeydown(event: KeyboardEvent) {
       <label class="visually-hidden" for="materialsagent-message">{{ waitingQuestion ? '补充信息' : '消息' }}</label>
       <div class="composer__box">
       <section v-if="attachment || uploading || uploadError" class="composer__attachments" aria-label="已添加的附件">
-        <div v-if="attachment" class="composer__attachment">
-          <span class="attachment-name">{{ attachment.name }}</span>
+        <div v-if="attachment" class="composer__attachment" :class="{ 'composer__attachment--image': imageAttachment }">
+          <EbsdImage v-if="imageAttachment" :asset-id="imageAttachment.attachment_id" :image-label="imageAttachment.name" preview />
+          <span v-else class="attachment-name">{{ attachment.name }}</span>
           <button class="composer__remove" type="button" aria-label="移除附件" title="移除附件" :disabled="disabled" @click="$emit('remove-attachment')">×</button>
         </div>
         <p v-if="uploading" role="status">正在上传附件…</p>

@@ -109,6 +109,66 @@ Invoke-Test 'profiles keep secrets out of arguments and state metadata' {
         'Mock Runtime entry point is missing.'
 }
 
+Invoke-Test 'real profile resolves EBSD root from root dotenv and isolates it to Runtime' {
+    $testRoot = Join-Path ([IO.Path]::GetTempPath()) (
+        'materialsagent-local-dev-ebsd-{0}' -f [Guid]::NewGuid().ToString('N')
+    )
+    $modelRoot = Join-Path $testRoot 'research root'
+    $weights = Join-Path $modelRoot 'model\save\CNN_1.pt'
+    $dotenv = Join-Path $testRoot '.env'
+    New-Item -ItemType Directory -Path (Split-Path -Parent $weights) -Force | Out-Null
+    [IO.File]::WriteAllText($weights, 'offline-fixture')
+    [IO.File]::WriteAllText($dotenv, "EBSD_MODEL_ROOT=`"$modelRoot`"")
+    try {
+        $resolved = Resolve-EbsdModelRoot -ConfiguredPath $null -DotenvPath $dotenv
+        Assert-Equal $resolved ([IO.Path]::GetFullPath($modelRoot)) 'Resolved EBSD model root'
+
+        $profile = New-LaunchProfile `
+            -Runtime Real `
+            -Llm Mock `
+            -RuntimeToken 'offline-runtime-token-canary' `
+            -BackendPython 'C:\tools\backend-python.exe' `
+            -RuntimePython 'C:\tools\runtime-python.exe' `
+            -ResolvedEbsdModelRoot $resolved
+        Assert-Equal $profile.runtime_environment['EBSD_MODEL_ROOT'] $resolved 'Runtime EBSD root'
+        Assert-True `
+            ($null -eq $profile.backend_environment['EBSD_MODEL_ROOT']) `
+            'Backend inherited the EBSD model root.'
+        Assert-True `
+            ($null -eq $profile.frontend_environment['EBSD_MODEL_ROOT']) `
+            'Frontend inherited the EBSD model root.'
+        Assert-True `
+            ($null -eq $profile.compose_environment['EBSD_MODEL_ROOT']) `
+            'Compose inherited the EBSD model root.'
+    }
+    finally {
+        Remove-Item -LiteralPath $testRoot -Recurse -Force
+    }
+}
+
+Invoke-Test 'EBSD root preflight rejects a directory without the reviewed weights' {
+    $testRoot = Join-Path ([IO.Path]::GetTempPath()) (
+        'materialsagent-local-dev-ebsd-missing-{0}' -f [Guid]::NewGuid().ToString('N')
+    )
+    New-Item -ItemType Directory -Path $testRoot | Out-Null
+    $message = $null
+    try {
+        try {
+            Resolve-EbsdModelRoot -ConfiguredPath $testRoot | Out-Null
+        }
+        catch {
+            $message = $_.Exception.Message
+        }
+        Assert-Equal `
+            $message `
+            'LOCAL_DEV_CONFIGURATION_INVALID name=EBSD_MODEL_ROOT reason=weights_missing' `
+            'Missing EBSD weights result'
+    }
+    finally {
+        Remove-Item -LiteralPath $testRoot -Recurse -Force
+    }
+}
+
 Invoke-Test 'non-Backend children remove unrelated caller secrets' {
     $profile = New-LaunchProfile `
         -Runtime Mock `
@@ -122,6 +182,7 @@ Invoke-Test 'non-Backend children remove unrelated caller secrets' {
         'POSTGRES_PASSWORD',
         'MINIO_ACCESS_KEY',
         'MINIO_SECRET_KEY',
+        'EBSD_MODEL_ROOT',
         'TIMELINE_CURSOR_SIGNING_KEY'
     )) {
         Assert-True `
@@ -142,6 +203,7 @@ Invoke-Test 'non-Backend children remove unrelated caller secrets' {
         'DASHSCOPE_API_KEY',
         'ZTA35G_RUNTIME_TOKEN',
         'ZTA35G_MODEL_ROOT',
+        'EBSD_MODEL_ROOT',
         'TIMELINE_CURSOR_SIGNING_KEY'
     )) {
         Assert-True `
@@ -254,20 +316,52 @@ Invoke-Test 'Provider root dotenv preflight reports invalid configuration safely
 }
 
 Invoke-Test 'repeated-start Runtime readiness uses the Backend-owned token' {
-    $available = Invoke-RuntimeReadyViaBackendProbe -Request {
+    $toolIds = @('zta35g_sem_virtual_lab', 'ebsd_yield_strength_predictor')
+    $available = Invoke-RuntimeReadyViaBackendProbe -ToolIds $toolIds -Request {
+        param($toolId)
         return [PSCustomObject]@{
             StatusCode = 200
-            Content = '{"request_id":"offline-request","data":{"tool_id":"zta35g_sem_virtual_lab","availability":"AVAILABLE"}}'
+            Content = ('{{"request_id":"offline-request","data":{{"tool_id":"{0}","availability":"AVAILABLE"}}}}' -f $toolId)
         }
     }
-    $unavailable = Invoke-RuntimeReadyViaBackendProbe -Request {
+    $unavailable = Invoke-RuntimeReadyViaBackendProbe -ToolIds $toolIds -Request {
+        param($toolId)
         return [PSCustomObject]@{
             StatusCode = 200
-            Content = '{"request_id":"offline-request","data":{"tool_id":"zta35g_sem_virtual_lab","availability":"UNAVAILABLE"}}'
+            Content = ('{{"request_id":"offline-request","data":{{"tool_id":"{0}","availability":"{1}"}}}}' -f @(
+                $toolId,
+                $(if ($toolId -eq 'ebsd_yield_strength_predictor') { 'UNAVAILABLE' } else { 'AVAILABLE' })
+            ))
         }
     }
-    Assert-True $available 'Backend Runtime proxy rejected AVAILABLE.'
-    Assert-True (-not $unavailable) 'Backend Runtime proxy accepted UNAVAILABLE.'
+    Assert-True $available 'Backend Runtime proxy rejected available Runtime tools.'
+    Assert-True (-not $unavailable) 'Backend Runtime proxy accepted unavailable EBSD.'
+}
+
+Invoke-Test 'real Runtime readiness requires the EBSD model endpoint' {
+    $visited = New-Object 'System.Collections.Generic.List[string]'
+    $available = Invoke-RuntimeReadyProbe `
+        -Token 'offline-runtime-token-canary' `
+        -RequireEbsd $true `
+        -Request {
+            param($uri, $headers)
+            $visited.Add([string]$uri)
+            return [PSCustomObject]@{ StatusCode = 200 }
+        }
+    $unavailable = Invoke-RuntimeReadyProbe `
+        -Token 'offline-runtime-token-canary' `
+        -RequireEbsd $true `
+        -Request {
+            param($uri, $headers)
+            return [PSCustomObject]@{
+                StatusCode = $(if ($uri.EndsWith('/ebsd/health/ready')) { 503 } else { 200 })
+            }
+        }
+    Assert-True $available 'Runtime readiness rejected READY EBSD.'
+    Assert-True `
+        ($visited -contains 'http://127.0.0.1:8100/internal/v1/ebsd/health/ready') `
+        'Runtime readiness did not inspect EBSD.'
+    Assert-True (-not $unavailable) 'Runtime readiness accepted NOT_READY EBSD.'
 }
 
 Invoke-Test 'required ports and conflicts cover the complete local stack' {

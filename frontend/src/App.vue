@@ -106,7 +106,7 @@ function safely(promise: Promise<unknown>) { void promise.catch(() => { agent.er
           </article>
         </template>
       </section>
-      <section v-else-if="!agent.loading.value" class="chat-welcome"><h1>今天想研究什么？</h1><p>描述你的问题，或添加实验数据和 EBSD 图片。</p></section>
+      <section v-else-if="!agent.loading.value" class="chat-welcome"><h1>今天想研究什么？</h1><p>你可以询问组织图像相关的问题</p></section>
       <p v-if="chat.pending.value" class="muted" role="status">正在处理已提交的数据，完成后会在这里显示结果。</p>
       <section v-if="chat.notice.value" role="status"><p>{{ chat.notice.value }}</p><button class="button" :disabled="!!chat.fence.value" @click="safely(chat.observe(true))">核查结果</button></section>
       </section>

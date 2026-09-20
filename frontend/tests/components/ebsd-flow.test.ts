@@ -46,7 +46,7 @@ it("submits an uploaded EBSD reference and preserves it across uncertain reload"
   const reloaded = await show();
   expect(reloaded.text()).toContain("检查原提交");
   expect((reloaded.get("textarea").element as HTMLTextAreaElement).value).toBe("预测屈服强度");
-  expect(reloaded.text()).toContain("ebsd.png");
+  expect(reloaded.get(".composer__attachment img").attributes("alt")).toBe("ebsd.png");
   expect(uploads).toHaveLength(1);
 });
 
@@ -54,7 +54,9 @@ it("shows a thumbnail above the input and removes only the draft attachment", as
   const wrapper = await show(); await selectImage(wrapper);
   await wrapper.get("textarea").setValue("保留这段目标");
   expect(wrapper.get('input[type="file"]').attributes()).toHaveProperty("hidden");
-  expect(wrapper.get(".attachment-name").text()).toBe("ebsd.png");
+  const thumbnail = wrapper.get(".composer__attachment img");
+  expect(thumbnail.attributes("src")).toBe("/api/v1/assets/asset_image/content");
+  expect(thumbnail.attributes("alt")).toBe("ebsd.png");
   expect(wrapper.find('.composer__attachments h3').exists()).toBe(false);
   expect(wrapper.find('.composer__attachments a[download]').exists()).toBe(false);
   await wrapper.get('[aria-label="移除附件"]').trigger("click"); await flushPromises();
@@ -95,7 +97,7 @@ it("keeps an uncertain resume asset on reload without copying it into a new targ
   }));
   const wrapper = await show();
   expect((wrapper.get("textarea").element as HTMLTextAreaElement).value).toBe("补图");
-  expect(wrapper.text()).toContain("ebsd.png");
+  expect(wrapper.get(".composer__attachment img").attributes("alt")).toBe("ebsd.png");
   expect(sessionStorage.getItem("materials-agent.ebsd-drafts.v1") ?? "{}").not.toContain("补图");
 });
 
@@ -115,7 +117,7 @@ it("isolates an uncertain upload from another conversation and preserves its rec
   }));
   const wrapper = await show(); await selectImage(wrapper);
   expect(uploads).toHaveLength(1);
-  expect(wrapper.text()).toContain("ebsd.png");
+  expect(wrapper.get(".composer__attachment img").attributes("alt")).toBe("ebsd.png");
   await wrapper.get('[aria-label="移除附件"]').trigger("click");
   expect(JSON.parse(sessionStorage.getItem("materials-agent.pending-upload.v2")!)["other:new"].key).toBe("unknown-upload");
 });
