@@ -161,10 +161,6 @@ class ModelDefinition(_StrictModel):
                 raise ValueError(
                     "DeepSeek cannot declare thinking-budget support."
                 )
-            if self.capabilities.supports_sampling_with_reasoning:
-                raise ValueError(
-                    "DeepSeek cannot declare sampling support in reasoning mode."
-                )
         elif not self.capabilities.requires_streaming_for_reasoning:
             raise ValueError(
                 "Qwen reasoning must declare its provider streaming requirement."

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from pydantic import SecretStr
 
 from materialsagent.infrastructure.llm.configuration import ConfiguredRole
@@ -134,3 +136,24 @@ def test_three_roles_create_independent_model_instances() -> None:
 
     assert resolved == created
     assert len({id(item) for item in resolved}) == 3
+
+
+@pytest.mark.parametrize("provider,mode,top_p,expected", [
+    ("deepseek", "enabled", 0.1, 0.95),
+    ("deepseek", "enabled", 0.95, 0.95),
+    ("deepseek", "enabled", 0.98, 0.98),
+    ("deepseek", "enabled", 1.0, 1.0),
+    ("deepseek", "enabled", None, None),
+    ("deepseek", "disabled", 0.1, 0.1),
+    ("qwen", "enabled", 0.1, 0.1),
+])
+def test_thinking_sampling_provider_semantics(provider, mode, top_p, expected):
+    from materialsagent.infrastructure.llm.factory import provider_client_kwargs
+
+    kwargs = provider_client_kwargs(_role(
+        provider, "final_answer", reasoning_mode=mode, temperature=0.7, top_p=top_p,
+    ))
+    assert kwargs["temperature"] == 0.7
+    assert kwargs.get("top_p") == expected
+    if provider == "deepseek":
+        assert kwargs["extra_body"] == {"thinking": {"type": mode}}

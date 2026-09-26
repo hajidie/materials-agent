@@ -23,6 +23,14 @@ def provider_client_kwargs(config: ConfiguredRole) -> dict[str, object]:
     for name in ("temperature", "top_p", "max_tokens"):
         value = getattr(config, name)
         if value is not None:
+            # DeepSeek ignores temperature in thinking mode, but accepts it.
+            # Its effective nucleus sampling range is 0.95..1.0.
+            if (
+                name == "top_p"
+                and config.provider == "deepseek"
+                and config.reasoning_mode == "enabled"
+            ):
+                value = max(0.95, value)
             kwargs[name] = value
     if config.reasoning_effort is not None:
         kwargs["reasoning_effort"] = config.reasoning_effort

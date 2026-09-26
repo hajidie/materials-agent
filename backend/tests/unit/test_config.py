@@ -425,6 +425,10 @@ def test_qwen_default_and_role_override_select_only_required_keys(tmp_path) -> N
     )
 
     text = LLM_CONFIG_FILE.read_text(encoding="utf-8")
+    # Qwen structured roles require thinking to be disabled independently of
+    # the project's current DeepSeek defaults.
+    text = text.replace('reasoning_mode = "enabled"', 'reasoning_mode = "disabled"')
+    text = text.replace('reasoning_effort = "high"\n', '')
     qwen_only = tmp_path / "qwen.toml"
     qwen_only.write_text(
         text.replace(
@@ -538,10 +542,6 @@ def test_qwen_explanation_role_resolves_independent_reasoning_parameters(
             "temperature = 0.0\ntop_k = 10",
             "top_k",
         ),
-        (
-            'temperature = 0.0\nreasoning_mode = "enabled"',
-            "temperature",
-        ),
     ],
 )
 def test_deepseek_hard_conflicts_fail_at_startup(
@@ -557,14 +557,7 @@ def test_deepseek_hard_conflicts_fail_at_startup(
 
     candidate = tmp_path / "invalid.toml"
     source = LLM_CONFIG_FILE.read_text(encoding="utf-8")
-    if expected_field == "temperature":
-        source = source.replace(
-            'reasoning_mode = "disabled"',
-            'reasoning_mode = "enabled"',
-            1,
-        )
-    else:
-        source = source.replace("temperature = 0.0", replacement, 1)
+    source = source.replace("temperature = 0.0", replacement, 1)
     candidate.write_text(
         source,
         encoding="utf-8",
@@ -779,4 +772,42 @@ def test_injected_side_effect_registry_is_forbidden_in_production() -> None:
         create_app(
             settings=load_settings({"APP_ENV": "production"}),
             tool_registry=registry,
+        )
+
+
+@pytest.mark.parametrize("role_name", ["agent_decision", "tool_arg_resolution", "final_answer"])
+@pytest.mark.parametrize("top_p", [0.1, 0.95, 0.98, 1.0])
+def test_deepseek_thinking_accepts_temperature_and_top_p(tmp_path, role_name, top_p):
+    from materialsagent.infrastructure.config import load_settings
+    from materialsagent.infrastructure.llm.configuration import LLM_CONFIG_FILE, load_llm_configuration
+
+    source = LLM_CONFIG_FILE.read_text(encoding="utf-8")
+    source = source.replace(
+        f"[roles.{role_name}]\ntemperature = 0.0",
+        f"[roles.{role_name}]\ntemperature = 0.0\ntop_p = {top_p}",
+    )
+    before, role = source.split(f"[roles.{role_name}]", 1)
+    source = before + f"[roles.{role_name}]" + role.replace(
+        'reasoning_mode = "disabled"', 'reasoning_mode = "enabled"', 1,
+    )
+    candidate = tmp_path / "thinking.toml"
+    candidate.write_text(source, encoding="utf-8")
+    resolved = load_llm_configuration(load_settings({
+        "LLM_ADAPTER": "provider", "DEEPSEEK_API_KEY": "test-key",
+    }), candidate).for_role(role_name)
+    assert resolved.reasoning_mode == "enabled"
+    assert resolved.temperature == 0.0
+    assert resolved.top_p == top_p
+
+
+@pytest.mark.parametrize("top_p", [0.0, -0.1, 1.01, float("inf"), float("nan")])
+def test_thinking_does_not_relax_top_p_validation(top_p):
+    from pydantic import ValidationError
+    from materialsagent.infrastructure.llm.configuration import RoleDefinition
+
+    with pytest.raises(ValidationError, match="top_p"):
+        RoleDefinition(
+            reasoning_mode="enabled", temperature=0.0, top_p=top_p,
+            prompt_limit_tokens=8192, history_token_budget=0,
+            safety_margin_tokens=1024,
         )

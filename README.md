@@ -120,6 +120,10 @@ Runtime 环境，不得安装到 Backend 环境。
 预算都在该 TOML 中配置，修改后重启
 Backend 生效。不要提交真实 `.env`，也不要在终端、日志或问题报告中打印 Secret。
 
+DeepSeek 开启思考后仍允许配置 `temperature`，该值会传入 API，但不生效；`top_p` 在思考模式下
+有效，低于 `0.95` 的合法值在请求边界提升至 `0.95`，上限为 `1.0`。非思考模式下 DeepSeek
+忽略 `top_p`（有效值固定为 `1.0`）。参见 [官方思考模式说明](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/)。
+
 `backend/config/llm.toml` 包含受控模型目录、全局默认模型、模型能力声明，以及
 `agent_decision`、`tool_arg_resolution`、`final_answer` 三个角色的独立覆盖。
 DeepSeek 固定走官方 endpoint；Qwen 固定走阿里云百炼国内 OpenAI-compatible endpoint。
