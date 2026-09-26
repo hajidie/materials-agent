@@ -566,7 +566,6 @@ class ToolExecutionService:
                     message_id=None,
                     task_input_revision_id=None,
                     tool_run_id=tool_run_id,
-                    explanation_id=None,
                     created_at=timestamp,
                     expires_at=None,
                 )

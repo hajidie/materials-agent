@@ -131,7 +131,6 @@ def _controlled_object(value: Mapping[str, object], field_name: str) -> Mapping[
 class ToolInvocationProposal:
     conversation_id: str
     source_message_id: str
-    llm_call_id: str
     model_tool_name: str
     proposed_arguments: Mapping[str, object]
     origin: ProposalOrigin
@@ -141,7 +140,6 @@ class ToolInvocationProposal:
         for field_name in (
             "conversation_id",
             "source_message_id",
-            "llm_call_id",
             "model_tool_name",
         ):
             _require_text(getattr(self, field_name), field_name)

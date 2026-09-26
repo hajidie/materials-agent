@@ -288,26 +288,21 @@ def test_existing_p2_rows_survive_incremental_upgrade(service, csv_payload, tmp_
     assert service.model_content("scope-a", model, "manifest.json") == before
 
 
-def test_three_credential_roles_are_distinct_and_mcp_is_opt_in(service):
-    from pydantic import ValidationError
-    from materials_ml_service.config import Settings
-    values = service.settings.model_dump()
-    assert values['mcp_enabled'] is False
-    for token in (values['resource_token'], values['worker_token'], None):
-        with pytest.raises(ValidationError):
-            Settings(**{**values, 'mcp_enabled': True, 'mcp_token': token})
-
-
-def test_resource_prediction_validation_returns_controlled_error(service, prediction_inputs, table):
+def test_resource_prediction_validation_rejects_before_persistence_or_dispatch(service, prediction_inputs, table, monkeypatch):
     from fastapi.testclient import TestClient
     from materials_ml_service.api import create_app
     model, _, _ = prediction_inputs
     dataset = service.upload_dataset('scope-a', 'missing-feature', table[['x']].to_csv(index=False).encode(), {})
+    assert service.list(Prediction, 'scope-a') == []
+    def unexpected_dispatch(*args, **kwargs):
+        pytest.fail('Invalid prediction started a child process')
+    monkeypatch.setattr(service, 'prediction_runner', unexpected_dispatch)
     with TestClient(create_app(service.settings, service, maintenance=False)) as client:
         response = client.post('/api/v1/scopes/scope-a/predictions',
             headers={'Authorization': 'Bearer ' + service.settings.resource_token.get_secret_value(), 'Idempotency-Key': 'invalid'},
             json={'model_id': model, 'input_dataset_id': dataset.id})
         assert response.status_code == 422 and response.json() == {'error': {'code': 'PREDICTION_COLUMNS_MISMATCH'}}
+    assert service.list(Prediction, 'scope-a') == []
 
 
 def test_unknown_process_stop_blocks_next_prediction_until_recovery(service, prediction_inputs):

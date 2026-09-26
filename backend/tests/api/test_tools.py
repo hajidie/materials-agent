@@ -1,24 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from uuid import uuid4
+from fastapi.testclient import TestClient
+import pytest
 
-from sqlalchemy import func, select
-
-from materialsagent.application.tool_execution import ToolExecutionService
 from materialsagent.application.tools import build_tool_registry
-from materialsagent.domain.ports.tool_execution import (
-    ToolClientTimeoutError,
-    ToolExecutionOutput,
-)
-from materialsagent.infrastructure.db.conversation_task import (
-    TaskInputRevisionRow,
-)
-from materialsagent.infrastructure.db.asset import AssetRow
-from materialsagent.infrastructure.db.session import create_session_factory
-from materialsagent.infrastructure.db.tool_run import ToolRunRow
-from materialsagent.infrastructure.db.unit_of_work import SQLAlchemyUnitOfWork
-from materialsagent.domain.ports.unit_of_work import PersistenceError
+from materialsagent.domain.ports.tool_execution import ToolExecutionOutput
+from materialsagent.infrastructure.config import load_settings
+from materialsagent.main import create_app
 
 
 class _ToolClient:
@@ -66,52 +54,6 @@ class _ToolClient:
 
     def readiness(self, _metadata) -> str:
         return "AVAILABLE"
-
-
-class _FailingThirdCommitUnitOfWork(SQLAlchemyUnitOfWork):
-    def __init__(self, session_factory, commit_counter: list[int]) -> None:
-        super().__init__(session_factory)
-        self._commit_counter = commit_counter
-
-    def commit(self) -> None:
-        self._commit_counter[0] += 1
-        if self._commit_counter[0] == 3:
-            raise PersistenceError("Persistence operation failed.")
-        super().commit()
-
-
-def _settings(api_harness, *, enabled: bool):
-    return api_harness.settings.model_copy(
-        update={"m5_dev_routes_enabled": enabled}
-    )
-
-
-def _create_valid_revision(client, api_harness) -> tuple[str, str]:
-    conversation = client.post(
-        "/api/v1/conversations",
-        headers={"Idempotency-Key": f"tools-conversation-{uuid4().hex}"},
-        json={},
-    )
-    assert conversation.status_code == 201
-    conversation_id = conversation.json()["data"]["conversation_id"]
-    message = client.post(
-        f"/api/v1/conversations/{conversation_id}/messages",
-        headers={"Idempotency-Key": "tool-valid-revision"},
-        json={
-            "submission_mode": "NEW_TASK",
-            "content_text": "完整合法 Tool 请求",
-        },
-    )
-    assert message.status_code == 200
-    task_id = message.json()["data"]["task"]["task_id"]
-    with create_session_factory(api_harness.engine)() as session:
-        revision = session.scalar(
-            select(TaskInputRevisionRow).where(
-                TaskInputRevisionRow.task_id == task_id
-            )
-        )
-        assert revision is not None
-        return task_id, revision.task_input_revision_id
 
 
 def test_catalog_list_detail_and_unknown_tool_are_safely_projected(
@@ -162,33 +104,18 @@ def test_catalog_list_detail_and_unknown_tool_are_safely_projected(
     assert unknown.json()["error"]["code"] == "RESOURCE_NOT_FOUND"
 
 
-def test_dev_execution_path_is_hidden_when_disabled(api_harness) -> None:
-    actor_id = "actor_disabled"
-    api_harness.persist_actor(actor_id)
-
-    with api_harness.create_client(
-        actor_id,
-        settings=_settings(api_harness, enabled=False),
-    ) as client:
+@pytest.mark.parametrize("dev_routes_enabled", [False, True], ids=["disabled", "enabled"])
+def test_retired_tool_execution_route_is_absent(dev_routes_enabled) -> None:
+    # Route registration is independent of persistence; never provision a DB here.
+    settings = load_settings({}).model_copy(
+        update={"m5_dev_routes_enabled": dev_routes_enabled}
+    )
+    app = create_app(settings=settings)
+    with TestClient(app) as client:
         response = client.post(
             "/api/v1/dev/tasks/task_hidden/tool-runs",
             json={"task_input_revision_id": "revision_hidden"},
         )
 
     assert response.status_code == 404
-
-
-
-
-
-
-
-
-
-
-
-
-def test_retired_tool_execution_route_is_absent_even_when_dev_flag_set(api_harness):
-    api_harness.persist_actor("no-legacy")
-    with api_harness.create_client("no-legacy", settings=api_harness.settings.model_copy(update={"m5_dev_routes_enabled":True})) as client:
-        assert client.post("/api/v1/dev/tasks/task/tool-runs",json={"task_input_revision_id":"revision"}).status_code == 404
+    assert "/api/v1/dev/tasks/{task_id}/tool-runs" not in app.openapi()["paths"]

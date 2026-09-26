@@ -700,11 +700,14 @@ def test_missing_business_database_configuration_is_safe_while_live_works() -> N
     assert business.json()["error"]["code"] == "DEPENDENCY_UNAVAILABLE"
 
 
+@pytest.mark.parametrize("ml_tools_enabled", [False, True], ids=["mcp-disabled", "mcp-enabled"])
 def test_imports_and_create_app_have_no_external_or_database_side_effects(
     api_harness,
     monkeypatch: pytest.MonkeyPatch,
+    ml_tools_enabled: bool,
 ) -> None:
     import importlib
+    from pydantic import SecretStr
 
     import materialsagent.application.bootstrap as bootstrap_module
     import materialsagent.infrastructure.storage.minio as minio_module
@@ -731,9 +734,19 @@ def test_imports_and_create_app_have_no_external_or_database_side_effects(
         scoped.setattr(Engine, "connect", forbidden)
         scoped.setattr(bootstrap_module, "ensure_local_actor", forbidden)
         scoped.setattr(minio_module, "create_minio_storage", forbidden)
+        if ml_tools_enabled:
+            mcp_module = pytest.importorskip("materialsagent.infrastructure.tool_clients.mcp_client")
+            scoped.setattr(mcp_module, "start_blocking_portal", forbidden)
         from materialsagent.main import create_app
 
-        create_app(settings=api_harness.settings)
+        create_app(settings=api_harness.settings.model_copy(
+            update={
+                "enable_dev_materials_ml_tools": ml_tools_enabled,
+                "materials_ml_mcp_url": "http://127.0.0.1:8200/mcp",
+                "materials_ml_mcp_token": SecretStr("m" * 32),
+                "materials_ml_resource_token": SecretStr("r" * 32),
+            },
+        ))
 
     assert api_harness.counts() == before
 

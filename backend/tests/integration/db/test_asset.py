@@ -10,7 +10,6 @@ from sqlalchemy.engine import Engine
 from materialsagent.domain.models.actor import Actor
 from materialsagent.domain.models.asset import Asset
 from materialsagent.domain.models.conversation import Conversation
-from materialsagent.domain.models.llm_call import LLMCall
 from materialsagent.domain.models.message import Message
 from materialsagent.domain.models.task import Task
 from materialsagent.domain.models.task_input_revision import TaskInputRevision
@@ -71,42 +70,11 @@ def _seed_running_tool_run(engine: Engine) -> ToolRun:
                 created_at=BASE,
             )
         )
-        unit_of_work.llm_calls.add(
-            LLMCall(
-                llm_call_id="llm_1",
-                task_id="task_1",
-                conversation_id="conversation_1",
-                source_message_id="message_1",
-                request_id="message_request_1",
-                purpose="CHAT_ORCHESTRATION",
-                input_result_id=None,
-                provider="mock",
-                model_name="mock-chat",
-                prompt_template_id=None,
-                prompt_template_version=None,
-                prompt_digest=None,
-                generation_parameters={"temperature": 0, "max_tokens": 512},
-                structured_output_summary={
-                    "route": "TOOL_EXECUTION",
-                    "tool_id": "zta35g_sem_virtual_lab",
-                },
-                usage={"input_tokens": 1, "output_tokens": 1},
-                provider_request_id=None,
-                status="SUCCEEDED",
-                created_at=BASE,
-                started_at=BASE,
-                completed_at=BASE + timedelta(milliseconds=100),
-                duration_ms=100,
-                error_code=None,
-                safe_error_message=None,
-            )
-        )
         unit_of_work.task_input_revisions.add(
             TaskInputRevision(
                 task_input_revision_id="revision_1",
                 task_id="task_1",
                 request_id="message_request_1",
-                source_llm_call_id="llm_1",
                 source_message_ids=["message_1"],
                 revision=1,
                 raw_input={"material": "ZTA35G"},

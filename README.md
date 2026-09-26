@@ -332,7 +332,7 @@ EBSD 的 Mock Runtime 返回固定模拟值并标注 Mock；验证真实 CNN 时
 已实现合同和后续边界见 [项目上下文](docs/project-context.md#materials-ml-领域边界)。不要将 ML 依赖安装到 Backend 环境。
 
 启用平台 MCP 底座前，在 Backend Python 3.11 环境安装 `python -m pip install -e "./backend[mcp]"`，
-执行既有 Backend Alembic `upgrade head`（当前 head 包含 0021），并启动启用 MCP 的独立 ML Service/Worker。
+执行既有 Backend Alembic `upgrade head`（当前 head 包含 0022），并启动启用 MCP 的独立 ML Service/Worker。
 根 `.env` 设置 `ENABLE_DEV_MATERIALS_ML_TOOLS=true`，配置 `MATERIALS_ML_MCP_URL`、
 `MATERIALS_ML_BINDING_VERSION` 和不同的 `MATERIALS_ML_MCP_TOKEN` / `MATERIALS_ML_RESOURCE_TOKEN`。
 后两者分别对应 Service 的 MCP / Resource token；Backend 不配置 ML Worker 凭据。

@@ -9,10 +9,8 @@ from materialsagent.domain.models.conversation import Conversation
 from materialsagent.domain.models.conversation_object_cleanup import (
     ConversationObjectCleanup,
 )
-from materialsagent.domain.models.explanation import NaturalLanguageExplanation
 from materialsagent.domain.models.idempotency_record import IdempotencyRecord
 from materialsagent.domain.models.message import Message
-from materialsagent.domain.models.llm_call import LLMCall
 from materialsagent.domain.models.result_asset_link import ResultAssetLink
 from materialsagent.domain.models.task import Task
 from materialsagent.domain.models.task_input_revision import TaskInputRevision
@@ -72,8 +70,6 @@ class ConversationRepository(Protocol):
 class MessageRepository(Protocol):
     def get(self, message_id: str) -> Message | None: ...
 
-    def get_by_llm_call_id(self, llm_call_id: str) -> Message | None: ...
-
     def get_latest_for_conversation(
         self,
         conversation_id: str,
@@ -126,42 +122,6 @@ class TaskInputRevisionRepository(Protocol):
     def add(self, revision: TaskInputRevision) -> None: ...
 
     def list_for_task(self, task_id: str) -> list[TaskInputRevision]: ...
-
-    def list_for_llm_call_id(
-        self,
-        llm_call_id: str,
-    ) -> list[TaskInputRevision]: ...
-
-
-class LLMCallRepository(Protocol):
-    def get(self, llm_call_id: str) -> LLMCall | None: ...
-
-    def add(self, call: LLMCall) -> None: ...
-
-    def list_for_task(
-        self,
-        task_id: str,
-        *,
-        request_id: str | None = None,
-    ) -> list[LLMCall]: ...
-
-    def list_for_source_message(self, source_message_id: str) -> list[LLMCall]: ...
-
-    def bind_task(
-        self,
-        llm_call_id: str,
-        task_id: str,
-        *,
-        expected_status: str,
-    ) -> LLMCall | None: ...
-
-    def update(
-        self,
-        call: LLMCall,
-        *,
-        expected_status: str,
-    ) -> LLMCall | None: ...
-
 
 class ToolRunRepository(Protocol):
     def get(self, tool_run_id: str) -> ToolRun | None: ...
@@ -268,33 +228,6 @@ class ResultAssetLinkRepository(Protocol):
     def add(self, link: ResultAssetLink) -> None: ...
 
 
-class ExplanationRepository(Protocol):
-    def get(
-        self,
-        explanation_id: str,
-    ) -> NaturalLanguageExplanation | None: ...
-
-    def get_for_result_attempt(
-        self,
-        result_id: str,
-        attempt_no: int,
-    ) -> NaturalLanguageExplanation | None: ...
-
-    def list_for_result(
-        self,
-        result_id: str,
-    ) -> list[NaturalLanguageExplanation]: ...
-
-    def add(self, explanation: NaturalLanguageExplanation) -> None: ...
-
-    def update(
-        self,
-        explanation: NaturalLanguageExplanation,
-        *,
-        expected_status: str,
-    ) -> NaturalLanguageExplanation | None: ...
-
-
 class IdempotencyRecordRepository(Protocol):
     def get_by_scope(
         self,
@@ -374,14 +307,12 @@ class UnitOfWork(Protocol):
     messages: MessageRepository
     tasks: TaskRepository
     task_input_revisions: TaskInputRevisionRepository
-    llm_calls: LLMCallRepository
     tool_runs: ToolRunRepository
     invocation_runs: InvocationRunRepository
     invocation_results: InvocationResultRepository
     assets: AssetRepository
     tool_results: ToolResultRepository
     result_asset_links: ResultAssetLinkRepository
-    explanations: ExplanationRepository
     idempotency_records: IdempotencyRecordRepository
     conversation_object_cleanups: ConversationObjectCleanupRepository
     conversation_lifecycle: ConversationLifecycleRepository

@@ -5,7 +5,6 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from materialsagent.application.idempotency import (
-    EXPLANATION_RETRY,
     TASK_CREATE,
     TASK_INPUT_SUPPLEMENT,
     TOOL_RETRY,
@@ -30,7 +29,6 @@ def _record(**overrides: object) -> IdempotencyRecord:
         "message_id": "msg_1",
         "task_input_revision_id": None,
         "tool_run_id": None,
-        "explanation_id": None,
         "created_at": NOW,
         "expires_at": NOW + timedelta(hours=24),
     }
@@ -94,7 +92,6 @@ def test_record_requires_exact_operation_resource_binding() -> None:
                 "message_id": "msg_1",
                 "task_input_revision_id": None,
                 "tool_run_id": None,
-                "explanation_id": None,
             },
         ),
         (
@@ -103,7 +100,6 @@ def test_record_requires_exact_operation_resource_binding() -> None:
                 "message_id": "msg_1",
                 "task_input_revision_id": "revision_2",
                 "tool_run_id": None,
-                "explanation_id": None,
             },
         ),
         (
@@ -112,21 +108,11 @@ def test_record_requires_exact_operation_resource_binding() -> None:
                 "message_id": None,
                 "task_input_revision_id": None,
                 "tool_run_id": "tool_run_2",
-                "explanation_id": None,
-            },
-        ),
-        (
-            EXPLANATION_RETRY,
-            {
-                "message_id": None,
-                "task_input_revision_id": None,
-                "tool_run_id": None,
-                "explanation_id": "explanation_2",
             },
         ),
     ],
 )
-def test_all_four_operations_accept_only_their_resource_binding(
+def test_supported_operations_accept_only_their_resource_binding(
     operation: str,
     binding: dict[str, object],
 ) -> None:
@@ -165,7 +151,6 @@ def test_record_is_frozen_and_never_contains_response_payload() -> None:
         "message_id",
         "task_input_revision_id",
         "tool_run_id",
-        "explanation_id",
         "created_at",
         "expires_at",
     }

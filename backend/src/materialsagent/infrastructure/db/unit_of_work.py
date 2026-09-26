@@ -13,11 +13,9 @@ from materialsagent.domain.ports.unit_of_work import (
     ConversationLifecycleRepository,
     ConversationObjectCleanupRepository,
     DatabaseUnavailableError,
-    ExplanationRepository,
     IdempotencyRecordRepository,
     InvocationResultRepository,
     InvocationRunRepository,
-    LLMCallRepository,
     MessageRepository,
     PersistenceConflictError,
     PersistenceError,
@@ -33,10 +31,6 @@ from materialsagent.infrastructure.db.conversation_cleanup import (
     SQLAlchemyConversationObjectCleanupRepository,
 )
 from materialsagent.infrastructure.db.asset import SQLAlchemyAssetRepository
-from materialsagent.infrastructure.db.llm_call import SQLAlchemyLLMCallRepository
-from materialsagent.infrastructure.db.explanation import (
-    SQLAlchemyExplanationRepository,
-)
 from materialsagent.infrastructure.db.idempotency_record import (
     SQLAlchemyIdempotencyRecordRepository,
 )
@@ -70,14 +64,12 @@ class SQLAlchemyUnitOfWork:
         self._messages: MessageRepository | None = None
         self._tasks: TaskRepository | None = None
         self._task_input_revisions: TaskInputRevisionRepository | None = None
-        self._llm_calls: LLMCallRepository | None = None
         self._tool_runs: ToolRunRepository | None = None
         self._invocation_runs: InvocationRunRepository | None = None
         self._invocation_results: InvocationResultRepository | None = None
         self._assets: AssetRepository | None = None
         self._tool_results: ToolResultRepository | None = None
         self._result_asset_links: ResultAssetLinkRepository | None = None
-        self._explanations: ExplanationRepository | None = None
         self._idempotency_records: IdempotencyRecordRepository | None = None
         self._conversation_object_cleanups: ConversationObjectCleanupRepository | None = None
         self._conversation_lifecycle: ConversationLifecycleRepository | None = None
@@ -111,12 +103,6 @@ class SQLAlchemyUnitOfWork:
         if self._task_input_revisions is None:
             raise RuntimeError("UnitOfWork has not been entered.")
         return self._task_input_revisions
-
-    @property
-    def llm_calls(self) -> LLMCallRepository:
-        if self._llm_calls is None:
-            raise RuntimeError("UnitOfWork has not been entered.")
-        return self._llm_calls
 
     @property
     def tool_runs(self) -> ToolRunRepository:
@@ -155,12 +141,6 @@ class SQLAlchemyUnitOfWork:
         return self._result_asset_links
 
     @property
-    def explanations(self) -> ExplanationRepository:
-        if self._explanations is None:
-            raise RuntimeError("UnitOfWork has not been entered.")
-        return self._explanations
-
-    @property
     def idempotency_records(self) -> IdempotencyRecordRepository:
         if self._idempotency_records is None:
             raise RuntimeError("UnitOfWork has not been entered.")
@@ -189,7 +169,6 @@ class SQLAlchemyUnitOfWork:
         self._task_input_revisions = SQLAlchemyTaskInputRevisionRepository(
             self.session
         )
-        self._llm_calls = SQLAlchemyLLMCallRepository(self.session)
         self._tool_runs = SQLAlchemyToolRunRepository(self.session)
         self._invocation_runs = SQLAlchemyInvocationRunRepository(self.session)
         self._invocation_results = SQLAlchemyInvocationResultRepository(self.session)
@@ -198,7 +177,6 @@ class SQLAlchemyUnitOfWork:
         self._result_asset_links = SQLAlchemyResultAssetLinkRepository(
             self.session
         )
-        self._explanations = SQLAlchemyExplanationRepository(self.session)
         self._idempotency_records = SQLAlchemyIdempotencyRecordRepository(
             self.session
         )
@@ -230,14 +208,12 @@ class SQLAlchemyUnitOfWork:
                 self._messages = None
                 self._tasks = None
                 self._task_input_revisions = None
-                self._llm_calls = None
                 self._tool_runs = None
                 self._invocation_runs = None
                 self._invocation_results = None
                 self._assets = None
                 self._tool_results = None
                 self._result_asset_links = None
-                self._explanations = None
                 self._idempotency_records = None
                 self._conversation_object_cleanups = None
                 self._conversation_lifecycle = None

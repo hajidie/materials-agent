@@ -172,7 +172,8 @@ def test_platform_real_agent_invocation_mcp_worker_prediction(platform, csv_payl
         ml.stop(); ml.start()
         submitted = confirm(http, waiting)
         run = result(submitted)
-        assert submitted["observations"][0]["unit_annotations"][0]["provenance"] == "confirmed"
+        training_observation = next(o for o in submitted["observations"] if o["kind"] == "TOOL_RESULT")
+        assert training_observation["unit_annotations"][0]["provenance"] == "confirmed"
         assert "用户确认" in submitted["final_answer"]["text"]
         assert run["status"] == "PENDING"
         assert result(confirm(http, waiting))["id"] == run["id"]
@@ -199,7 +200,8 @@ def test_platform_real_agent_invocation_mcp_worker_prediction(platform, csv_payl
             "确认模型目标 strength_MPa 的单位是 MPa", "confirm-prediction-unit"))
         prediction = result(predicted)
         assert prediction["status"] == "SUCCEEDED"
-        assert predicted["observations"][0]["unit_annotations"][0]["provenance"] == "confirmed"
+        prediction_observation = next(o for o in predicted["observations"] if o["kind"] == "TOOL_RESULT")
+        assert prediction_observation["unit_annotations"][0]["provenance"] == "confirmed"
         assert "用户确认" in predicted["final_answer"]["text"]
         values = resource.get(root + f"/predictions/{prediction['id']}/content").json()
         for member in ("manifest.json", "pipeline.joblib", "evaluation.json", "splits.json"):

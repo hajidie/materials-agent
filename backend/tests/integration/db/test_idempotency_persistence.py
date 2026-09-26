@@ -88,7 +88,6 @@ def _record(
         message_id=message_id,
         task_input_revision_id=None,
         tool_run_id=None,
-        explanation_id=None,
         created_at=NOW,
         expires_at=None,
     )

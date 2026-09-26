@@ -521,7 +521,7 @@ class ToolArgResolver:
                 revisions = uow.task_input_revisions.list_for_task(task.task_id)
                 revision_number = max((r.revision for r in revisions), default=0) + 1
             revision = TaskInputRevision(task_input_revision_id=identifier(), task_id=task.task_id,
-                request_id=run.agent_run_id, source_llm_call_id=None, source_message_ids=[run.source_message_id],
+                request_id=run.agent_run_id, source_message_ids=[run.source_message_id],
                 revision=revision_number, raw_input=draft.arguments, normalized_input=draft.normalized,
                 missing_fields=[f for f, issue in draft.issues.items() if issue == "Missing"],
                 ambiguous_fields=[{"field": f, "candidates": []} for f, issue in draft.issues.items() if issue in {"Ambiguous", "Conflict"}],
@@ -592,7 +592,7 @@ class RegistryAgentGateway:
                     workflow_service=self.workflow, defer_execution=True)
         else:
             proposal = ToolInvocationProposal(conversation_id=run.conversation_id, source_message_id=run.source_message_id,
-                llm_call_id=record.action_id, model_tool_name=record.tool_name, proposed_arguments=record.arguments, origin=ProposalOrigin.STRUCTURED)
+                model_tool_name=record.tool_name, proposed_arguments=record.arguments, origin=ProposalOrigin.STRUCTURED)
             public = self.invocations.create_from_proposal(actor, ResolvedToolInvocationProposal(proposal, registration),
                 request_id=run.agent_run_id, idempotency_key="agent-action:" + record.action_id, defer_execution=True)
         if record.retry_of_invocation_run_id and registration.execution_profile is not ToolExecutionProfile.MANAGED:

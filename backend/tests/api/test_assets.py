@@ -465,9 +465,6 @@ def test_partial_success_persists_safe_summary_and_available_asset(
         assert connection.scalar(
             text("SELECT count(*) FROM tool_result")
         ) == 1
-        assert connection.scalar(
-            text("SELECT count(*) FROM natural_language_explanation")
-        ) == 0
 
 
 def test_pending_failed_and_orphaned_content_are_conflicts(api_harness) -> None:

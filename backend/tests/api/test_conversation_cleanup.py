@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from materialsagent.application.conversation_cleanup import ConversationCleanupService
-from materialsagent.application.context import ActorContext
 from materialsagent.domain.models.asset import LEGACY_DB_KEY, METADATA_V1
 from materialsagent.domain.models.conversation_object_cleanup import (
     PENDING,
@@ -14,7 +12,6 @@ from materialsagent.domain.models.conversation_object_cleanup import (
     ConversationObjectCleanup,
 )
 from materialsagent.domain.ports.storage import StoredObjectMetadata
-from materialsagent.domain.models.llm_call import LLMCall
 
 
 NOW = datetime(2026, 9, 3, 0, 0, tzinfo=timezone.utc)
@@ -203,83 +200,3 @@ def test_cleanup_hard_caps_each_drain_at_one_hundred(api_harness) -> None:
 
     assert summary.attempted == 100
     assert summary.completed == 100
-
-
-def _old_call(task, message, *, status: str) -> LLMCall:
-    started_at = NOW - timedelta(days=1, seconds=-1) if status == "RUNNING" else None
-    return LLMCall(
-        llm_call_id=f"llm_recovery_{status.lower()}",
-        task_id=task.task_id,
-        conversation_id=task.conversation_id,
-        source_message_id=message.message_id,
-        request_id=message.request_id,
-        purpose="CHAT_ORCHESTRATION",
-        input_result_id=None,
-        provider="mock",
-        model_name="mock-chat",
-        prompt_template_id="chat-orchestration",
-        prompt_template_version="1",
-        prompt_digest="a" * 64,
-        generation_parameters={"temperature": 0, "max_tokens": 256},
-        structured_output_summary=None,
-        usage=None,
-        provider_request_id=None,
-        status=status,
-        created_at=NOW - timedelta(days=1),
-        started_at=started_at,
-        completed_at=None,
-        duration_ms=None,
-        error_code=None,
-        safe_error_message=None,
-    )
-
-
-@pytest.mark.parametrize(
-    ("call_status", "expected_task_status", "expected_error"),
-    [
-        ("PENDING", "PENDING", "PROCESS_INTERRUPTED_BEFORE_START"),
-        ("RUNNING", "FAILED", "PROCESS_INTERRUPTED"),
-    ],
-)
-def test_startup_recovery_distinguishes_resumable_pre_start_and_unsafe_running(
-    api_harness,
-    call_status: str,
-    expected_task_status: str,
-    expected_error: str,
-) -> None:
-    actor_id = f"actor_recovery_{call_status.lower()}"
-    api_harness.persist_actor(actor_id)
-    conversation = api_harness.persist_conversation(actor_id)
-    message, task = api_harness.persist_message_task(
-        conversation,
-        content_text="recover this task",
-        created_at=NOW - timedelta(days=1),
-    )
-    running_task = replace(
-        task,
-        current_status="RUNNING",
-        started_at=task.created_at,
-        updated_at=task.created_at,
-    )
-    call = _old_call(task, message, status=call_status)
-    with api_harness.unit_of_work_factory() as unit_of_work:
-        assert unit_of_work.tasks.update(
-            running_task,
-            expected_status="PENDING",
-        ) is not None
-        unit_of_work.llm_calls.add(call)
-        unit_of_work.commit()
-
-    summary = service(api_harness, FakeStorage(None)).recover_stale(
-        ActorContext(actor_id=actor_id, user_id=None)
-    )
-
-    assert summary["llm_calls"] == 1
-    with api_harness.unit_of_work_factory() as unit_of_work:
-        recovered_call = unit_of_work.llm_calls.get(call.llm_call_id)
-        recovered_task = unit_of_work.tasks.get(task.task_id)
-    assert recovered_call is not None
-    assert recovered_call.status == "FAILED"
-    assert recovered_call.error_code == expected_error
-    assert recovered_task is not None
-    assert recovered_task.current_status == expected_task_status

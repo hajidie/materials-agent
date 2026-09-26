@@ -1,6 +1,7 @@
 import subprocess
 import sys
 import os
+import pytest
 
 
 def test_worker_import_has_only_http_and_process_dependencies():
@@ -41,3 +42,20 @@ def test_built_wheel_contains_incremental_migrations(tmp_path):
     with zipfile.ZipFile(next(tmp_path.glob('*.whl'))) as wheel:
         for migration in ('0001_ml_resources.py', '0002_predictions.py'):
             assert 'materials_ml_service/migrations/versions/' + migration in wheel.namelist()
+
+
+def test_three_credential_roles_are_distinct_and_mcp_is_opt_in():
+    from pydantic import ValidationError
+    from materials_ml_service.config import Settings
+    settings = Settings(
+        database_url='postgresql+psycopg://materials_ml:synthetic@127.0.0.1/materials_ml',
+        minio_access_key='materials_ml', minio_secret_key='synthetic', minio_bucket='materials-ml',
+        resource_token='r' * 32, worker_token='w' * 32, mcp_token='m' * 32,
+        mcp_enabled=False,
+    )
+    assert settings.mcp_enabled is False
+    values = settings.model_dump()
+    for token in (values['resource_token'], values['worker_token'], None):
+        with pytest.raises(ValidationError):
+            Settings(**{**values, 'mcp_enabled': True, 'mcp_token': token})
+    assert Settings(**{**values, 'mcp_enabled': True}).mcp_enabled is True

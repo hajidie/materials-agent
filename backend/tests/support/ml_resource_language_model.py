@@ -28,7 +28,7 @@ def respond(role, payload):
 
     if role == "tool_arg_resolution":
         text = payload.get("user_input", "")
-        return {field: choose("dataset", text) for field in payload["draft"]["issues"]}
+        return {field: choose("dataset", text) for field in payload["question"]["fields"]}
     if role == "final_answer":
         return {"text": "已完成本次工具调用。", "sources": [o["source"] for o in payload["observations"]]}
     results = payload["observations"]

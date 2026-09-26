@@ -1,12 +1,9 @@
-from types import SimpleNamespace
-
 import pytest
 
 from materialsagent.application.agent_runtime import AgentRuntime
-from materialsagent.domain.models.agent import AgentRun, ArgumentDraft, CallTool, Observation, RunBudget, identifier
+from materialsagent.domain.models.agent import AgentRun, ArgumentDraft, Observation, RunBudget, identifier
 from materialsagent.domain.ports.agent import AgentConflictError
-from materialsagent.infrastructure.llm.agent_model import MockAgentModel, normalize_usage
-from materialsagent.domain.ports.agent import PreparedAgentCall
+from materialsagent.infrastructure.llm.agent_model import MockAgentModel
 
 
 class Store:
@@ -71,17 +68,40 @@ def setup(responder, **kwargs):
 
 
 def test_persisted_action_drops_call_scoped_resource_handle_before_binding():
-    _, _, tools, runtime = setup(lambda *_: None)
-    tools.catalog = lambda: [{"tool_name": "predict", "schema": {"properties": {}},
+    proposal = {"type": "CallTool", "tool_name": "predict", "arguments": {
+        "value": 2, "dataset_reference": {"resource_ref": "r1"}}}
+    run, store, tools, runtime = setup(lambda role, payload:
+        {"type": "Finish", "answer": "done"} if payload["observations"] else proposal)
+    tools.catalog = lambda: [{"tool_name": "predict", "schema": {"properties": {
+        "value": {"type": "number"}, "dataset_id": {"type": "string"}}},
         "execution_profile": "STANDARD", "resource_parameters": [{
             "model_argument": "dataset_reference", "execution_argument": "dataset_id",
             "expected_resource_type": "dataset", "provider": "ml_resource", "required": True}]}]
-    action = CallTool(type="CallTool", tool_name="predict", arguments={"value": 2,
-        "dataset_id": {"provider": "ml_resource", "resource_type": "dataset",
-            "platform_resource_id": "private-reference"}})
-    persisted = runtime._audit_action(action)
-    assert persisted.arguments == {"value": 2}
-    assert action.arguments["dataset_id"]["platform_resource_id"] == "private-reference"
+
+    class Resources:
+        def context(self, run):
+            return {"view": {"resources": [{"resource_ref": "r1", "resource_type": "dataset",
+                "name": "input.csv"}], "complete": True, "omitted_count": 0},
+                "mapping": {"r1": {"provider": "ml_resource", "resource_type": "dataset",
+                    "platform_resource_id": "private-reference"}}}
+
+    tools.resource_context = Resources()
+    resolve = tools.resolve
+    resolved_resources = []
+    def resolve_resource(run, name, arguments):
+        resolved_resources.append(arguments)
+        return resolve(run, name, {"value": arguments["value"]})
+    tools.resolve = resolve_resource
+
+    result = runtime.advance(run.agent_run_id, "actor")
+
+    assert result.status == "SUCCEEDED", result.error_code
+    persisted = store.get(run.agent_run_id, "actor")
+    assert persisted.steps[0].action.arguments == {"value": 2}
+    assert resolved_resources[0]["dataset_id"]["platform_resource_id"] == "private-reference"
+    assert "dataset_reference" not in resolved_resources[0]
+    assert proposal["arguments"] == {"value": 2, "dataset_reference": {"resource_ref": "r1"}}
+    assert len(tools.executed) == 1
 
 
 def test_multi_tool_observation_loop_and_final_commit():
@@ -207,16 +227,6 @@ def test_step_limit_does_not_call_provider_again():
     result = runtime.advance(run.agent_run_id, "actor")
     assert result.error_code == "AGENT_STEP_BUDGET_EXCEEDED"
     assert len(result.calls) == len(tools.executed) == 2
-
-
-def test_usage_reasoning_not_double_counted_and_missing_not_zero():
-    request = PreparedAgentCall("agent_decision", [], 20, 30, 60)
-    raw = SimpleNamespace(usage_metadata={"input_tokens": 10, "output_tokens": 20, "total_tokens": 30,
-        "output_token_details": {"reasoning": 8}})
-    actual = normalize_usage(raw, request)
-    assert actual.total_tokens == 30 and actual.reasoning_tokens == 8 and actual.source == "actual"
-    estimated = normalize_usage(SimpleNamespace(), request)
-    assert estimated.total_tokens == 50 and estimated.source == "estimated"
 
 
 @pytest.mark.parametrize("outcome", ["reject", "expire", "changed"])

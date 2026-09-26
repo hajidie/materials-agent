@@ -174,7 +174,7 @@ class ChatArtifacts:
                         content_text=presentation_text(presentation), structured_content={"contract": "chat-v1",
                             "presentation": presentation, "artifacts": artifacts,
                             "source": {"reference_id": ref["reference_id"], "state": value["status"]}},
-                        llm_call_id=None, created_at=stamp))
+                        created_at=stamp))
                     owner.updated_at = stamp
             except ApplicationError:
                 pending = True  # Unknown is not permission to re-dispatch.

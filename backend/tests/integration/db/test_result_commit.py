@@ -21,7 +21,6 @@ from materialsagent.application.agent_tools import ManagedToolWorkflow as ToolWo
 from materialsagent.domain.models.actor import Actor
 from materialsagent.domain.models.asset import Asset
 from materialsagent.domain.models.conversation import Conversation
-from materialsagent.domain.models.llm_call import LLMCall
 from materialsagent.domain.models.message import Message
 from materialsagent.domain.models.task import Task
 from materialsagent.domain.models.task_input_revision import TaskInputRevision
@@ -437,42 +436,11 @@ def _seed(
                     task_id=asset_task_id,
                 )
             )
-        unit_of_work.llm_calls.add(
-            LLMCall(
-                llm_call_id="llm_chat_1",
-                task_id="task_1",
-                conversation_id="conversation_1",
-                source_message_id="message_1",
-                request_id="request_1",
-                purpose="CHAT_ORCHESTRATION",
-                input_result_id=None,
-                provider="mock",
-                model_name="mock-chat",
-                prompt_template_id="chat-orchestration",
-                prompt_template_version="1",
-                prompt_digest="b" * 64,
-                generation_parameters={"temperature": 0, "max_tokens": 256},
-                structured_output_summary={
-                    "route": "TOOL_EXECUTION",
-                    "tool_id": "zta35g_sem_virtual_lab",
-                },
-                usage={"input_tokens": 1, "output_tokens": 1},
-                provider_request_id=None,
-                status="SUCCEEDED",
-                created_at=BASE,
-                started_at=BASE,
-                completed_at=BASE,
-                duration_ms=0,
-                error_code=None,
-                safe_error_message=None,
-            )
-        )
         unit_of_work.task_input_revisions.add(
             TaskInputRevision(
                 task_input_revision_id="revision_1",
                 task_id="task_1",
                 request_id=revision_request_id,
-                source_llm_call_id="llm_chat_1",
                 source_message_ids=["message_1"],
                 revision=1,
                 raw_input={"material": "ZTA35G"},
@@ -1239,16 +1207,6 @@ def test_result_commit_failure_rolls_back_and_returns_no_memory_result(
         assert run.diagnostics == receipt.tool_run.diagnostics
         assert run.output_summary == receipt.tool_run.output_summary
         assert asset.current_status == "AVAILABLE"
-    with migrated_database_engine.connect() as connection:
-        assert connection.scalar(
-            text("SELECT count(*) FROM natural_language_explanation")
-        ) == 0
-        assert connection.scalar(
-            text(
-                "SELECT count(*) FROM llm_call "
-                "WHERE purpose = 'TOOL_RESULT_EXPLANATION'"
-            )
-        ) == 0
     assert execution.calls == 1
     assert asset_service.calls == 1
 
@@ -1300,9 +1258,6 @@ def test_uncertain_initial_result_commit_recovers_trusted_result_without_generat
         assert run.completed_outputs == ["sem_image"]
         assert run.failed_outputs == []
         assert run.error_code is None
-        assert len(
-            unit_of_work.explanations.list_for_result("result_1")
-        ) == 0
     assert projection.result.result_id == "result_1"
     assert projection.task.current_status == "SUCCEEDED"
     assert execution.calls == 1
@@ -1355,15 +1310,5 @@ def test_result_failure_terminalization_commit_failure_preserves_real_state(
         assert run.diagnostics == receipt.tool_run.diagnostics
         assert run.output_summary == receipt.tool_run.output_summary
         assert asset.current_status == "AVAILABLE"
-    with migrated_database_engine.connect() as connection:
-        assert connection.scalar(
-            text("SELECT count(*) FROM natural_language_explanation")
-        ) == 0
-        assert connection.scalar(
-            text(
-                "SELECT count(*) FROM llm_call "
-                "WHERE purpose = 'TOOL_RESULT_EXPLANATION'"
-            )
-        ) == 0
     assert execution.calls == 1
     assert asset_service.calls == 1

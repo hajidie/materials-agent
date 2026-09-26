@@ -197,7 +197,7 @@ class SQLAlchemyAgentStore:
                     row.document = run.model_dump(mode="json")
                 session.add(MessageRow(message_id=message_id, conversation_id=conversation_id, actor_id=actor_id,
                     task_id=None, request_id=identifier(), role="USER", generation_source="USER", content_text=content,
-                    structured_content={"contract": "chat-v1", "attachments": attachments}, llm_call_id=None, created_at=now()))
+                    structured_content={"contract": "chat-v1", "attachments": attachments}, created_at=now()))
                 session.flush()
                 if not run_id:
                     if conversation.title is None:
@@ -308,7 +308,7 @@ class SQLAlchemyAgentStore:
                 session.add(MessageRow(message_id=answer.answer_id, conversation_id=run.conversation_id, actor_id=run.actor_id,
                     task_id=None, request_id=run.agent_run_id, role="ASSISTANT", generation_source="AGENT",
                     content_text=answer.text, structured_content={"contract": "chat-v1", "agent_run_id": run.agent_run_id,
-                        "artifacts": run_artifacts(session, run)}, llm_call_id=None, created_at=answer.created_at))
+                        "artifacts": run_artifacts(session, run)}, created_at=answer.created_at))
             owner.updated_at = max(owner.updated_at, run.updated_at)
         run.version = version + 1
 

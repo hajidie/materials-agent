@@ -269,7 +269,6 @@ def _resolved(registration: RegisteredTool, arguments: dict[str, object]):
     proposal = ToolInvocationProposal(
         conversation_id="conversation_1",
         source_message_id="message_1",
-        llm_call_id="llm_1",
         model_tool_name=registration.tool_id,
         proposed_arguments=arguments,
         origin=ProposalOrigin.STRUCTURED,
@@ -494,7 +493,6 @@ def test_explicit_managed_retry_creates_linked_invocation_and_reuses_idempotency
         task_input_revision_id="revision_retry",
         task_id="task_1",
         request_id="request_revision",
-        source_llm_call_id="llm_1",
         source_message_ids=["message_1"],
         revision=1,
         raw_input=dict(normalized),

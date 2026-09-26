@@ -11,7 +11,6 @@ MESSAGE_SUBMIT = "MESSAGE_SUBMIT"
 TASK_CREATE = "TASK_CREATE"
 TASK_INPUT_SUPPLEMENT = "TASK_INPUT_SUPPLEMENT"
 TOOL_RETRY = "TOOL_RETRY"
-EXPLANATION_RETRY = "EXPLANATION_RETRY"
 IDEMPOTENCY_OPERATIONS = frozenset(
     {
         CONVERSATION_CREATE,
@@ -19,7 +18,6 @@ IDEMPOTENCY_OPERATIONS = frozenset(
         TASK_CREATE,
         TASK_INPUT_SUPPLEMENT,
         TOOL_RETRY,
-        EXPLANATION_RETRY,
     }
 )
 
@@ -69,7 +67,6 @@ class IdempotencyRecord:
     message_id: str | None
     task_input_revision_id: str | None
     tool_run_id: str | None
-    explanation_id: str | None
     created_at: datetime
     expires_at: datetime | None
     conversation_id: str | None = None
@@ -95,7 +92,6 @@ class IdempotencyRecord:
             "message_id",
             "task_input_revision_id",
             "tool_run_id",
-            "explanation_id",
         ):
             _require_optional_id(getattr(self, field_name), field_name)
         _require_utc(self.created_at, "created_at")
@@ -108,7 +104,6 @@ class IdempotencyRecord:
                 and self.message_id is None
                 and self.task_input_revision_id is None
                 and self.tool_run_id is None
-                and self.explanation_id is None
             ),
             MESSAGE_SUBMIT: (
                 self.conversation_id is not None
@@ -116,20 +111,17 @@ class IdempotencyRecord:
                 and self.task_id is None
                 and self.task_input_revision_id is None
                 and self.tool_run_id is None
-                and self.explanation_id is None
             ),
             TASK_CREATE: (
                 self.task_id is not None
                 and self.message_id is not None
                 and self.task_input_revision_id is None
                 and self.tool_run_id is None
-                and self.explanation_id is None
             ),
             TASK_INPUT_SUPPLEMENT: (
                 self.task_id is not None
                 and self.message_id is not None
                 and self.tool_run_id is None
-                and self.explanation_id is None
             ),
             TOOL_RETRY: (
                 self.conversation_id is None
@@ -138,16 +130,6 @@ class IdempotencyRecord:
                 and self.message_id is None
                 and self.task_input_revision_id is None
                 and self.tool_run_id is not None
-                and self.explanation_id is None
-            ),
-            EXPLANATION_RETRY: (
-                self.conversation_id is None
-                and
-                self.task_id is not None
-                and self.message_id is None
-                and self.task_input_revision_id is None
-                and self.tool_run_id is None
-                and self.explanation_id is not None
             ),
         }[self.operation]
         if not expected:

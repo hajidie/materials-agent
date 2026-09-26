@@ -5,6 +5,7 @@ from datetime import timedelta
 from hashlib import sha256
 import json
 import logging
+from threading import Lock
 from time import monotonic
 from types import SimpleNamespace
 from urllib.parse import quote, urlsplit
@@ -221,9 +222,25 @@ class MCPClient:
         # SDK debug/validation exceptions can include untrusted arguments. Never propagate them to logs.
         logger = logging.getLogger("mcp")
         logger.addHandler(logging.NullHandler()); logger.propagate = False
-        self.portal_context = start_blocking_portal()
-        self.portal = self.portal_context.__enter__()
-        self.portal.call(self.start, slots)
+        self._lifecycle_lock = Lock()
+        self._closed = False
+        self._slot_count = slots
+        self.portal_context = self.portal = None
+
+    def _get_portal(self):
+        with self._lifecycle_lock:
+            if self._closed:
+                raise MCPFailure("MCP_UNAVAILABLE")
+            if self.portal is None:
+                context = start_blocking_portal()
+                portal = context.__enter__()
+                try:
+                    portal.call(self.start, self._slot_count)
+                except BaseException as error:
+                    context.__exit__(type(error), error, error.__traceback__)
+                    raise
+                self.portal_context, self.portal = context, portal
+            return self.portal
 
     async def start(self, count):
         self.available = asyncio.Queue(maxsize=count)
@@ -248,7 +265,7 @@ class MCPClient:
             timeout = remaining_timeout(60)
         except TimeoutError:
             raise MCPFailure("MCP_DEADLINE_EXCEEDED") from None
-        return self.portal.call(self.request, Call(binding, plain(arguments), context.conversation_id,
+        return self._get_portal().call(self.request, Call(binding, plain(arguments), context.conversation_id,
             plain(context.remote_operation), timeout, check_only))
 
     def prepare(self, binding, arguments, context):
@@ -394,5 +411,12 @@ class MCPClient:
         await asyncio.gather(*(slot.task for slot in self.slots), return_exceptions=True)
 
     def close(self):
-        self.portal.call(self.stop)
-        self.portal_context.__exit__(None, None, None)
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._closed = True
+            if self.portal is not None:
+                try:
+                    self.portal.call(self.stop)
+                finally:
+                    self.portal_context.__exit__(None, None, None)

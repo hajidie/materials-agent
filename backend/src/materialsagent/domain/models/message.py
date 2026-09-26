@@ -7,11 +7,10 @@ from typing import Final
 
 USER: Final = "USER"
 ASSISTANT: Final = "ASSISTANT"
-LLM: Final = "LLM"
 TEMPLATE: Final = "TEMPLATE"
 
 MESSAGE_ROLES: Final = frozenset({USER, ASSISTANT})
-GENERATION_SOURCES: Final = frozenset({USER, LLM, TEMPLATE, "AGENT"})
+GENERATION_SOURCES: Final = frozenset({USER, TEMPLATE, "AGENT"})
 
 
 def _require_non_blank(value: str, field_name: str) -> None:
@@ -37,7 +36,6 @@ class Message:
     generation_source: str
     content_text: str
     structured_content: dict[str, object] | None
-    llm_call_id: str | None
     created_at: datetime
 
     def __post_init__(self) -> None:
@@ -54,7 +52,7 @@ class Message:
             raise ValueError("role must be USER or ASSISTANT.")
         if self.generation_source not in GENERATION_SOURCES:
             raise ValueError(
-                "generation_source must be USER, LLM, or TEMPLATE."
+                "generation_source must be USER, TEMPLATE, or AGENT."
             )
         _require_non_blank(self.content_text, "content_text")
         if self.structured_content is not None and not isinstance(
@@ -62,21 +60,13 @@ class Message:
             dict,
         ):
             raise ValueError("structured_content must be null or a JSON object.")
-        if self.llm_call_id is not None:
-            _require_non_blank(self.llm_call_id, "llm_call_id")
-
         if self.role == USER:
-            if self.generation_source != USER or self.llm_call_id is not None:
+            if self.generation_source != USER:
                 raise ValueError(
-                    "USER messages require USER generation and no llm_call_id."
+                    "USER messages require USER generation."
                 )
         if self.generation_source == USER and self.role != USER:
             raise ValueError("USER generation is only valid for USER messages.")
-        if self.generation_source == LLM:
-            if self.role != ASSISTANT or self.llm_call_id is None:
-                raise ValueError(
-                    "LLM generation requires an ASSISTANT role and llm_call_id."
-                )
         if self.generation_source == TEMPLATE and self.role != ASSISTANT:
             raise ValueError(
                 "TEMPLATE generation is only valid for ASSISTANT messages."
@@ -108,6 +98,5 @@ class Message:
             generation_source=USER,
             content_text=content_text,
             structured_content=structured_content,
-            llm_call_id=None,
             created_at=created_at or datetime.now(timezone.utc),
         )

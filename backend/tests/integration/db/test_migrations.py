@@ -30,7 +30,7 @@ IMMEDIATE_PREVIOUS_REVISION = "0006_asset"
 M8_REVISION = "0008_idempotency_record"
 M9_REVISION = "0009_timeline_query_indexes"
 M10_REVISION = "0010_registry_routing_state"
-EXPECTED_REVISION = "0021_resource_ref_protocol"
+EXPECTED_REVISION = "0022_retire_legacy_llm_tables"
 ALEMBIC_INI = Path(__file__).resolve().parents[3] / "alembic.ini"
 NEW_TASK_TIME_CHECKS = {
     "ck_task_started_at_not_before_created_at",
@@ -56,7 +56,7 @@ M8_TABLES = M7_TABLES | {
     "idempotency_record",
     "conversation_object_cleanup",
 }
-HEAD_TABLES = M8_TABLES | {"ml_scope_binding", "ml_resource_ref", "ml_resource_operation", "conversation_deletion", "invocation_run", "invocation_result", "agent_run", "agent_submission", "agent_step", "agent_observation", "agent_execution", "agent_model_call", "agent_final_answer"}
+HEAD_TABLES = (M8_TABLES - {"llm_call", "natural_language_explanation"}) | {"ml_scope_binding", "ml_resource_ref", "ml_resource_operation", "conversation_deletion", "invocation_run", "invocation_result", "agent_run", "agent_submission", "agent_step", "agent_observation", "agent_execution", "agent_model_call", "agent_final_answer"}
 
 
 def _make_alembic_config(settings: AppSettings) -> Config:
@@ -121,6 +121,38 @@ def _insert_task(
     )
 
 
+def test_m22_downgrade_restores_previous_llm_foreign_key_contract(
+    temporary_database: AppSettings,
+) -> None:
+    config = _make_alembic_config(temporary_database)
+    previous_revision = "0021_resource_ref_protocol"
+    command.upgrade(config, previous_revision)
+    engine = create_engine_from_settings(temporary_database)
+
+    def foreign_keys():
+        return {
+            item["name"]: (
+                item["constrained_columns"], item["referred_table"],
+                item["referred_columns"], item["options"],
+            )
+            for item in inspect(engine).get_foreign_keys("llm_call")
+        }
+
+    try:
+        previous = foreign_keys()
+        assert {
+            "fk_llm_call_input_result", "fk_llm_call_source_message_conversation",
+        } <= previous.keys()
+        command.upgrade(config, "head")
+        command.downgrade(config, previous_revision)
+        assert _current_revision(temporary_database) == previous_revision
+        assert foreign_keys() == previous
+        command.upgrade(config, "head")
+        assert _current_revision(temporary_database) == EXPECTED_REVISION
+    finally:
+        engine.dispose()
+
+
 def test_migration_round_trip_has_one_head_and_exact_schema(
     temporary_database: AppSettings,
 ) -> None:
@@ -156,7 +188,6 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             "message_id",
             "task_input_revision_id",
             "tool_run_id",
-            "explanation_id",
             "created_at",
             "expires_at",
         }
@@ -180,9 +211,6 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
         } == {
             "fk_idempotency_actor": "actor",
             "fk_idempotency_conversation": "conversation",
-            "fk_idempotency_explanation": (
-                "natural_language_explanation"
-            ),
             "fk_idempotency_message": "message",
             "fk_idempotency_revision": "task_input_revision",
             "fk_idempotency_task": "task",
@@ -281,14 +309,12 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "generation_source",
                 "content_text",
                 "structured_content",
-                "llm_call_id",
                 "created_at",
             },
             "task_input_revision": {
                 "task_input_revision_id",
                 "task_id",
                 "request_id",
-                "source_llm_call_id",
                 "source_message_ids",
                 "revision",
                 "raw_input",
@@ -298,35 +324,6 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "validation_errors",
                 "candidate_tool_refs",
                 "created_at",
-            },
-            "llm_call": {
-                "llm_call_id",
-                "task_id",
-                "conversation_id",
-                "source_message_id",
-                "request_id",
-                "purpose",
-                "input_result_id",
-                "provider",
-                "model_name",
-                "prompt_template_id",
-                "prompt_template_version",
-                "prompt_digest",
-                "catalog_snapshot_refs",
-                "catalog_hash",
-                "tool_context_ref",
-                "context_snapshot",
-                "generation_parameters",
-                "structured_output_summary",
-                "usage",
-                "provider_request_id",
-                "status",
-                "created_at",
-                "started_at",
-                "completed_at",
-                "duration_ms",
-                "error_code",
-                "safe_error_message",
             },
             "tool_run": {
                 "tool_run_id",
@@ -430,22 +427,6 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "artifact_order",
                 "created_at",
             },
-            "natural_language_explanation": {
-                "explanation_id",
-                "task_id",
-                "result_id",
-                "llm_call_id",
-                "attempt_no",
-                "status",
-                "language",
-                "text",
-                "created_at",
-                "started_at",
-                "completed_at",
-                "duration_ms",
-                "error_code",
-                "safe_error_message",
-            },
             "invocation_result": {
                 "invocation_result_id",
                 "invocation_run_id",
@@ -532,13 +513,11 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
         message_columns = _column_map(inspector, "message")
         assert message_columns["task_id"]["nullable"] is True
         assert message_columns["structured_content"]["nullable"] is True
-        assert message_columns["llm_call_id"]["nullable"] is True
         assert message_columns["event_key"]["nullable"] is True
         assert isinstance(message_columns["structured_content"]["type"], JSONB)
         assert message_columns["created_at"]["type"].timezone is True
 
         revision_columns = _column_map(inspector, "task_input_revision")
-        assert revision_columns["source_llm_call_id"]["nullable"] is True
         assert revision_columns["normalized_input"]["nullable"] is True
         assert isinstance(revision_columns["source_message_ids"]["type"], ARRAY)
         assert isinstance(revision_columns["missing_fields"]["type"], ARRAY)
@@ -550,19 +529,6 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
         }:
             assert isinstance(revision_columns[jsonb_name]["type"], JSONB)
         assert revision_columns["created_at"]["type"].timezone is True
-
-        llm_call_columns = _column_map(inspector, "llm_call")
-        for jsonb_name in {
-            "generation_parameters",
-            "structured_output_summary",
-            "usage",
-        }:
-            assert isinstance(llm_call_columns[jsonb_name]["type"], JSONB)
-        for timestamp_name in {"created_at", "started_at", "completed_at"}:
-            assert llm_call_columns[timestamp_name]["type"].timezone is True
-        assert llm_call_columns["input_result_id"]["nullable"] is True
-        assert llm_call_columns["task_id"]["nullable"] is True
-        assert llm_call_columns["source_message_id"]["nullable"] is False
 
         invocation_result_columns = _column_map(inspector, "invocation_result")
         assert isinstance(invocation_result_columns["data"]["type"], JSONB)
@@ -616,18 +582,10 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             "message": {
                 "fk_message_actor": "actor",
                 "fk_message_conversation": "conversation",
-                "fk_message_llm_call": "llm_call",
                 "fk_message_task": "task",
             },
             "task_input_revision": {
-                "fk_task_input_revision_llm_call": "llm_call",
                 "fk_task_input_revision_task": "task",
-            },
-            "llm_call": {
-                "fk_llm_call_conversation": "conversation",
-                "fk_llm_call_input_result": "tool_result",
-                "fk_llm_call_source_message_conversation": "message",
-                "fk_llm_call_task": "task",
             },
             "tool_run": {
                 "fk_tool_run_revision": "task_input_revision",
@@ -647,11 +605,6 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             "result_asset_link": {
                 "fk_result_asset_link_asset": "asset",
                 "fk_result_asset_link_result": "tool_result",
-            },
-            "natural_language_explanation": {
-                "fk_explanation_llm_call": "llm_call",
-                "fk_explanation_result": "tool_result",
-                "fk_explanation_task": "task",
             },
             "invocation_result": {
                 "fk_invocation_result_run": "invocation_run",
@@ -677,18 +630,10 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             "message": {
                 "fk_message_actor": "RESTRICT",
                 "fk_message_conversation": "CASCADE",
-                "fk_message_llm_call": "RESTRICT",
                 "fk_message_task": "CASCADE",
             },
             "task_input_revision": {
-                "fk_task_input_revision_llm_call": "SET NULL",
                 "fk_task_input_revision_task": "CASCADE",
-            },
-            "llm_call": {
-                "fk_llm_call_conversation": "CASCADE",
-                "fk_llm_call_input_result": "SET NULL",
-                "fk_llm_call_source_message_conversation": "CASCADE",
-                "fk_llm_call_task": "CASCADE",
             },
             "tool_run": {
                 "fk_tool_run_revision": "CASCADE",
@@ -708,11 +653,6 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             "result_asset_link": {
                 "fk_result_asset_link_asset": "CASCADE",
                 "fk_result_asset_link_result": "CASCADE",
-            },
-            "natural_language_explanation": {
-                "fk_explanation_llm_call": "CASCADE",
-                "fk_explanation_result": "CASCADE",
-                "fk_explanation_task": "CASCADE",
             },
             "invocation_result": {
                 "fk_invocation_result_run": "CASCADE",
@@ -772,8 +712,6 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "ck_message_conversation_id_not_blank",
                 "ck_message_generation_source_allowed",
                 "ck_message_agent_source_role",
-                "ck_message_llm_call_id_not_blank",
-                "ck_message_llm_source_role",
                 "ck_message_message_id_not_blank",
                 "ck_message_request_id_not_blank",
                 "ck_message_role_allowed",
@@ -790,42 +728,9 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "ck_task_input_revision_request_id_not_blank",
                 "ck_task_input_revision_revision_id_not_blank",
                 "ck_task_input_revision_revision_positive",
-                "ck_task_input_revision_source_llm_call_id_not_blank",
                 "ck_task_input_revision_source_message_ids_nonempty",
                 "ck_task_input_revision_task_id_not_blank",
                 "ck_task_input_revision_validation_errors_array",
-            },
-            "llm_call": {
-                "ck_llm_call_completed_not_before_started",
-                "ck_llm_call_context_snapshot_object",
-                "ck_llm_call_catalog_hash_sha256",
-                "ck_llm_call_catalog_snapshot_refs_array",
-                "ck_llm_call_conversation_id_not_blank",
-                "ck_llm_call_duration_nonnegative",
-                "ck_llm_call_error_code_not_blank",
-                "ck_llm_call_failed_requires_error",
-                "ck_llm_call_generation_parameters_object",
-                "ck_llm_call_input_result_id_not_blank",
-                "ck_llm_call_input_result_purpose",
-                "ck_llm_call_llm_call_id_not_blank",
-                "ck_llm_call_model_name_not_blank",
-                "ck_llm_call_prompt_digest_sha256",
-                "ck_llm_call_prompt_template_id_not_blank",
-                "ck_llm_call_prompt_template_version_not_blank",
-                "ck_llm_call_provider_not_blank",
-                "ck_llm_call_provider_request_id_not_blank",
-                "ck_llm_call_purpose_allowed",
-                "ck_llm_call_request_id_not_blank",
-                "ck_llm_call_safe_error_message_not_blank",
-                "ck_llm_call_source_message_not_blank",
-                "ck_llm_call_started_not_before_created",
-                "ck_llm_call_status_allowed",
-                "ck_llm_call_status_time_shape",
-                "ck_llm_call_structured_output_summary_object",
-                "ck_llm_call_succeeded_without_error",
-                "ck_llm_call_task_id_not_blank",
-                "ck_llm_call_tool_context_ref_object",
-                "ck_llm_call_usage_object",
             },
             "tool_run": {
                 "ck_tool_run_attempt_positive",
@@ -966,7 +871,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             constraint["sqltext"]
             for constraint in inspector.get_check_constraints("message")
         )
-        for value in {"USER", "ASSISTANT", "LLM", "TEMPLATE"}:
+        for value in {"USER", "ASSISTANT", "TEMPLATE", "AGENT"}:
             assert value in message_check_sql
 
         assert {
@@ -974,7 +879,6 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             for constraint in inspector.get_unique_constraints("message")
         } == {
             "uq_message_id_conversation": ["message_id", "conversation_id"],
-            "uq_message_llm_call_id": ["llm_call_id"],
             "uq_message_conversation_event": ["conversation_id", "event_key"],
         }
         assert {
@@ -984,21 +888,6 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
             )
         } == {
             "uq_task_input_revision_task_revision": ["task_id", "revision"]
-        }
-        assert {
-            index["name"]: index["column_names"]
-            for index in inspector.get_indexes("llm_call")
-        } == {
-            "ix_llm_call_source_message_created": [
-                "source_message_id",
-                "created_at",
-                "llm_call_id",
-            ],
-            "ix_llm_call_task_request_created": [
-                "task_id",
-                "request_id",
-                "created_at",
-            ]
         }
         assert {
             constraint["name"]: constraint["column_names"]
@@ -1664,9 +1553,7 @@ def test_m7_result_and_explanation_migration_round_trip(
                 )
             ) == 1
             assert connection.scalar(text("SELECT count(*) FROM tool_result")) == 0
-            assert connection.scalar(
-                text("SELECT count(*) FROM natural_language_explanation")
-            ) == 0
+            assert "natural_language_explanation" not in inspect(reupgraded).get_table_names()
     finally:
         reupgraded.dispose()
 
@@ -1742,7 +1629,6 @@ def test_m8_idempotency_migration_downgrade_only_removes_m8_table(
                     message_id="message_m8_round_trip",
                     task_input_revision_id=None,
                     tool_run_id=None,
-                    explanation_id=None,
                     created_at=created_at,
                     expires_at=None,
                 )
@@ -1797,6 +1683,81 @@ def test_m8_idempotency_migration_downgrade_only_removes_m8_table(
             ) == 1
     finally:
         reupgraded.dispose()
+
+
+def test_m22_removes_populated_legacy_schema(
+    temporary_database: AppSettings,
+) -> None:
+    config = _make_alembic_config(temporary_database)
+    command.upgrade(config, "0021_resource_ref_protocol")
+    engine = create_engine_from_settings(temporary_database)
+    created_at = datetime(2026, 9, 21, 8, 0, tzinfo=timezone.utc)
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO actor (actor_id, actor_origin, created_at) "
+                    "VALUES ('actor_m22', 'LOCAL_ANONYMOUS', :created_at)"
+                ),
+                {"created_at": created_at},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO conversation (conversation_id, actor_id, title, created_at, updated_at) "
+                    "VALUES ('conversation_m22', 'actor_m22', NULL, :created_at, :created_at)"
+                ),
+                {"created_at": created_at},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO message (message_id, conversation_id, task_id, actor_id, request_id, "
+                    "role, generation_source, content_text, structured_content, llm_call_id, created_at) "
+                    "VALUES ('message_m22', 'conversation_m22', NULL, 'actor_m22', 'request_m22', "
+                    "'USER', 'USER', 'legacy row', NULL, NULL, :created_at)"
+                ),
+                {"created_at": created_at},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO llm_call (llm_call_id, task_id, conversation_id, source_message_id, "
+                    "request_id, purpose, input_result_id, provider, model_name, prompt_template_id, "
+                    "prompt_template_version, prompt_digest, catalog_snapshot_refs, catalog_hash, "
+                    "tool_context_ref, generation_parameters, structured_output_summary, usage, "
+                    "context_snapshot, provider_request_id, status, created_at, started_at, completed_at, "
+                    "duration_ms, error_code, safe_error_message) VALUES "
+                    "('llm_m22', NULL, 'conversation_m22', 'message_m22', 'request_m22', "
+                    "'CHAT_ORCHESTRATION', NULL, 'mock', 'mock-v1', NULL, NULL, NULL, NULL, NULL, NULL, "
+                    "'{}'::jsonb, NULL, NULL, NULL, NULL, 'PENDING', :created_at, NULL, NULL, NULL, NULL, NULL)"
+                ),
+                {"created_at": created_at},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO message (message_id, conversation_id, task_id, actor_id, request_id, "
+                    "role, generation_source, content_text, structured_content, llm_call_id, created_at) "
+                    "VALUES ('assistant_m22', 'conversation_m22', NULL, 'actor_m22', 'request_m22', "
+                    "'ASSISTANT', 'LLM', 'legacy answer', NULL, 'llm_m22', :created_at)"
+                ),
+                {"created_at": created_at},
+            )
+    finally:
+        engine.dispose()
+
+    command.upgrade(config, "head")
+    upgraded = create_engine_from_settings(temporary_database)
+    try:
+        inspector = inspect(upgraded)
+        assert "llm_call" not in inspector.get_table_names()
+        assert "natural_language_explanation" not in inspector.get_table_names()
+        assert "llm_call_id" not in _column_map(inspector, "message")
+        assert "source_llm_call_id" not in _column_map(inspector, "task_input_revision")
+        assert "explanation_id" not in _column_map(inspector, "idempotency_record")
+        with upgraded.connect() as connection:
+            assert connection.scalar(
+                text("SELECT generation_source FROM message WHERE message_id = 'assistant_m22'")
+            ) == "AGENT"
+    finally:
+        upgraded.dispose()
 
 
 def test_m9_timeline_indexes_round_trip_without_changing_rows(
@@ -2308,7 +2269,7 @@ def test_m10_backfills_only_known_zta_tasks_and_refuses_ready_downgrade(
     finally:
         engine.dispose()
 
-    command.upgrade(config, "head")
+    command.upgrade(config, "0021_resource_ref_protocol")
     upgraded = create_engine_from_settings(temporary_database)
     try:
         with upgraded.begin() as connection:

@@ -20,7 +20,6 @@ from materialsagent.application.tool_registry import ToolRegistry
 from materialsagent.application.zta35g_tool import (
     build_zta35g_tool_definition,
 )
-from materialsagent.domain.models.llm_call import LLMCall
 from materialsagent.domain.models.task import Task
 from materialsagent.domain.models.task_input_revision import TaskInputRevision
 from materialsagent.domain.ports.tool_execution import (
@@ -83,7 +82,6 @@ def _revision(*, task_id: str = "task_1") -> TaskInputRevision:
         task_input_revision_id="revision_1",
         task_id=task_id,
         request_id="message_request_1",
-        source_llm_call_id="llm_1",
         source_message_ids=["message_1"],
         revision=1,
         raw_input={"material": "ZTA35G"},
@@ -102,42 +100,10 @@ def _revision(*, task_id: str = "task_1") -> TaskInputRevision:
     )
 
 
-def _llm_call() -> LLMCall:
-    return LLMCall(
-        llm_call_id="llm_1",
-        task_id="task_1",
-        conversation_id="conversation_1",
-        source_message_id="message_1",
-        request_id="message_request_1",
-        purpose="CHAT_ORCHESTRATION",
-        input_result_id=None,
-        provider="mock",
-        model_name="mock-chat",
-        prompt_template_id=None,
-        prompt_template_version=None,
-        prompt_digest=None,
-        generation_parameters={"temperature": 0, "max_tokens": 256},
-        structured_output_summary={
-            "route": "TOOL_EXECUTION",
-            "tool_id": "zta35g_sem_virtual_lab",
-        },
-        usage={"input_tokens": 1, "output_tokens": 1},
-        provider_request_id=None,
-        status="SUCCEEDED",
-        created_at=BASE,
-        started_at=BASE,
-        completed_at=BASE + timedelta(milliseconds=100),
-        duration_ms=100,
-        error_code=None,
-        safe_error_message=None,
-    )
-
-
 @dataclass
 class _Store:
     tasks: dict[str, Task]
     revisions: dict[str, TaskInputRevision]
-    llm_calls: dict[str, LLMCall]
     tool_runs: dict[str, object]
     idempotency_records: dict[str, object] = field(default_factory=dict)
     tool_results: dict[str, object] = field(default_factory=dict)
@@ -166,7 +132,6 @@ class _Repository:
             for field in (
                 "tool_run_id",
                 "task_input_revision_id",
-                "llm_call_id",
                 "task_id",
                 "idempotency_record_id",
                 "result_id",
@@ -264,7 +229,6 @@ class _Uow:
         self.store = store
         self.tasks = _TaskRepository(store.tasks).bind(store)
         self.task_input_revisions = _TaskInputRevisionRepository(store.revisions)
-        self.llm_calls = _Repository(store.llm_calls)
         self.tool_runs = _ToolRunRepository(store.tool_runs).bind(store)
         self.idempotency_records = _IdempotencyRepository(
             store.idempotency_records
@@ -274,7 +238,6 @@ class _Uow:
         self._snapshots = {
             "tasks": dict(store.tasks),
             "revisions": dict(store.revisions),
-            "llm_calls": dict(store.llm_calls),
             "tool_runs": dict(store.tool_runs),
             "idempotency_records": dict(store.idempotency_records),
             "tool_results": dict(store.tool_results),
@@ -393,7 +356,6 @@ def _service(
     store = _Store(
         tasks={"task_1": task or _ready_task()},
         revisions={"revision_1": _revision()},
-        llm_calls={"llm_1": _llm_call()},
         tool_runs={},
         fail_commit_at=fail_commit_at,
         uncertain_commit_at=uncertain_commit_at,
@@ -1224,70 +1186,6 @@ def test_m7_activated_running_task_returns_normalized_receipt(
 
 
 @pytest.mark.parametrize(
-    "summary",
-    [
-        {
-            "route": "TOOL_EXECUTION",
-            "tool_id": "zta35g_sem_virtual_lab",
-        },
-        {
-            "route": "TOOL_CANDIDATES",
-            "candidates": [
-                {
-                    "tool_id": "zta35g_sem_virtual_lab",
-                    "candidate_input": {},
-                }
-            ],
-        },
-    ],
-)
-def test_unbound_task_cannot_execute_from_old_or_new_llm_summary(
-    summary: dict[str, object],
-) -> None:
-    unbound = replace(
-        _task(),
-        current_status="RUNNING",
-        completed_at=None,
-        error_code=None,
-        safe_error_message=None,
-        tool_id=None,
-        bound_tool_version=None,
-        bound_schema_hash=None,
-    )
-    service, store, client = _service(_success_output(), task=unbound)
-    audit = (
-        {
-            "catalog_snapshot_refs": (
-                {
-                    "tool_id": "zta35g_sem_virtual_lab",
-                    "version": "1",
-                    "schema_hash": SCHEMA_HASH,
-                },
-            ),
-            "catalog_hash": "a" * 64,
-        }
-        if summary["route"] == "TOOL_CANDIDATES"
-        else {}
-    )
-    store.llm_calls["llm_1"] = replace(
-        _llm_call(),
-        structured_output_summary=summary,
-        **audit,
-    )
-
-    with pytest.raises(ResourceNotFoundError):
-        service.execute_revision_with_output(
-            ActorContext(actor_id="actor_1", user_id=None),
-            task_id="task_1",
-            task_input_revision_id="revision_1",
-            request_id="execute_request_1",
-        )
-
-    assert client.calls == []
-    assert store.tool_runs == {}
-
-
-@pytest.mark.parametrize(
     ("outcome", "expected_code", "expected_http"),
     [
         (ToolClientTimeoutError(), "RUNTIME_TIMEOUT", 504),
@@ -1606,24 +1504,9 @@ def test_generic_execution_dispatches_ml_fixture_with_immutable_provenance() -> 
         raw_input=dict(normalized_ml),
         normalized_input=dict(normalized_ml),
     )
-    llm_call = replace(
-        _llm_call(),
-        structured_output_summary={
-            "route": "TOOL_CANDIDATES",
-            "candidates": [
-                {
-                    "tool_id": "ml_training_test",
-                    "candidate_input": dict(normalized_ml),
-                }
-            ],
-        },
-        catalog_snapshot_refs=(original_ml.ref,),
-        catalog_hash="c" * 64,
-    )
     store = _Store(
         tasks={ready.task_id: ready},
         revisions={revision.task_input_revision_id: revision},
-        llm_calls={llm_call.llm_call_id: llm_call},
         tool_runs={},
     )
     ticks = count()
@@ -1697,7 +1580,6 @@ def test_competing_execute_cannot_create_a_second_pending_attempt() -> None:
     store = _Store(
         tasks={"task_1": _ready_task()},
         revisions={"revision_1": _revision()},
-        llm_calls={"llm_1": _llm_call()},
         tool_runs={},
     )
     client = InterleavingClient()

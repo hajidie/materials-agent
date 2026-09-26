@@ -20,12 +20,8 @@ from materialsagent.infrastructure.db.conversation_task import (
 from materialsagent.infrastructure.db.conversation_cleanup import (
     ConversationObjectCleanupRow,
 )
-from materialsagent.infrastructure.db.llm_call import LLMCallRow
 from materialsagent.infrastructure.db.idempotency_record import (
     IdempotencyRecordRow,
-)
-from materialsagent.infrastructure.db.explanation import (
-    NaturalLanguageExplanationRow,
 )
 from materialsagent.infrastructure.db.tool_result import (
     ResultAssetLinkRow,
@@ -51,9 +47,7 @@ _ = (
     AssetRow,
     ConversationRow,
     ConversationObjectCleanupRow,
-    LLMCallRow,
     IdempotencyRecordRow,
-    NaturalLanguageExplanationRow,
     MessageRow,
     TaskInputRevisionRow,
     TaskRow,

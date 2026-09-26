@@ -36,8 +36,8 @@ Invocation 的幂等键来自 AgentAction（Step ID），不再以单条消息�
 动作。agent_execution 用 action_id 主键与 invocation_run_id 唯一约束记录对应关系。
 
 旧 Router、消息补参服务、固定 Explanation、旧 Task/Invocation 写 API、Native Tool Calling
-独立执行路径已删除。现役 schema 仍保留旧 llm_call、natural_language_explanation 等表及映射；
-Agent Loop 的模型计量和最终回答分别写入 agent_model_call、agent_final_answer，不走旧解释生成链。
+独立执行路径已删除。迁移 0022 同步移除旧 llm_call、natural_language_explanation 表、关联字段与映射；
+Agent Loop 的模型计量和最终回答分别写入 agent_model_call、agent_final_answer。
 运行记录通过 agent_runs 路由和前端 api/agent 查询；结果、资产和对话共享类型保留在 api/types。
 
 ## 状态与事务

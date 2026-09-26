@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import builtins
 import importlib.util
-from datetime import datetime, timezone
 from pathlib import Path
 import sys
 
@@ -10,19 +9,9 @@ from materialsagent.application.tool_registry import ToolRegistry
 from materialsagent.application.tools import build_tool_registry
 from materialsagent.application.zta35g_tool import build_zta35g_tool_definition
 from materialsagent.domain.models.agent import CallTool
-from materialsagent.domain.ports.tool_execution import (
-    ToolExecutionOutput,
-    ToolRequestContext,
-)
 from backend.tests.support.heterogeneous_tools import (
     build_ml_training_test_definition,
 )
-
-
-def test_test_assembly_provides_heterogeneous_tool_definition() -> None:
-    definition = build_ml_training_test_definition()
-
-    assert definition.tool_id == "ml_training_test"
 
 
 def test_two_definition_registry_keeps_unrelated_contracts_and_hashes() -> None:
@@ -114,44 +103,3 @@ def test_test_support_loads_when_zta_imports_are_forbidden(monkeypatch) -> None:
     spec.loader.exec_module(module)
 
     assert module.build_ml_training_test_definition().tool_id == "ml_training_test"
-
-
-def test_fake_executor_can_return_a_controlled_test_result() -> None:
-    controlled = ToolExecutionOutput(
-        status="SUCCEEDED",
-        requested_outputs=("training_metrics",),
-        completed_outputs=("training_metrics",),
-        failed_outputs=(),
-        data={"training_metrics": {"fixture_score": 0.42}},
-        images=(),
-        warnings=(),
-        diagnostics=(),
-        actual_runtime_parameters={"seed": 17},
-        model_bundle_id="controlled-test-result",
-        error=None,
-    )
-    definition = build_ml_training_test_definition(execution_outcome=controlled)
-    normalized = definition.normalize(
-        {
-            "dataset": "dataset_fixture_1",
-            "task_type": "regression",
-            "split_ratio": 0.8,
-        }
-    )
-    validated = definition.tool.validate_input(
-        dict(normalized.normalized_input),
-        seed=17,
-    )
-    context = ToolRequestContext(
-        request_id="request_1",
-        conversation_id="conversation_1",
-        task_id="task_1",
-        tool_run_id="tool_run_1",
-        actor_id="actor_1",
-        user_id=None,
-        requested_at=datetime(2026, 9, 2, tzinfo=timezone.utc),
-    )
-
-    result = definition.tool.execute(validated, context)
-
-    assert result is controlled

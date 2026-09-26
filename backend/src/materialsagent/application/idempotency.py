@@ -7,7 +7,6 @@ from typing import Final
 import unicodedata
 
 from materialsagent.domain.models.idempotency_record import (
-    EXPLANATION_RETRY,
     IDEMPOTENCY_OPERATIONS,
     MESSAGE_SUBMIT,
     TASK_CREATE,

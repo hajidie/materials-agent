@@ -52,9 +52,12 @@ def test_real_browser_resource_workflow(context_platform, table):
             time.sleep(1)
         assert (folder / "finish.json").exists(), "Browser acceptance did not finish"
         checks = json.loads((folder / "finish.json").read_text(encoding="utf8"))
-        assert all(checks.get(name) for name in ("upload", "chat", "viewer_read_only", "append_once", "prediction_download", "dataset_download", "keyboard", "narrow", "recovery"))
+        required = ("upload", "chat", "viewer_read_only", "append_once", "prediction_download", "dataset_download", "keyboard", "narrow", "recovery")
+        assert isinstance(checks, dict)
+        incomplete = [name for name in required if checks.get(name) is not True]
+        assert not incomplete, f"Browser checks lack affirmative evidence: {incomplete}"
         if real_llm:
-            assert checks.get("real_language")
+            assert checks.get("real_language") is True
         with httpx.Client(base_url=backend.url, timeout=30, trust_env=False) as http:
             scopes = http.get("/api/v1/conversations").json()["data"]["items"]
             refs = [r for scope in scopes for r in http.get(f"/api/v1/conversations/{scope['conversation_id']}/ml/resources?limit=100").json()["data"]["items"]]

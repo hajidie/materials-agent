@@ -23,16 +23,29 @@ def test_remaining_budget_is_sent_as_real_provider_output_limit(provider):
     if provider == "qwen": assert captured[0]["extra_body"]["thinking_budget"] == 100
     assert result.usage.total_tokens == 15 and result.usage.source == "actual"
 
-@pytest.mark.parametrize("usage,expected", [
-    ({"prompt_tokens": 10, "completion_tokens": 8, "completion_tokens_details": {"reasoning_tokens": 5}, "total_tokens": 18},18),
-    ({"prompt_tokens": 10, "completion_tokens": 8, "reasoning_tokens": 5},23),
-    ({"prompt_tokens": 10, "completion_tokens": 8, "reasoning_tokens": 5, "total_tokens": 23},23),
-    ({"prompt_tokens": 10, "completion_tokens": 8, "total_tokens": 30},30),
-    ({"prompt_tokens": 10, "completion_tokens": 8, "completion_tokens_details": {"reasoning_tokens": 5}, "reasoning_tokens": 5},18),
+@pytest.mark.parametrize("metadata,expected,reasoning", [
+    ({"response_metadata": {"token_usage": {
+        "prompt_tokens": 10, "completion_tokens": 8,
+        "completion_tokens_details": {"reasoning_tokens": 5}, "total_tokens": 18}}}, 18, 5),
+    ({"response_metadata": {"token_usage": {
+        "prompt_tokens": 10, "completion_tokens": 8, "reasoning_tokens": 5}}}, 23, 5),
+    ({"response_metadata": {"token_usage": {
+        "prompt_tokens": 10, "completion_tokens": 8, "reasoning_tokens": 5, "total_tokens": 23}}}, 23, 5),
+    ({"response_metadata": {"token_usage": {
+        "prompt_tokens": 10, "completion_tokens": 8, "total_tokens": 30}}}, 30, 0),
+    ({"response_metadata": {"token_usage": {
+        "prompt_tokens": 10, "completion_tokens": 8,
+        "completion_tokens_details": {"reasoning_tokens": 5}, "reasoning_tokens": 5}}}, 18, 5),
+    ({"usage_metadata": {"input_tokens": 10, "output_tokens": 20,
+        "total_tokens": 30, "output_token_details": {"reasoning": 8}}}, 30, 8),
+], ids=[
+    "native-reasoning-detail", "native-separate-reasoning", "native-total-includes-reasoning",
+    "native-authoritative-total", "native-reasoning-in-both-fields", "langchain-reasoning-detail",
 ])
-def test_full_usage_observable_components_are_not_lost_or_double_counted(usage, expected):
-    result = normalize_usage(SimpleNamespace(response_metadata={"token_usage": usage}), PreparedAgentCall("agent_decision", [],100,200,10))
+def test_full_usage_observable_components_are_not_lost_or_double_counted(metadata, expected, reasoning):
+    result = normalize_usage(SimpleNamespace(**metadata), PreparedAgentCall("agent_decision", [],100,200,10))
     assert result.total_tokens == expected and result.source == "actual"
+    assert result.reasoning_tokens == reasoning
 
 def test_missing_usage_reserves_input_output_and_marks_estimator():
     request = PreparedAgentCall("agent_decision", [],100,200,10)

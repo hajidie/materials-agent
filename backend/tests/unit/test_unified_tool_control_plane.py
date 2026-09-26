@@ -38,7 +38,6 @@ from materialsagent.domain.ports.tool_registry import (
 from materialsagent.infrastructure.llm.configuration import ConfiguredRole
 
 from materialsagent.infrastructure.db.conversation_task import MessageRow
-from materialsagent.infrastructure.db.llm_call import LLMCallRow
 from materialsagent.infrastructure.db.tool_invocation import (
     InvocationResultRow,
     InvocationRunRow,
@@ -235,8 +234,6 @@ def test_invocation_database_metadata_uses_strong_optional_relationships() -> No
     }
 
     assert MessageRow.__table__.c.task_id.nullable is True
-    assert LLMCallRow.__table__.c.task_id.nullable is True
-    assert LLMCallRow.__table__.c.source_message_id.nullable is False
     assert run_table.c.task_id.nullable is True
     assert {
         "ck_invocation_profile_relationship",

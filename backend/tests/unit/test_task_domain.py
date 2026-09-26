@@ -51,7 +51,6 @@ def _revision(**overrides: object) -> TaskInputRevision:
         "task_input_revision_id": "revision_domain",
         "task_id": "task_domain",
         "request_id": "request_domain",
-        "source_llm_call_id": None,
         "source_message_ids": ["message_domain"],
         "revision": 1,
         "raw_input": {"material": "ZTA35G"},

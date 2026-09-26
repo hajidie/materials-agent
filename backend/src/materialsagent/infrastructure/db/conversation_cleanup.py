@@ -25,8 +25,6 @@ from materialsagent.infrastructure.db.actor import _raise_safe_persistence_error
 from materialsagent.infrastructure.db.asset import AssetRow, _from_row as _asset_from_row
 from materialsagent.infrastructure.db.base import Base
 from materialsagent.infrastructure.db.conversation_task import ConversationRow, TaskRow
-from materialsagent.infrastructure.db.explanation import NaturalLanguageExplanationRow
-from materialsagent.infrastructure.db.llm_call import LLMCallRow
 from materialsagent.infrastructure.db.tool_run import ToolRunRow
 
 
@@ -211,7 +209,7 @@ class SQLAlchemyConversationLifecycleRepository:
         recovered_at: datetime,
         conversation_id: str | None = None,
     ) -> dict[str, int]:
-        counts = {"llm_calls": 0, "tool_runs": 0, "explanations": 0, "assets": 0, "tasks": 0}
+        counts = {"tool_runs": 0, "assets": 0, "tasks": 0}
         try:
             tasks = self._locked_tasks(actor_id=actor_id, conversation_id=conversation_id)
             task_by_id = {row.task_id: row for row in tasks}
@@ -219,22 +217,10 @@ class SQLAlchemyConversationLifecycleRepository:
             if not task_ids:
                 return counts
 
-            calls = self._session.scalars(
-                select(LLMCallRow)
-                .where(LLMCallRow.task_id.in_(task_ids))
-                .order_by(LLMCallRow.llm_call_id)
-                .with_for_update()
-            ).all()
             runs = self._session.scalars(
                 select(ToolRunRow)
                 .where(ToolRunRow.task_id.in_(task_ids))
                 .order_by(ToolRunRow.tool_run_id)
-                .with_for_update()
-            ).all()
-            explanations = self._session.scalars(
-                select(NaturalLanguageExplanationRow)
-                .where(NaturalLanguageExplanationRow.task_id.in_(task_ids))
-                .order_by(NaturalLanguageExplanationRow.explanation_id)
                 .with_for_update()
             ).all()
             assets = self._session.scalars(
@@ -245,26 +231,6 @@ class SQLAlchemyConversationLifecycleRepository:
             ).all()
 
             unsafe_task_ids: set[str] = set()
-            pending_before_start: set[str] = set()
-            for call in calls:
-                if call.created_at >= process_cutoff or call.status not in {"PENDING", "RUNNING"}:
-                    continue
-                was_pending = call.status == "PENDING"
-                call.status = "FAILED"
-                call.started_at = call.started_at or call.created_at
-                call.completed_at = recovered_at
-                call.duration_ms = max(0, int((recovered_at - call.started_at).total_seconds() * 1000))
-                call.error_code = "PROCESS_INTERRUPTED_BEFORE_START" if was_pending else "PROCESS_INTERRUPTED"
-                call.safe_error_message = "进程中断，调用未能完成。"
-                counts["llm_calls"] += 1
-                if was_pending and call.purpose in {
-                    "CHAT_ORCHESTRATION",
-                    "TOOL_INPUT_EXTRACTION",
-                }:
-                    pending_before_start.add(call.task_id)
-                else:
-                    unsafe_task_ids.add(call.task_id)
-
             for run in runs:
                 if run.created_at >= process_cutoff or run.current_status not in {"PENDING", "RUNNING"}:
                     continue
@@ -279,19 +245,6 @@ class SQLAlchemyConversationLifecycleRepository:
                 counts["tool_runs"] += 1
                 unsafe_task_ids.add(run.task_id)
 
-            for explanation in explanations:
-                if explanation.created_at >= process_cutoff or explanation.status not in {"PENDING", "RUNNING"}:
-                    continue
-                explanation.status = "FAILED"
-                explanation.started_at = explanation.started_at or explanation.created_at
-                explanation.completed_at = recovered_at
-                explanation.duration_ms = max(0, int((recovered_at - explanation.started_at).total_seconds() * 1000))
-                explanation.text = None
-                explanation.error_code = "PROCESS_INTERRUPTED"
-                explanation.safe_error_message = "进程中断，解释生成未能完成。"
-                counts["explanations"] += 1
-                unsafe_task_ids.add(explanation.task_id)
-
             for asset in assets:
                 if asset.created_at >= process_cutoff or asset.current_status != "PENDING":
                     continue
@@ -301,14 +254,6 @@ class SQLAlchemyConversationLifecycleRepository:
                 asset.orphan_details = {}
                 counts["assets"] += 1
 
-            for task_id in pending_before_start - unsafe_task_ids:
-                task = task_by_id[task_id]
-                if task.current_status == "RUNNING":
-                    task.current_status = "PENDING"
-                    task.completed_at = None
-                    task.error_code = None
-                    task.safe_error_message = None
-                    counts["tasks"] += 1
             for task_id in unsafe_task_ids:
                 task = task_by_id[task_id]
                 if task.current_status in {"PENDING", "RUNNING", "READY", "NEEDS_INPUT"}:
@@ -361,15 +306,6 @@ class SQLAlchemyConversationLifecycleRepository:
             task_ids = tuple(task.task_id for task in tasks)
             if not task_ids:
                 return False
-            active_calls = self._session.scalar(
-                select(LLMCallRow.llm_call_id)
-                .where(
-                    LLMCallRow.task_id.in_(task_ids),
-                    LLMCallRow.status.in_(("PENDING", "RUNNING")),
-                    LLMCallRow.created_at >= process_cutoff,
-                )
-                .limit(1)
-            )
             active_runs = self._session.scalar(
                 select(ToolRunRow.tool_run_id)
                 .where(
@@ -379,16 +315,7 @@ class SQLAlchemyConversationLifecycleRepository:
                 )
                 .limit(1)
             )
-            active_explanations = self._session.scalar(
-                select(NaturalLanguageExplanationRow.explanation_id)
-                .where(
-                    NaturalLanguageExplanationRow.task_id.in_(task_ids),
-                    NaturalLanguageExplanationRow.status.in_(("PENDING", "RUNNING")),
-                    NaturalLanguageExplanationRow.created_at >= process_cutoff,
-                )
-                .limit(1)
-            )
-            return any(value is not None for value in (active_calls, active_runs, active_explanations))
+            return active_runs is not None
         except SQLAlchemyError as error:
             _raise_safe_persistence_error(error)
 

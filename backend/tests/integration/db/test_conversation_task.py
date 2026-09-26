@@ -86,7 +86,6 @@ def _valid_facts(actor_id: str | None = None) -> tuple[Any, Any, Any, Any]:
         task_input_revision_id=_opaque("revision"),
         task_id=task_id,
         request_id=request_id,
-        source_llm_call_id=None,
         source_message_ids=[message_id],
         revision=1,
         raw_input={"prompt": "生成一张材料显微组织图。"},
@@ -329,19 +328,16 @@ def test_uow_rejects_bound_needs_input_with_a_complete_latest_revision(
 
 
 @pytest.mark.parametrize(
-    ("role", "generation_source", "llm_call_id"),
+    ("role", "generation_source"),
     [
-        ("SYSTEM", "USER", None),
-        ("USER", "LLM", _opaque("llm")),
-        ("USER", "USER", _opaque("llm")),
-        ("ASSISTANT", "LLM", None),
-        ("USER", "TEMPLATE", None),
+        ("SYSTEM", "USER"),
+        ("USER", "LLM"),
+        ("USER", "TEMPLATE"),
     ],
 )
 def test_message_rejects_illegal_role_source_combinations(
     role: str,
     generation_source: str,
-    llm_call_id: str | None,
 ) -> None:
     message = _valid_facts()[2]
 
@@ -350,7 +346,6 @@ def test_message_rejects_illegal_role_source_combinations(
             message,
             role=role,
             generation_source=generation_source,
-            llm_call_id=llm_call_id,
         )
 
 

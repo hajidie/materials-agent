@@ -100,6 +100,61 @@ def test_mcp_readiness_is_safe_and_briefly_cached():
     assert client.readiness(failing) == "UNAVAILABLE"
 
 
+def test_unused_mcp_client_can_close_without_starting_or_reopening_pool(monkeypatch):
+    from materialsagent.infrastructure.tool_clients import mcp_client as module
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Unused or closed client started an event loop")
+
+    monkeypatch.setattr(module, "start_blocking_portal", forbidden)
+    client = module.MCPClient(url="http://127.0.0.1:8200/mcp", token="mcp", resource_token="resource")
+    client.close()
+    client.close()
+    with pytest.raises(MCPFailure, match="MCP_UNAVAILABLE"):
+        client.call(SimpleNamespace(remote_tool_name="analyze_tabular_dataset"), {},
+                    SimpleNamespace(conversation_id="scope", remote_operation=None))
+
+
+def test_concurrent_first_use_shares_pool_and_close_drains_tasks_and_thread(monkeypatch):
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier, current_thread
+    from materialsagent.infrastructure.tool_clients import mcp_client as module
+
+    starts = []
+    original = module.start_blocking_portal
+    def start_portal():
+        starts.append(True)
+        return original()
+    async def request(self, call):
+        await asyncio.sleep(0)
+        return call.scope, current_thread()
+
+    monkeypatch.setattr(module, "start_blocking_portal", start_portal)
+    monkeypatch.setattr(module.MCPClient, "request", request)
+    client = module.MCPClient(url="http://127.0.0.1:8200/mcp", token="mcp", resource_token="resource")
+    barrier = Barrier(4)
+    def invoke(index):
+        barrier.wait(timeout=5)
+        return client.call(SimpleNamespace(remote_tool_name="analyze_tabular_dataset"), {},
+                           SimpleNamespace(conversation_id=f"scope-{index}", remote_operation=None))
+    try:
+        assert starts == []
+        with ThreadPoolExecutor(4) as executor:
+            results = list(executor.map(invoke, range(4)))
+        assert [scope for scope, _ in results] == [f"scope-{i}" for i in range(4)]
+        assert starts == [True]
+        threads = {thread for _, thread in results}
+        assert len(threads) == 1
+        tasks = [slot.task for slot in client.slots]
+        assert len(tasks) == 4 and all(not task.done() for task in tasks)
+    finally:
+        client.close()
+    client.close()
+    assert all(task.done() for task in tasks)
+    assert all(not thread.is_alive() for thread in threads)
+
+
 def test_write_confirmation_and_frozen_identity_precede_network_dispatch():
     store, registry, client, service, run = setup()
     assert run.status is InvocationStatus.PENDING_CONFIRMATION

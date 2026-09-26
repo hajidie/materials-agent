@@ -1,4 +1,5 @@
 from pathlib import Path
+from hashlib import sha256
 
 
 def test_real_payload_is_within_contract_under_p1b2_authorization(
@@ -77,7 +78,7 @@ def test_real_payload_is_within_contract_under_p1b2_authorization(
         path = artifact_directory / file_name
         assert path.is_file()
         assert path.stat().st_size == metadata["bytes"]
-        assert len(metadata["sha256"]) == 64
+        assert sha256(path.read_bytes()).hexdigest() == metadata["sha256"]
 
     assert session["authorization"] == {
         "real_model": "P1B2_PROJECT_OWNER_AUTHORIZED",

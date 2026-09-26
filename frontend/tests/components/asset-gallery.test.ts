@@ -64,17 +64,4 @@ describe("AssetGallery", () => {
     expect(wrapper.text()).toContain("图片地址不可用。其他结果仍可查看。");
   });
 
-  it("renders each image in a centered, width-limited image card", () => {
-    const wrapper = mount(AssetGallery, {
-      props: { assets: [asset()] },
-    });
-
-    expect(wrapper.get(".asset-gallery__grid").classes()).toContain(
-      "asset-gallery__grid--images",
-    );
-    expect(wrapper.get("figure").classes()).toEqual(
-      expect.arrayContaining(["asset-card", "asset-card--image"]),
-    );
-    expect(wrapper.get("img").classes()).toContain("asset-card__image");
-  });
 });

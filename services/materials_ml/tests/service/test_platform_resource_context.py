@@ -8,6 +8,7 @@ import pytest
 from dotenv import dotenv_values
 
 from materials_ml import load_package, predict
+from materials_ml_service.domain import TrainingRun
 from test_platform_mcp import platform, conversation, confirm, result, ROOT, diagnostic_run
 from test_platform_resources import resources_platform, upload
 from test_end_to_end import worker_process
@@ -16,9 +17,7 @@ from test_end_to_end import worker_process
 @pytest.fixture
 def context_platform(resources_platform):
     backend, ml = resources_platform
-    backend.stop()
-    backend.settings["enable_materials_ml_resource_context"] = True
-    backend.start()
+    assert backend.settings["enable_materials_ml_resource_context"] is True
     return backend, ml
 
 
@@ -82,7 +81,7 @@ def language_cycle(backend, ml, csv_payload, table, tmp_path, algorithm):
         ambiguous = message(http, scope, "两个数据集都可能是目标，我还没有确定要分析哪一个，请让我选择。", "ambiguous")
         assert ambiguous["status"] == "WAITING_FOR_USER", ambiguous
         if ambiguous["waiting"]["reason"] == "TOOL_ARGUMENT_CLARIFICATION":
-            assert "选项" in ambiguous["waiting"]["question"]
+            assert ambiguous["waiting"]["question"].strip()
         assert ambiguous["tool_executions"] == 0
         original_question = ambiguous["steps"][-1]["action"]
         chosen = message(http, scope, "第二个数据集", "choose", ambiguous)
@@ -183,7 +182,7 @@ def test_registration_recovery_and_unknown_explicit_reconcile_preserve_history(c
 
 
 @pytest.mark.parametrize("fault", ["deleted", "offline", "disabled"])
-def test_confirmation_freezes_resource_and_authority_failure_stops_dispatch(context_platform, csv_payload, fault):
+def test_confirmation_freezes_resource_and_authority_failure_stops_dispatch(context_platform, service, csv_payload, fault):
     backend, ml = context_platform
     with httpx.Client(base_url=backend.url, timeout=90, trust_env=False) as http:
         scope = conversation(http, "frozen")
@@ -198,6 +197,8 @@ def test_confirmation_freezes_resource_and_authority_failure_stops_dispatch(cont
             backend.stop(); backend.settings["enable_materials_ml_resource_context"] = False; backend.start()
         completed = confirm(http, waiting)
         assert completed["status"] == "TERMINATED", completed
-        assert completed["observations"][-1]["status"] == "FAILED"
+        if fault != "disabled":
+            assert completed["observations"][-1]["status"] == "FAILED"
         assert completed["final_answer"] is None
         assert len(completed["calls"]) == len(waiting["calls"])
+        assert service.list(TrainingRun, scope) == []

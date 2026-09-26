@@ -64,7 +64,7 @@ def test_chat_attachment_view_and_immutable_completion(context_platform, csv_pay
         assert terminal["text"].startswith("模型训练完成") and terminal["presentation"]["metrics"]
         assert observe()["messages"] == completed["messages"]
         assert http.get(run_url).json()["data"] == original
-        assert state()["selections"] == before["selections"]
+        assert state() == before  # Reconciliation must preserve the conversation fence.
         model = next(a for a in terminal["artifacts"] if a["kind"] == "model")
         incoming = table[["z", "x"]].iloc[:10]
         attachment = upload(incoming.to_csv(index=False).encode(), "input.csv", "input")

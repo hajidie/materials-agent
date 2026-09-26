@@ -254,7 +254,7 @@ class MessageRow(Base):
             name="ck_message_role_allowed",
         ),
         CheckConstraint(
-            "generation_source IN ('USER', 'LLM', 'TEMPLATE', 'AGENT')",
+            "generation_source IN ('USER', 'TEMPLATE', 'AGENT')",
             name="ck_message_generation_source_allowed",
         ),
         CheckConstraint(
@@ -262,12 +262,7 @@ class MessageRow(Base):
             name="ck_message_content_text_not_blank",
         ),
         CheckConstraint(
-            "llm_call_id IS NULL OR length(btrim(llm_call_id)) > 0",
-            name="ck_message_llm_call_id_not_blank",
-        ),
-        CheckConstraint(
-            "role <> 'USER' OR "
-            "(generation_source = 'USER' AND llm_call_id IS NULL)",
+            "role <> 'USER' OR generation_source = 'USER'",
             name="ck_message_user_role_source",
         ),
         CheckConstraint(
@@ -275,16 +270,10 @@ class MessageRow(Base):
             name="ck_message_user_source_role",
         ),
         CheckConstraint(
-            "generation_source <> 'LLM' OR "
-            "(role = 'ASSISTANT' AND llm_call_id IS NOT NULL)",
-            name="ck_message_llm_source_role",
-        ),
-        CheckConstraint(
             "generation_source <> 'TEMPLATE' OR role = 'ASSISTANT'",
             name="ck_message_template_source_role",
         ),
         CheckConstraint("generation_source <> 'AGENT' OR role = 'ASSISTANT'", name="ck_message_agent_source_role"),
-        UniqueConstraint("llm_call_id", name="uq_message_llm_call_id"),
         UniqueConstraint("conversation_id", "event_key", name="uq_message_conversation_event"),
         UniqueConstraint(
             "message_id",
@@ -333,14 +322,6 @@ class MessageRow(Base):
         JSONB(none_as_null=True),
         nullable=True,
     )
-    llm_call_id: Mapped[str | None] = mapped_column(
-        ForeignKey(
-            "llm_call.llm_call_id",
-            name="fk_message_llm_call",
-            ondelete="RESTRICT",
-        ),
-        nullable=True,
-    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -361,11 +342,6 @@ class TaskInputRevisionRow(Base):
         CheckConstraint(
             "length(btrim(request_id)) > 0",
             name="ck_task_input_revision_request_id_not_blank",
-        ),
-        CheckConstraint(
-            "source_llm_call_id IS NULL OR "
-            "length(btrim(source_llm_call_id)) > 0",
-            name="ck_task_input_revision_source_llm_call_id_not_blank",
         ),
         CheckConstraint(
             "revision > 0",
@@ -413,14 +389,6 @@ class TaskInputRevisionRow(Base):
         nullable=False,
     )
     request_id: Mapped[str] = mapped_column(Text, nullable=False)
-    source_llm_call_id: Mapped[str | None] = mapped_column(
-        ForeignKey(
-            "llm_call.llm_call_id",
-            name="fk_task_input_revision_llm_call",
-            ondelete="SET NULL",
-        ),
-        nullable=True,
-    )
     source_message_ids: Mapped[list[str]] = mapped_column(
         ARRAY(Text),
         nullable=False,
@@ -477,7 +445,6 @@ def _message_from_row(row: MessageRow) -> Message:
         generation_source=row.generation_source,
         content_text=row.content_text,
         structured_content=row.structured_content,
-        llm_call_id=row.llm_call_id,
         created_at=row.created_at,
     )
 
@@ -508,7 +475,6 @@ def _revision_from_row(row: TaskInputRevisionRow) -> TaskInputRevision:
         task_input_revision_id=row.task_input_revision_id,
         task_id=row.task_id,
         request_id=row.request_id,
-        source_llm_call_id=row.source_llm_call_id,
         source_message_ids=list(row.source_message_ids),
         revision=row.revision,
         raw_input=dict(row.raw_input),
@@ -653,16 +619,6 @@ class SQLAlchemyMessageRepository:
             _raise_safe_persistence_error(error)
         return None if row is None else _message_from_row(row)
 
-    def get_by_llm_call_id(self, llm_call_id: str) -> Message | None:
-        statement = select(MessageRow).where(
-            MessageRow.llm_call_id == llm_call_id
-        )
-        try:
-            row = self._session.scalar(statement)
-        except SQLAlchemyError as error:
-            _raise_safe_persistence_error(error)
-        return None if row is None else _message_from_row(row)
-
     def get_latest_for_conversation(
         self,
         conversation_id: str,
@@ -749,7 +705,6 @@ class SQLAlchemyMessageRepository:
                     generation_source=message.generation_source,
                     content_text=message.content_text,
                     structured_content=message.structured_content,
-                    llm_call_id=message.llm_call_id,
                     created_at=message.created_at,
                 )
             )
@@ -963,7 +918,6 @@ class SQLAlchemyTaskInputRevisionRepository:
                     task_input_revision_id=revision.task_input_revision_id,
                     task_id=revision.task_id,
                     request_id=revision.request_id,
-                    source_llm_call_id=revision.source_llm_call_id,
                     source_message_ids=list(revision.source_message_ids),
                     revision=revision.revision,
                     raw_input=revision.raw_input,
@@ -985,25 +939,6 @@ class SQLAlchemyTaskInputRevisionRepository:
             select(TaskInputRevisionRow)
             .where(TaskInputRevisionRow.task_id == task_id)
             .order_by(
-                TaskInputRevisionRow.revision.asc(),
-                TaskInputRevisionRow.task_input_revision_id.asc(),
-            )
-        )
-        try:
-            rows = self._session.scalars(statement).all()
-        except SQLAlchemyError as error:
-            _raise_safe_persistence_error(error)
-        return [_revision_from_row(row) for row in rows]
-
-    def list_for_llm_call_id(
-        self,
-        llm_call_id: str,
-    ) -> list[TaskInputRevision]:
-        statement = (
-            select(TaskInputRevisionRow)
-            .where(TaskInputRevisionRow.source_llm_call_id == llm_call_id)
-            .order_by(
-                TaskInputRevisionRow.task_id.asc(),
                 TaskInputRevisionRow.revision.asc(),
                 TaskInputRevisionRow.task_input_revision_id.asc(),
             )

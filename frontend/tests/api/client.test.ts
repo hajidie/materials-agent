@@ -27,14 +27,11 @@ function success<T>(requestId: string, data: T): Response {
 
 
 
-describe("createMaterialsAgentApi", () => {
-  it("models Backend result warnings as unknown arrays", () => {
-    expectTypeOf<ResultSummary["warnings"]>()
-      .toEqualTypeOf<unknown[]>();
-    expectTypeOf<ToolResult["warnings"]>()
-      .toEqualTypeOf<unknown[]>();
-  });
+// Checked by vue-tsc through tsconfig.app.json; these are static contracts.
+expectTypeOf<ResultSummary["warnings"]>().toEqualTypeOf<unknown[]>();
+expectTypeOf<ToolResult["warnings"]>().toEqualTypeOf<unknown[]>();
 
+describe("createMaterialsAgentApi", () => {
   it("parses a successful JSON envelope and request_id", async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
       success("request-create", {

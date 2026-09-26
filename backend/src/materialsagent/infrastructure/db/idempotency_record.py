@@ -35,7 +35,7 @@ class IdempotencyRecordRow(Base):
         ),
         CheckConstraint(
             "operation IN ('CONVERSATION_CREATE', 'MESSAGE_SUBMIT', 'TASK_CREATE', 'TASK_INPUT_SUPPLEMENT', "
-            "'TOOL_RETRY', 'EXPLANATION_RETRY')",
+            "'TOOL_RETRY')",
             name="ck_idempotency_operation_allowed",
         ),
         CheckConstraint(
@@ -55,28 +55,21 @@ class IdempotencyRecordRow(Base):
         CheckConstraint(
             "(operation = 'CONVERSATION_CREATE' AND conversation_id IS NOT NULL "
             "AND task_id IS NULL AND message_id IS NULL "
-            "AND task_input_revision_id IS NULL AND tool_run_id IS NULL "
-            "AND explanation_id IS NULL) OR "
+            "AND task_input_revision_id IS NULL AND tool_run_id IS NULL) OR "
             "(operation = 'MESSAGE_SUBMIT' AND conversation_id IS NOT NULL "
             "AND task_id IS NULL AND message_id IS NOT NULL "
-            "AND task_input_revision_id IS NULL AND tool_run_id IS NULL "
-            "AND explanation_id IS NULL) OR "
+            "AND task_input_revision_id IS NULL AND tool_run_id IS NULL) OR "
             "(operation = 'TASK_CREATE' AND conversation_id IS NOT NULL "
             "AND task_id IS NOT NULL "
             "AND message_id IS NOT NULL AND task_input_revision_id IS NULL "
-            "AND tool_run_id IS NULL AND explanation_id IS NULL) OR "
+            "AND tool_run_id IS NULL) OR "
             "(operation = 'TASK_INPUT_SUPPLEMENT' AND conversation_id IS NOT NULL "
             "AND task_id IS NOT NULL "
-            "AND message_id IS NOT NULL AND tool_run_id IS NULL "
-            "AND explanation_id IS NULL) OR "
+            "AND message_id IS NOT NULL AND tool_run_id IS NULL) OR "
             "(operation = 'TOOL_RETRY' AND conversation_id IS NULL "
             "AND task_id IS NOT NULL "
             "AND message_id IS NULL AND task_input_revision_id IS NULL "
-            "AND tool_run_id IS NOT NULL AND explanation_id IS NULL) OR "
-            "(operation = 'EXPLANATION_RETRY' AND conversation_id IS NULL "
-            "AND task_id IS NOT NULL "
-            "AND message_id IS NULL AND task_input_revision_id IS NULL "
-            "AND tool_run_id IS NULL AND explanation_id IS NOT NULL)",
+            "AND tool_run_id IS NOT NULL)",
             name="ck_idempotency_operation_binding",
         ),
         UniqueConstraint(
@@ -153,14 +146,6 @@ class IdempotencyRecordRow(Base):
         ForeignKey(
             "tool_run.tool_run_id",
             name="fk_idempotency_tool_run",
-            ondelete="CASCADE",
-        ),
-        nullable=True,
-    )
-    explanation_id: Mapped[str | None] = mapped_column(
-        ForeignKey(
-            "natural_language_explanation.explanation_id",
-            name="fk_idempotency_explanation",
             ondelete="CASCADE",
         ),
         nullable=True,

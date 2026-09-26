@@ -29,7 +29,6 @@ class TaskInputRevision:
     task_input_revision_id: str
     task_id: str
     request_id: str
-    source_llm_call_id: str | None
     source_message_ids: list[str]
     revision: int
     raw_input: dict[str, object]
@@ -47,8 +46,6 @@ class TaskInputRevision:
         )
         _require_non_blank(self.task_id, "task_id")
         _require_non_blank(self.request_id, "request_id")
-        if self.source_llm_call_id is not None:
-            _require_non_blank(self.source_llm_call_id, "source_llm_call_id")
         if not isinstance(self.source_message_ids, list) or not self.source_message_ids:
             raise ValueError("source_message_ids must contain at least one ID.")
         for source_message_id in self.source_message_ids:
