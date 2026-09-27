@@ -332,9 +332,9 @@ class ManagedToolWorkflow:
 
 
 class ToolArgResolver:
-    """Initial candidates and merged resume deltas use this deterministic fact authority.
+    """Complete model proposals use this deterministic fact authority.
 
-    Incremental language extraction is budgeted once by the Runtime before calling resolve.
+    The Agent loop owns language understanding; this resolver only validates facts.
     """
     def __init__(self, registry, uow_factory, clock):
         self.registry, self.uow_factory, self.clock = registry, uow_factory, clock
@@ -342,12 +342,12 @@ class ToolArgResolver:
 
     def resolve(self, run, tool_name, arguments):
         registration = self.registry.resolve(tool_name)
-        previous = run.draft
-        if previous and (previous.tool_name != tool_name or previous.schema_hash != registration.schema_hash):
-            raise AgentFailure("BOUND_TOOL_MISMATCH")
+        previous = run.draft if run.draft and run.draft.tool_name == tool_name else None
+        if previous and previous.schema_hash != registration.schema_hash:
+            raise AgentFailure("TOOL_SCHEMA_DRIFT")
         self.registry.authorize(registration=registration, action=ToolAction.SUPPLEMENT if previous else ToolAction.NEW_BINDING,
             bound_ref=registration.ref if previous else None)
-        merged = {**(previous.arguments if previous else {}), **arguments}
+        merged = dict(arguments)
         properties = plain(registration.definition.proposal_schema).get("properties", {})
         from materialsagent.domain.models.semantic_units import ANNOTATION_TOOLS
         if tool_name in ANNOTATION_TOOLS:
@@ -400,15 +400,9 @@ class ToolArgResolver:
             return metadata_cache[key]
         confirmed_units = {}
         if previous and tool_name == "materials_unit_conversion":
-            # A reply to the unit question is parsed by the existing argument
-            # model. Only the explicit from/to-unit delta can confirm a numeric
-            # unit, never an Invocation approval or a model annotation flag.
-            answering_units = bool(run.waiting and "semantic_annotations" in run.waiting.fields and run.user_inputs)
             for item in previous.unit_annotations:
                 field = item["resource_parameter"]
-                if answering_units and field in arguments:
-                    confirmed_units[field] = arguments[field]
-                elif item["provenance"] == "confirmed" and normalized.get(field) == item["unit"]:
+                if item["provenance"] == "confirmed" and normalized.get(field) == item["unit"]:
                     confirmed_units[field] = item["unit"]
         if previous and resource_tool:
             # A confirmed unit is a trusted fact about one bound resource field.
@@ -429,14 +423,22 @@ class ToolArgResolver:
                 if (old_binding is not None and current_binding is not None
                         and binding_identity(old_binding) == binding_identity(current_binding)):
                     confirmed_units[(parameter, item.get("column"))] = item.get("unit")
-        if previous and run.waiting and "semantic_annotations" in run.waiting.fields and run.user_inputs:
-            for item in annotations if isinstance(annotations, list) else ():
-                if not isinstance(item, dict):
-                    continue
-                key = (item.get("resource_parameter"), item.get("column"))
-                if any((old.get("resource_parameter"), old.get("column")) == key
-                       and old.get("requires_confirmation") for old in previous.unit_annotations):
-                    confirmed_units[key] = item.get("unit")
+        for assertion in run.current_unit_assertions:
+            from materialsagent.domain.models.semantic_units import normalize_unit
+            try:
+                unit = normalize_unit(assertion["unit"])
+            except (ValueError, KeyError):
+                raise AgentFailure("INVALID_UNIT_ASSERTION") from None
+            parameter = assertion["resource_parameter"]
+            if tool_name == "materials_unit_conversion":
+                if parameter not in {"from_unit", "to_unit"} or normalized.get(parameter) != unit:
+                    raise AgentFailure("INVALID_UNIT_ASSERTION")
+                confirmed_units[parameter] = unit
+            else:
+                binding = next((b for b in bindings.values() if b.model_argument == parameter), None)
+                if binding is None or not assertion.get("column"):
+                    raise AgentFailure("INVALID_UNIT_ASSERTION")
+                confirmed_units[(parameter, assertion["column"])] = unit
         unit_annotations, unit_issues = UnitResolutionPolicy().annotations(tool_name, annotations, bindings,
             metadata=unit_metadata, confirmed_units=confirmed_units)
         if retry:
@@ -446,8 +448,7 @@ class ToolArgResolver:
         issues.update(unit_issues)
         normalizer = registration.binding.normalizer
         if normalizer:
-            value = normalizer({k: v for k, v in normalized.items() if k != "semantic_annotations"},
-                               previous.normalized if previous else None)
+            value = normalizer({k: v for k, v in normalized.items() if k != "semantic_annotations"}, None)
             normalized = plain(value.normalized_input)
             if isinstance(value, NeedsInputNormalization):
                 issues.update({field: "Missing" for field in value.missing_fields})
@@ -481,7 +482,7 @@ class ToolArgResolver:
             schema_hash=registration.schema_hash, arguments=persisted_arguments, normalized=normalized, issues=issues,
             task_id=previous.task_id if previous else None, revision_id=previous.revision_id if previous else None,
             resolver_authoritative=True, resource_bindings=bindings)
-        if registration.execution_profile is ToolExecutionProfile.MANAGED:
+        if registration.execution_profile is ToolExecutionProfile.MANAGED and not draft.issues:
             if run.retry_execution:
                 with self.uow_factory() as uow:
                     task = uow.tasks.get_owned(run.retry_execution.task_id, run.actor_id)
@@ -490,6 +491,10 @@ class ToolArgResolver:
                     revisions = uow.task_input_revisions.list_for_task(task.task_id)
                     revision = max(revisions, key=lambda item: item.revision)
                     draft.task_id, draft.revision_id = task.task_id, revision.task_input_revision_id
+            elif any(execution.status == "SUCCEEDED" and execution.tool_name == draft.tool_name
+                    and execution.version == draft.version and execution.schema_hash == draft.schema_hash
+                    and execution.arguments == draft.normalized for execution in run.executions):
+                pass  # Runtime returns the existing result; do not allocate a duplicate managed Task.
             # A provider may restate defaults after resolution. An unchanged READY
             # input reuses its revision instead of attempting READY -> READY.
             elif not (previous and previous.normalized == draft.normalized and previous.issues == draft.issues
@@ -521,7 +526,7 @@ class ToolArgResolver:
                 revisions = uow.task_input_revisions.list_for_task(task.task_id)
                 revision_number = max((r.revision for r in revisions), default=0) + 1
             revision = TaskInputRevision(task_input_revision_id=identifier(), task_id=task.task_id,
-                request_id=run.agent_run_id, source_message_ids=[run.source_message_id],
+                request_id=run.agent_run_id, source_message_ids=run.user_message_ids or [run.source_message_id],
                 revision=revision_number, raw_input=draft.arguments, normalized_input=draft.normalized,
                 missing_fields=[f for f, issue in draft.issues.items() if issue == "Missing"],
                 ambiguous_fields=[{"field": f, "candidates": []} for f, issue in draft.issues.items() if issue in {"Ambiguous", "Conflict"}],
@@ -561,11 +566,16 @@ class RegistryAgentGateway:
 
     def resolve(self, run, tool_name, arguments):
         try:
-            return self.arg_resolver.resolve(run, tool_name, arguments)
+            with execution_owner(run.agent_run_id, run.version, run.claim):
+                return self.arg_resolver.resolve(run, tool_name, arguments)
         except ApplicationError as error:
             raise AgentFailure(error.code) from None
 
     def prepare(self, run, record):
+        with execution_owner(run.agent_run_id, run.version, run.claim):
+            return self._prepare(run, record)
+
+    def _prepare(self, run, record):
         if run.tool_execution_disabled:
             raise AgentFailure("TOOL_EXECUTION_DISABLED")
         registration = self.registry.resolve(record.tool_name)
@@ -632,7 +642,7 @@ class RegistryAgentGateway:
             if observation is None:
                 raise AgentFailure("ML_RESOURCE_VERIFICATION_FAILED") from None
             return observation
-        with tool_deadline(max(.001, deadline - monotonic())), execution_owner(run.agent_run_id, run.version, run.claim):
+        with tool_deadline(max(.001, deadline - monotonic())), execution_owner(run.agent_run_id, run.version, run.claim, record.invocation_run_id):
             registration = self.registry.resolve(record.tool_name)
             if registration.execution_profile is ToolExecutionProfile.MANAGED:
                 self.invocations._drive_managed(actor, record.invocation_run_id, workflow_service=self.workflow,
@@ -699,7 +709,7 @@ class RegistryAgentGateway:
                 if uow.invocation_runs.update(repaired, expected_status=invocation.status,
                         expected_claim_token=invocation.execution_claim_token) is None:
                     raise AgentFailure("OBSERVATION_INCONSISTENT")
-                with execution_owner(run.agent_run_id, run.version, run.claim):
+                with execution_owner(run.agent_run_id, run.version, run.claim, record.invocation_run_id):
                     uow.commit()
         projection = self.result_query.get(actor, result_id)
         artifacts = [{field: getattr(a, field) for field in a.__dataclass_fields__} for a in projection.artifacts]

@@ -57,11 +57,24 @@ describe("Agent composer", () => {
     await wrapper.get("textarea").trigger("keydown", { key: "Enter", isComposing: false });
     expect(wrapper.emitted("submit")).toHaveLength(1);
   });
-  it("shows the exact waiting question and offers a new goal", async () => {
+  it("keeps the ordinary send action for a waiting question", async () => {
     const wrapper = composer();
-    await wrapper.setProps({ waitingQuestion: "请补充 value" });
-    expect(wrapper.text()).toContain("请补充 value");
-    await wrapper.get(".supplement-banner button").trigger("click");
-    expect(wrapper.emitted("cancel-resume")).toHaveLength(1);
+    await wrapper.setProps({ waitingQuestion: "请补充数值" });
+    expect(wrapper.text()).toContain("回复上方问题即可继续");
+    expect(wrapper.text()).not.toContain("改为新目标");
+    expect(wrapper.find('[aria-label="发送"]').exists()).toBe(true);
+  });
+  it("shows an enabled Stop while send and Enter are blocked", async () => {
+    const wrapper = composer();
+    await wrapper.setProps({ disabled: true, sending: true, generating: true });
+    const stop = wrapper.get('[aria-label="中止生成"]');
+    expect(stop.attributes('disabled')).toBeUndefined();
+    await stop.trigger('click');
+    expect(wrapper.emitted('stop')).toHaveLength(1);
+    await wrapper.get('form').trigger('submit');
+    expect(wrapper.emitted('submit')).toBeUndefined();
+    await wrapper.setProps({ disabled: false, sending: false, generating: false });
+    expect(wrapper.find('[aria-label="中止生成"]').exists()).toBe(false);
+    expect(wrapper.find('[aria-label="发送"]').exists()).toBe(true);
   });
 });

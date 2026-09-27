@@ -1,3 +1,4 @@
+from backend.tests.agent_state import agent_run
 from copy import deepcopy
 from types import SimpleNamespace
 import pytest
@@ -92,25 +93,22 @@ def test_unit_question_reply_confirms_only_explicit_unit_delta_and_survives_next
     from materialsagent.domain.models.agent import AgentRun, AskUser, now
     resolver = ToolArgResolver(build_tool_registry(), lambda: pytest.fail("No database access needed"), now)
     tool = "materials_unit_conversion"
-    run = AgentRun(conversation_id="conversation", actor_id="actor", source_message_id="message",
+    run = agent_run(conversation_id="conversation", actor_id="actor", source_message_id="message",
         goal="把 strength_MPa 的数值转成 GPa")
     annotation = {**ANNOTATION, "resource_parameter": "from_unit", "column": "from_unit", "usage": "numeric"}
     run.draft = resolver.resolve(run, tool, {"value": 1000, "from_unit": "MPa", "to_unit": "GPa", "semantic_annotations": [annotation]})
     assert run.draft.issues == {"semantic_annotations": "Ambiguous"}
     assert "semantic_annotations" not in run.draft.normalized
-    assert resolver.resolve(run, tool, {"semantic_annotations": []}).issues == {"semantic_annotations": "Ambiguous"}
-    run.waiting = AskUser(type="AskUser", reason="TOOL_ARGUMENT_CLARIFICATION", question="请确认原始单位", tool_name=tool,
-        fields=["semantic_annotations"])
-    run.user_inputs = ["确认，原始数据的单位就是 MPa"]
-    assert resolver.resolve(run, tool, {}).issues == {"semantic_annotations": "Ambiguous"}
-    run.draft = resolver.resolve(run, tool, {"from_unit": "MPa"})
+    arguments = {"value":1000,"from_unit":"MPa","to_unit":"GPa"}
+    assert resolver.resolve(run, tool, {**arguments,"semantic_annotations": []}).issues == {"semantic_annotations": "Ambiguous"}
+    run.current_unit_assertions = [{"resource_parameter":"from_unit","unit":"MPa","source_message":"message","evidence":"MPa"}]
+    run.draft = resolver.resolve(run, tool, arguments)
     assert not run.draft.issues and run.draft.unit_annotations[0]["provenance"] == "confirmed"
-    run.waiting = None
-    frozen = resolver.resolve(run, tool, {"value": 1000})
+    run.current_unit_assertions = []
+    frozen = resolver.resolve(run, tool, arguments)
     assert not frozen.issues and frozen.unit_annotations == run.draft.unit_annotations
-    assert resolver.resolve(run, tool, {"semantic_annotations": []}).unit_annotations == run.draft.unit_annotations
-    # A changed numerical unit invalidates this temporary confirmation.
-    assert resolver.resolve(run, tool, {"from_unit": "Pa"}).issues == {"semantic_annotations": "Ambiguous"}
+    assert resolver.resolve(run, tool, {**arguments,"from_unit":"Pa"}).issues == {"semantic_annotations":"Ambiguous"}
+
 
 
 def test_resource_unit_confirmation_survives_repeated_model_inference_for_same_binding():
@@ -146,21 +144,18 @@ def test_resource_unit_confirmation_survives_repeated_model_inference_for_same_b
         binding_version="test", endpoint_digest="a" * 64))
     resolver = ToolArgResolver(registry, lambda: pytest.fail("No database access needed"), now)
     resolver.resource_context = ResourceContext()
-    run = AgentRun(conversation_id="conversation", actor_id="actor", source_message_id="message",
+    run = agent_run(conversation_id="conversation", actor_id="actor", source_message_id="message",
         goal="用这个数据集训练随机森林")
     arguments = {"dataset_id": {"platform_resource_id": "ref-1"}, "features": ["x", "z"],
         "target": "strength_MPa", "algorithm": "RF", "semantic_annotations": [ANNOTATION]}
     run.draft = resolver.resolve(run, TOOL, arguments)
     assert run.draft.issues == {"semantic_annotations": "Ambiguous"}
 
-    run.waiting = AskUser(type="AskUser", reason="TOOL_ARGUMENT_CLARIFICATION",
-        question="请确认 strength_MPa 是否为 MPa", tool_name=TOOL, fields=["semantic_annotations"])
-    run.user_inputs = ["确认"]
-    run.draft = resolver.resolve(run, TOOL, {"semantic_annotations": [ANNOTATION]})
+    run.current_unit_assertions = [{"resource_parameter":"dataset_reference","column":"strength_MPa","unit":"MPa","source_message":"message","evidence":"MPa"}]
+    run.draft = resolver.resolve(run, TOOL, arguments)
     assert not run.draft.issues
     assert run.draft.unit_annotations[0]["provenance"] == "confirmed"
-
-    run.waiting = None
+    run.current_unit_assertions = []
     repeated = resolver.resolve(run, TOOL, arguments)
     assert not repeated.issues
     assert repeated.unit_annotations[0]["provenance"] == "confirmed"

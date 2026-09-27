@@ -9,7 +9,7 @@ from dotenv import dotenv_values
 
 from materials_ml import load_package, predict
 from materials_ml_service.domain import TrainingRun
-from test_platform_mcp import platform, conversation, confirm, result, ROOT, diagnostic_run
+from test_platform_mcp import platform, conversation, confirm, result, ROOT, diagnostic_run, post_message
 from test_platform_resources import resources_platform, upload
 from test_end_to_end import worker_process
 
@@ -22,10 +22,10 @@ def context_platform(resources_platform):
 
 
 def message(http, scope, text, key, waiting=None):
-    body = {"mode": "RESUME_RUN" if waiting else "NEW_RUN", "content_text": text}
+    body = {"content_text": text}
     if waiting:
-        body.update(agent_run_id=waiting["agent_run_id"], waiting_version=waiting["waiting_version"])
-    response = http.post(f"/api/v1/conversations/{scope}/messages", json=body, headers={"Idempotency-Key": key})
+        body["reply_to"]={"question_message_id":waiting["question_message_id"],"waiting_version":waiting["waiting_version"]}
+    response = post_message(http, f"/api/v1/conversations/{scope}/messages", json=body, headers={"Idempotency-Key": key})
     assert response.status_code == 200, response.text
     value = diagnostic_run(http, response.json()["data"]["agent_run"])
     if value["error_code"] == "CONTEXT_BUDGET_EXCEEDED":
@@ -54,7 +54,7 @@ def language_cycle(backend, ml, csv_payload, table, tmp_path, algorithm):
         assert any(r["resource_type"] == "training_run" and r["resource_id"] == training["id"] for r in refs)
         worker = worker_process(ml)
         try:
-            assert worker.wait(timeout=60) == 0
+            assert worker.wait(timeout=60) == 0, worker.stderr.read().decode(errors="replace")
         finally:
             if worker.poll() is None:
                 worker.kill(); worker.wait(timeout=10)
@@ -80,15 +80,14 @@ def language_cycle(backend, ml, csv_payload, table, tmp_path, algorithm):
         np.testing.assert_allclose(actual["values"], predict(load_package(tmp_path, trusted=True), incoming).values, rtol=1e-10, atol=1e-12)
         ambiguous = message(http, scope, "两个数据集都可能是目标，我还没有确定要分析哪一个，请让我选择。", "ambiguous")
         assert ambiguous["status"] == "WAITING_FOR_USER", ambiguous
-        if ambiguous["waiting"]["reason"] == "TOOL_ARGUMENT_CLARIFICATION":
-            assert ambiguous["waiting"]["question"].strip()
+        assert ambiguous["waiting"]["question"].strip()
         assert ambiguous["tool_executions"] == 0
-        original_question = ambiguous["steps"][-1]["action"]
+        original_question = ambiguous["question_message_id"]
         chosen = message(http, scope, "第二个数据集", "choose", ambiguous)
         assert chosen["status"] == "SUCCEEDED", json.dumps({"waiting": chosen["waiting"], "draft": chosen["draft"],
             "actions": [s["action"] for s in chosen["steps"]]})
         assert result(chosen)["id"] != dataset["resource_id"]
-        assert chosen["steps"][len(ambiguous["steps"])-1]["action"] == original_question
+        assert chosen["steps"][len(ambiguous["steps"])-1]["message_id"] == original_question
         assert "resource_snapshot" not in chosen
 
 
@@ -175,7 +174,7 @@ def test_registration_recovery_and_unknown_explicit_reconcile_preserve_history(c
         original = diagnostic_run(http, http.get(base).json()["data"])
         assert original["status"] == completed["status"]
         assert original["observations"] == completed["observations"]
-        assert original["final_answer"] == completed["final_answer"]
+        assert original["answer_message"] == completed["answer_message"]
         if fault == "commit-before":
             registered = next(r for r in refs if r["resource_type"] == "training_run")
             assert ":reconcile:" in registered["source"]
@@ -199,6 +198,6 @@ def test_confirmation_freezes_resource_and_authority_failure_stops_dispatch(cont
         assert completed["status"] == "TERMINATED", completed
         if fault != "disabled":
             assert completed["observations"][-1]["status"] == "FAILED"
-        assert completed["final_answer"] is None
+        assert completed["answer_message"] is None
         assert len(completed["calls"]) == len(waiting["calls"])
         assert service.list(TrainingRun, scope) == []

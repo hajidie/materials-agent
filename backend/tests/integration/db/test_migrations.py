@@ -30,7 +30,7 @@ IMMEDIATE_PREVIOUS_REVISION = "0006_asset"
 M8_REVISION = "0008_idempotency_record"
 M9_REVISION = "0009_timeline_query_indexes"
 M10_REVISION = "0010_registry_routing_state"
-EXPECTED_REVISION = "0022_retire_legacy_llm_tables"
+EXPECTED_REVISION = "0023_agent_chat_messages"
 ALEMBIC_INI = Path(__file__).resolve().parents[3] / "alembic.ini"
 NEW_TASK_TIME_CHECKS = {
     "ck_task_started_at_not_before_created_at",
@@ -56,7 +56,7 @@ M8_TABLES = M7_TABLES | {
     "idempotency_record",
     "conversation_object_cleanup",
 }
-HEAD_TABLES = (M8_TABLES - {"llm_call", "natural_language_explanation"}) | {"ml_scope_binding", "ml_resource_ref", "ml_resource_operation", "conversation_deletion", "invocation_run", "invocation_result", "agent_run", "agent_submission", "agent_step", "agent_observation", "agent_execution", "agent_model_call", "agent_final_answer"}
+HEAD_TABLES = (M8_TABLES - {"llm_call", "natural_language_explanation"}) | {"ml_scope_binding", "ml_resource_ref", "ml_resource_operation", "conversation_deletion", "invocation_run", "invocation_result", "agent_run", "agent_submission", "agent_step", "agent_observation", "agent_execution", "agent_model_call"}
 
 
 def _make_alembic_config(settings: AppSettings) -> Config:
@@ -479,6 +479,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "completed_at",
             },
         }
+        expected_columns["message"].update({"phase","sequence","agent_run_id","answer_root_message_id","answer_version"})
         expected_columns["conversation"].update({"deletion_fence_operation_id", "deletion_fence_version", "ml_dataset_ordinal"})
         for table_name, column_names in expected_columns.items():
             assert set(_column_map(inspector, table_name)) == column_names
@@ -583,6 +584,8 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "fk_message_actor": "actor",
                 "fk_message_conversation": "conversation",
                 "fk_message_task": "task",
+                "fk_message_agent_run":"agent_run",
+                "fk_message_answer_root":"message",
             },
             "task_input_revision": {
                 "fk_task_input_revision_task": "task",
@@ -631,6 +634,8 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "fk_message_actor": "RESTRICT",
                 "fk_message_conversation": "CASCADE",
                 "fk_message_task": "CASCADE",
+                "fk_message_agent_run":"CASCADE",
+                "fk_message_answer_root":"CASCADE",
             },
             "task_input_revision": {
                 "fk_task_input_revision_task": "CASCADE",
@@ -707,6 +712,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "ck_task_updated_at_not_before_created_at",
             },
             "message": {
+                "ck_message_sequence", "ck_message_phase", "ck_message_answer_version",
                 "ck_message_actor_id_not_blank",
                 "ck_message_content_text_not_blank",
                 "ck_message_conversation_id_not_blank",
@@ -880,6 +886,8 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
         } == {
             "uq_message_id_conversation": ["message_id", "conversation_id"],
             "uq_message_conversation_event": ["conversation_id", "event_key"],
+            "uq_message_conversation_sequence": ["conversation_id","sequence"],
+            "uq_message_answer_version": ["answer_root_message_id","answer_version"],
         }
         assert {
             constraint["name"]: constraint["column_names"]
@@ -2475,3 +2483,22 @@ def test_m10_aborts_on_conflicting_historical_tool_id(
     with pytest.raises(RuntimeError, match="historical Tool IDs conflict"):
         command.upgrade(config, "head")
     assert _current_revision(temporary_database) == M9_REVISION
+
+
+def test_chat_migration_refuses_to_drop_existing_agent_history(temporary_database):
+    config=_make_alembic_config(temporary_database)
+    command.upgrade(config,"0022_retire_legacy_llm_tables")
+    engine=create_engine_from_settings(temporary_database)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("INSERT INTO actor(actor_id,actor_origin,created_at) VALUES ('guard-actor','LOCAL_ANONYMOUS',now())"))
+            connection.execute(text("INSERT INTO conversation(conversation_id,actor_id,created_at,updated_at) VALUES ('guard-conversation','guard-actor',now(),now())"))
+            connection.execute(text("INSERT INTO message(message_id,conversation_id,actor_id,request_id,role,generation_source,content_text,created_at) VALUES ('guard-message','guard-conversation','guard-actor','guard-request','USER','USER','old goal',now())"))
+            connection.execute(text("INSERT INTO agent_run(agent_run_id,conversation_id,actor_id,source_message_id,status,version,document,created_at) VALUES ('guard-run','guard-conversation','guard-actor','guard-message','WAITING_FOR_USER',0,'{}',now())"))
+        with pytest.raises(RuntimeError,match="scoped chat cleanup"):
+            command.upgrade(config,"head")
+        assert _current_revision(temporary_database)=="0022_retire_legacy_llm_tables"
+        assert "agent_final_answer" in inspect(engine).get_table_names()
+        with engine.connect() as connection:
+            assert connection.scalar(text("SELECT count(*) FROM agent_run"))==1
+    finally:engine.dispose()

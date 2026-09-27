@@ -26,9 +26,7 @@ def _role(provider: str, role: str, **overrides: object) -> ConfiguredRole:
         "reasoning_mode": "disabled",
         "reasoning_effort": None,
         "thinking_budget": None,
-        "response_format": (
-            "text" if role == "final_answer" else "json_object"
-        ),
+        "response_format": "json_object",
         "streaming": False,
         "context_window_tokens": 1_000_000,
         "prompt_limit_tokens": 16_384,
@@ -85,7 +83,7 @@ def test_qwen_reasoning_extensions_and_streaming_are_controlled() -> None:
 
     config = _role(
         "qwen",
-        "final_answer",
+        "agent_decision",
         temperature=None,
         top_p=0.9,
         top_k=20,
@@ -111,7 +109,7 @@ def test_qwen_reasoning_extensions_and_streaming_are_controlled() -> None:
     }
 
 
-def test_three_roles_create_independent_model_instances() -> None:
+def test_calls_create_independent_model_instances() -> None:
     from materialsagent.infrastructure.llm.factory import create_chat_model
 
     created: list[object] = []
@@ -123,10 +121,10 @@ def test_three_roles_create_independent_model_instances() -> None:
 
     roles = (
         _role("deepseek", "agent_decision"),
-        _role("deepseek", "tool_arg_resolution"),
+        _role("deepseek", "agent_decision"),
         _role(
             "deepseek",
-            "final_answer",
+            "agent_decision",
             max_tokens=768,
         ),
     )
@@ -151,7 +149,7 @@ def test_thinking_sampling_provider_semantics(provider, mode, top_p, expected):
     from materialsagent.infrastructure.llm.factory import provider_client_kwargs
 
     kwargs = provider_client_kwargs(_role(
-        provider, "final_answer", reasoning_mode=mode, temperature=0.7, top_p=top_p,
+        provider, "agent_decision", reasoning_mode=mode, temperature=0.7, top_p=top_p,
     ))
     assert kwargs["temperature"] == 0.7
     assert kwargs.get("top_p") == expected

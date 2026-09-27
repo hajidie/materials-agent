@@ -3,15 +3,15 @@ import { computed, onMounted, ref, watch } from "vue";
 import ConversationSidebar from "./components/ConversationSidebar.vue";
 import DeleteConversationDialog from "./components/DeleteConversationDialog.vue";
 import AgentRunCard from "./components/AgentRunCard.vue";
+import ChatMessage from "./components/ChatMessage.vue";
 import ChatComposer from "./components/ChatComposer.vue";
-import { agentRequest, clarificationLabel } from "./api/agent";
+import { agentRequest } from "./api/agent";
 import { useAgentRuns } from "./composables/useAgentRuns";
 import { useChatArtifacts } from "./composables/useChatArtifacts";
 import ArtifactViewer from "./components/ArtifactViewer.vue";
-import MessageAttachment from "./components/MessageAttachment.vue";
 import type { ArtifactTarget, Attachment } from "./api/artifacts";
 import { ApiResponseError } from "./api/errors";
-import type { AgentRun } from "./api/agent";
+import type { AgentRun, ChatMessage as Message } from "./api/agent";
 
 const agent = useAgentRuns();
 const chat = useChatArtifacts(agent.selectedId, agent.runs);
@@ -21,9 +21,22 @@ const deleteOperation = ref<string | null>(null);
 watch(chat.fence, value => { agent.writeBlocked.value = !!value; });
 watch(agent.selectedId, () => { viewing.value = null; });
 const pendingHere = computed(() => agent.pending.value?.conversationId === agent.selectedId.value ? agent.pending.value : null);
-const composerText = computed(() => typeof pendingHere.value?.body.content_text === "string" ? pendingHere.value.body.content_text : agent.draft.value.text);
-const composerAttachment = computed(() => Array.isArray(pendingHere.value?.body.attachments) ? pendingHere.value.body.attachments[0] as Attachment | undefined : agent.draft.value.attachment);
-const timeline = computed(() => [...agent.runs.value.map(run => ({ key: run.agent_run_id, created: run.created_at, run, result: null })), ...chat.messages.value.map(result => ({ key: result.message_id, created: result.created_at, result, run: null }))].sort((a, b) => a.created.localeCompare(b.created) || a.key.localeCompare(b.key)));
+const composerText = computed(() => !pendingHere.value?.accepted && typeof pendingHere.value?.body.content_text === "string" ? pendingHere.value.body.content_text : agent.draft.value.text);
+const composerAttachment = computed(() => !pendingHere.value?.accepted && Array.isArray(pendingHere.value?.body.attachments) ? pendingHere.value.body.attachments[0] as Attachment | undefined : agent.draft.value.attachment);
+const timeline = computed(() => {
+  const entries: Array<{key:string;sequence:number;message:Message|null;run:AgentRun|null}> = agent.messages.value.map(message => ({ key: message.answer_root_message_id ?? message.message_id,
+    sequence: message.sequence, message, run: null as AgentRun | null }));
+  for (const run of agent.runs.value) {
+    if (!["PENDING", "RUNNING", "WAITING_FOR_CONFIRMATION"].includes(run.status) && !run.error_message && !run.outcome_unknown) continue;
+    const owned = agent.messages.value.filter(m => m.agent_run_id === run.agent_run_id);
+    const anchor = agent.messages.value.find(m => run.answer_root_message_id
+      ? m.answer_root_message_id === run.answer_root_message_id : m.message_id === run.source_message_id);
+    const sequence = (owned.length ? Math.max(...owned.map(m => m.sequence)) : anchor?.sequence ?? 0) + 0.5;
+    entries.push({ key: run.agent_run_id, sequence, message: null, run });
+  }
+  return entries.sort((a, b) => a.sequence - b.sequence);
+});
+const awaitingConfirmation = computed(() => agent.runs.value.some(run => run.status === "WAITING_FOR_CONFIRMATION"));
 const deleteId = ref<string | null>(null);
 const deleting = ref(false);
 const deleteError = ref<string | null>(null);
@@ -95,15 +108,11 @@ function safely(promise: Promise<unknown>) { void promise.catch(() => { agent.er
       <button v-if="agent.nextCursor.value" class="button" @click="safely(agent.refresh(true))">加载更早的消息</button>
       <section v-if="timeline.length" class="agent-timeline" aria-label="对话消息">
         <template v-for="item in timeline" :key="item.key">
-          <AgentRunCard v-if="item.run" :run="item.run" :disabled="agent.busy.value" :reconciling="reconciling !== null" :receipt="receipts[item.run.agent_run_id]"
-            @resume="agent.resumeTarget.value = item.run" @confirm="safely(agent.confirm(item.run, $event))"
-            @regenerate="safely(agent.retry(item.run))" @retry="safely(agent.retry(item.run, $event))"
-            @artifact="view($event)" @reconcile="safely(reconcileRun(item.run, $event))" />
-          <article v-else-if="item.result" class="chat-assistant chat-result" aria-label="完成结果"><p class="agent-answer">{{ item.result.text }}</p>
-            <MessageAttachment v-for="attachment in item.result.artifacts" :key="attachment.attachment_id"
-              :conversation-id="agent.selectedId.value!" :message-id="item.result.message_id" :attachment="attachment"
-              @open="view({ message: item.result.message_id, attachment })" />
-          </article>
+          <ChatMessage v-if="item.message" :message="item.message" :conversation-id="agent.selectedId.value!" :disabled="agent.busy.value"
+            @regenerate="safely(agent.regenerate($event))" @artifact="view($event)" />
+          <AgentRunCard v-else-if="item.run" :run="item.run" :disabled="agent.busy.value" :reconciling="reconciling !== null" :receipt="receipts[item.run.agent_run_id]"
+            @confirm="safely(agent.confirm(item.run, $event))" @retry="safely(agent.retry(item.run, $event))"
+            @reconcile="safely(reconcileRun(item.run, $event))" />
         </template>
       </section>
       <section v-else-if="!agent.loading.value" class="chat-welcome">
@@ -119,12 +128,12 @@ function safely(promise: Promise<unknown>) { void promise.catch(() => { agent.er
       <p v-if="chat.pending.value" class="muted" role="status">正在处理已提交的数据，完成后会在这里显示结果。</p>
       <section v-if="chat.notice.value" role="status"><p>{{ chat.notice.value }}</p><button class="button" :disabled="!!chat.fence.value" @click="safely(chat.observe(true))">核查结果</button></section>
       </section>
-      <ChatComposer :key="`${agent.selectedId.value}:${agent.resumeTarget.value?.agent_run_id ?? 'new'}`" :disabled="agent.busy.value" :sending="agent.sending.value" :completed="agent.completed.value"
-        :waiting-question="agent.resumeTarget.value?.waiting ? clarificationLabel(agent.resumeTarget.value.waiting.question) : null"
+      <ChatComposer :key="`${agent.selectedId.value}:${agent.resumeTarget.value?.agent_run_id ?? 'new'}`" :disabled="agent.busy.value || awaitingConfirmation" :sending="agent.sending.value" :generating="agent.generating.value" :stopping="agent.stopping.value" :completed="agent.completed.value"
+        :waiting-question="agent.resumeTarget.value?.waiting ? agent.resumeTarget.value.waiting.question : null"
         :initial-draft="composerText"
         :attachment="composerAttachment" :uploading="agent.uploading.value" :upload-error="agent.uploadError.value" :can-retry-upload="agent.canRetryUpload.value"
         @update-draft="agent.setDraftText($event)" @upload="safely(agent.uploadAttachment($event))" @remove-attachment="agent.removeAttachment()" @check-upload="safely(agent.checkUpload())"
-        @submit="safely(submit($event))" @cancel-resume="agent.resumeTarget.value = null" />
+        @submit="safely(submit($event))" @stop="safely(agent.stop())" />
     </main>
 
   </div>

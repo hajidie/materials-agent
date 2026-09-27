@@ -57,6 +57,14 @@ def project_output_outcome(observation):
 def project_result_artifacts(observation):
     """Describe user-visible result assets; never expose IDs, URLs or digests."""
     artifacts = []
+    resource = observation.data.get("resource")
+    if (observation.tool_name == "materials_ml_predict_with_model" and observation.status == "SUCCEEDED"
+            and isinstance(resource, Mapping) and resource.get("status") == "SUCCEEDED"
+            and isinstance(resource.get("result_ref"), Mapping) and resource["result_ref"]):
+        # The checked Prediction contract owns both the persisted result reference
+        # and its CSV download. Project the fact, never the storage identity.
+        artifacts.append({"kind": "prediction", "role": "requested_output",
+            "available_to_user": True, "download_formats": ["csv"]})
     for artifact in observation.artifacts[:16]:
         if not isinstance(artifact, Mapping):
             continue

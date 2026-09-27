@@ -1,3 +1,5 @@
+import asyncio
+from backend.tests.agent_state import post_message, post_operation
 from backend.tests.agent_inspection import stored_run
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
@@ -7,26 +9,27 @@ from sqlalchemy import select, func, text
 from backend.tests.api.test_message_orchestration import client_and_conversation
 from backend.tests.agent_fakes import _Runtime, _MemoryStorage
 from materialsagent.infrastructure.llm.agent_model import MockAgentModel
-from materialsagent.infrastructure.db.agent import AgentRunRow, AgentObservationRow, FinalAnswerRow
+from materialsagent.infrastructure.db.agent import AgentRunRow, AgentObservationRow
+from materialsagent.infrastructure.db.conversation_task import MessageRow
 from materialsagent.domain.ports.agent import AgentConflictError
 from materialsagent.application.tools import build_tool_registry
 
 ARGUMENTS = {"material":"ZTA35G","solution_temperature":{"value":1000,"unit":"°C"},"solution_time":{"value":2,"unit":"h"},"aging_temperature":{"value":730,"unit":"°C"},"aging_time":{"value":2,"unit":"h"},"requested_outputs":["sem_image","mechanical_properties"]}
 def post(client, conversation, key="new", **body):
-    return client.post(f"/api/v1/conversations/{conversation}/messages", json={"mode":"NEW_RUN","content_text":"1000 MPa 转 GPa",**body},headers={"Idempotency-Key":key})
+    return post_message(client, f"/api/v1/conversations/{conversation}/messages", json={"mode":"NEW_RUN","content_text":"1000 MPa 转 GPa",**body},headers={"Idempotency-Key":key})
 
 def test_committed_answer_survives_lost_http_response(api_harness, monkeypatch):
     client, conversation = client_and_conversation(api_harness)
     with client:
         import materialsagent.api.routes.agent_runs as routes
         original = routes.public
-        monkeypatch.setattr(routes,"public",lambda run: (_ for _ in ()).throw(ConnectionError()) if run.final_answer else original(run))
+        monkeypatch.setattr(routes,"public",lambda run: (_ for _ in ()).throw(ConnectionError()) if run.final_message_id else original(run))
         assert post(client,conversation).status_code == 500
         saved = client.app.state.agent_runtime.store.list(conversation,"agent-test")[0]
         assert saved.status == "SUCCEEDED"
         monkeypatch.setattr(routes,"public",original)
         replay = post(client,conversation).json()["data"]
-        assert replay["idempotency_replayed"] and replay["agent_run"]["final_answer"]["answer_id"] == saved.final_answer.answer_id
+        assert replay["idempotency_replayed"] and replay["agent_run"]["final_message_id"] == saved.final_message_id
         assert len(stored_run(client, replay["agent_run"])["calls"]) == len(saved.calls)
 
 def test_cas_competition_and_long_tool_hold_no_transaction(api_harness, monkeypatch):
@@ -72,31 +75,29 @@ def test_stale_run_owner_cannot_commit_tool_result(api_harness):
         with pytest.raises(AgentConflictError):runtime.store.save(one)
         assert runtime.store.get(run.agent_run_id,"agent-test").error_code == "PROCESS_INTERRUPTED"
 
-def test_standard_tool_argument_wait_resumes_with_only_one_delta_extraction(api_harness):
+def test_standard_tool_argument_wait_resumes_in_main_loop_with_full_proposal(api_harness):
     roles=[]
     def respond(role,payload):
         roles.append(role)
-        if role == "tool_arg_resolution":
-            assert payload["user_input"] == "GPa";return {"to_unit":"GPa"}
-        draft=payload.get("draft")
-        if draft:
-            if draft["issues"]:return {"type":"AskUser","reason":"TOOL_ARGUMENT_CLARIFICATION","tool_name":"materials_unit_conversion","fields":["to_unit"],"question":"目标单位？"}
-            return {"type":"CallTool","tool_name":"materials_unit_conversion","arguments":{}}
-        if payload["observations"]:return {"type":"Finish","answer":"1 GPa"}
+        if payload["observations"]: return {"type":"Finish","answer":"1 GPa"}
+        if payload["user_inputs"]:
+            return {"type":"CallTool","tool_name":"materials_unit_conversion","arguments":{"value":1000,"from_unit":"MPa","to_unit":"GPa"}}
+        if payload.get("draft"): return {"type":"AskUser","question":"目标单位？"}
         return {"type":"CallTool","tool_name":"materials_unit_conversion","arguments":{"value":1000,"from_unit":"MPa"}}
     client,conversation=client_and_conversation(api_harness,MockAgentModel(respond))
+    client.app.state.agent_budget = client.app.state.agent_budget.model_copy(update={"max_llm_tokens":64000})
     with client:
-        first = stored_run(client, post(client,conversation).json()["data"]["agent_run"])
-        assert first["status"] == "WAITING_FOR_USER" and first["tool_executions"] == 0 and "tool_arg_resolution" not in roles
-        second = stored_run(client, post(client,conversation,"resume",mode="RESUME_RUN",content_text="GPa",agent_run_id=first["agent_run_id"],waiting_version=first["waiting_version"]).json()["data"]["agent_run"])
-        assert second["status"] == "SUCCEEDED" and second["llm_tokens"] > first["llm_tokens"] and roles.count("tool_arg_resolution") == 1, (second["error_code"], roles, second["llm_tokens"])
+        first=stored_run(client,post(client,conversation).json()["data"]["agent_run"])
+        assert first["status"]=="WAITING_FOR_USER" and first["tool_executions"]==0
+        second=stored_run(client,post(client,conversation,"resume",mode="RESUME_RUN",content_text="GPa",agent_run_id=first["agent_run_id"],waiting_version=first["waiting_version"]).json()["data"]["agent_run"])
+        assert second["status"]=="SUCCEEDED" and second["llm_tokens"]>first["llm_tokens"]
+        assert roles==["agent_decision"]*4
 
 def test_final_answer_failure_leaves_managed_result_and_assets_intact(api_harness):
     api_harness.persist_actor("managed-control");conversation=api_harness.persist_conversation("managed-control")
     tool=_Runtime()
     def respond(role,payload):
-        if role == "final_answer":raise RuntimeError("model unavailable")
-        if payload["observations"]:return {"type":"Finish","needs_synthesis":True}
+        if payload["observations"]:raise RuntimeError("model unavailable")
         return {"type":"CallTool","tool_name":"zta35g_sem_virtual_lab","arguments":ARGUMENTS}
     with api_harness.create_client("managed-control",agent_model=MockAgentModel(respond),tool_registry=build_tool_registry(tool),storage_service=_MemoryStorage()) as client:
         run = stored_run(client, post(client,conversation.conversation_id).json()["data"]["agent_run"])
@@ -117,7 +118,7 @@ def test_regeneration_protocol_error_cannot_enter_executor(api_harness,monkeypat
             return {"type":"CallTool","tool_name":"materials_unit_conversion","arguments":{}}
         runtime.model=MockAgentModel(malicious)
         monkeypatch.setattr(runtime.tools,"execute",lambda *args:pytest.fail("Executor reached"))
-        run = stored_run(client, client.post(f"/api/v1/agent-runs/{first['agent_run_id']}/retry",json={"retry_type":"ANSWER_REGENERATION"},headers={"Idempotency-Key":"restricted"}).json()["data"]["agent_run"])
+        run = stored_run(client, post_operation(client, f"/api/v1/messages/{first['final_message_id']}/regenerate",headers={"Idempotency-Key":"restricted"}).json()["data"]["agent_run"])
         assert run["status"] == "TERMINATED" and run["tool_executions"] == 0 and run["error_code"] == "TOOL_EXECUTION_DISABLED"
 
 
@@ -138,7 +139,7 @@ def test_failed_managed_retry_creates_new_run_invocation_attempt_and_seed(api_ha
     with api_harness.create_client("retry-control",agent_model=MockAgentModel(respond),tool_registry=build_tool_registry(tool),storage_service=_MemoryStorage()) as client:
         first = stored_run(client, post(client,conversation.conversation_id).json()["data"]["agent_run"])
         assert first["status"] == "TERMINATED" and first["executions"][0]["retryable"], (first["observations"],first["pending_execution"])
-        retry=client.post(f"/api/v1/agent-runs/{first['agent_run_id']}/retry",json={"retry_type":"TOOL_RETRY","invocation_run_id":first["executions"][0]["invocation_run_id"]},headers={"Idempotency-Key":"retry"})
+        retry=post_operation(client, f"/api/v1/agent-runs/{first['agent_run_id']}/retry",json={"retry_type":"TOOL_RETRY","invocation_run_id":first["executions"][0]["invocation_run_id"]},headers={"Idempotency-Key":"retry"})
         assert retry.status_code == 200, retry.text
         second = stored_run(client, retry.json()["data"]["agent_run"])
         assert second["status"] == "SUCCEEDED",(second["error_code"],second["pending_execution"],second["observations"])
@@ -174,12 +175,12 @@ def test_invocation_confirmation_api_reauthorizes_and_is_idempotent(api_harness,
 
 
 def test_only_one_input_is_accepted_per_waiting_version(api_harness):
-    model = MockAgentModel(lambda *_: {"type":"AskUser", "reason":"INTENT_CLARIFICATION", "question":"目标？"})
+    model = MockAgentModel(lambda *_: {"type":"AskUser", "question":"目标？"})
     client, conversation = client_and_conversation(api_harness, model)
     with client:
         waiting = stored_run(client, post(client, conversation).json()["data"]["agent_run"])
         store = client.app.state.agent_runtime.store
-        args = {"run_id": waiting["agent_run_id"], "waiting_version": waiting["waiting_version"]}
+        args = {"run_id": waiting["agent_run_id"], "waiting_version": waiting["waiting_version"], "question_message_id": waiting["question_message_id"]}
         accepted, replayed = store.submit(conversation, "agent-test", "one", "first-answer", **args)
         assert not replayed
         with pytest.raises(AgentConflictError):
@@ -188,7 +189,7 @@ def test_only_one_input_is_accepted_per_waiting_version(api_harness):
         assert replayed and replay.version == accepted.version
         from materialsagent.infrastructure.db.conversation_task import MessageRow
         with api_harness.engine.connect() as connection:
-            assert connection.scalar(select(func.count()).select_from(MessageRow)) == 2
+            assert connection.scalar(select(func.count()).select_from(MessageRow).where(MessageRow.role == "USER")) == 2
 
 
 
@@ -199,69 +200,40 @@ def test_managed_proactive_wait_resumes_and_does_not_duplicate_ready_revision(ap
     runtime = _Runtime()
     with api_harness.create_client("managed-resume", agent_model=MockAgentModel(), tool_registry=build_tool_registry(runtime), storage_service=_MemoryStorage()) as client:
         waiting = stored_run(client, post(client, conversation.conversation_id, content_text="预测 ZTA35G 性能").json()["data"]["agent_run"])
-        assert waiting["status"] == "WAITING_FOR_USER" and waiting["steps"][0]["action"]["type"] == "AskUser"
+        assert waiting["status"] == "WAITING_FOR_USER" and waiting["steps"][0]["action_type"] == "AskUser"
         assert waiting["tool_executions"] == 0
         result = stored_run(client, post(client, conversation.conversation_id, "managed-answer", mode="RESUME_RUN", content_text=json.dumps(ARGUMENTS), agent_run_id=waiting["agent_run_id"], waiting_version=waiting["waiting_version"]).json()["data"]["agent_run"])
         assert result["status"] == "SUCCEEDED", (result["error_code"], result["observations"])
         assert result["agent_run_id"] == waiting["agent_run_id"] and result["tool_executions"] == 1
-        assert len([c for c in result["calls"] if c["role"] == "tool_arg_resolution"]) == 1
+        assert all(c["role"] == "agent_decision" for c in result["calls"])
         from materialsagent.infrastructure.db.conversation_task import TaskInputRevisionRow
         with api_harness.engine.connect() as connection:
-            assert connection.scalar(select(func.count()).select_from(TaskInputRevisionRow)) == 2
-
-
-def test_managed_resolver_question_can_restate_known_arguments_and_resume(api_harness):
-    from materialsagent.infrastructure.db.conversation_task import TaskInputRevisionRow
-
-    actor = "managed-known-restatement"
-    api_harness.persist_actor(actor)
-    conversation = api_harness.persist_conversation(actor)
-    known = {key: value for key, value in ARGUMENTS.items() if key not in {"aging_temperature", "aging_time"}}
-    known["requested_outputs"] = ["mechanical_properties"]
-    missing = {"aging_temperature": None, "aging_time": None}
-    delta = {key: ARGUMENTS[key] for key in missing}
-    tool = _Runtime()
-
-    def respond(role, payload):
-        if role == "tool_arg_resolution":
-            assert payload["user_input"] == "时效温度 730℃，时效时间 2 小时"
-            return delta
-        if any(o["kind"] == "TOOL_RESULT" for o in payload["observations"]):
-            return {"type": "Finish", "answer": "预测完成"}
-        if payload["draft"] and payload["draft"]["issues"]:
-            return {"type": "AskUser", "reason": "TOOL_ARGUMENT_CLARIFICATION",
-                "tool_name": "zta35g_sem_virtual_lab", "fields": list(missing),
-                "question": "请提供时效温度和时效时间，已收到固溶 1000℃ / 2 小时。",
-                "known_arguments": known}
-        return {"type": "CallTool", "tool_name": "zta35g_sem_virtual_lab",
-            "arguments": {} if payload["draft"] else {**known, **missing}}
-
-    # This test exercises four decisions and one incremental extraction; token limits
-    # have separate boundary tests, so allow the offline byte-based estimator room.
-    settings = api_harness.settings.model_copy(update={"agent_max_llm_tokens": 64000})
-    with api_harness.create_client(actor, settings=settings, agent_model=MockAgentModel(respond),
-            tool_registry=build_tool_registry(tool), storage_service=_MemoryStorage()) as client:
-        goal = "对 ZTA35G 进行虚拟实验：固溶温度 1000℃，固溶时间 2 小时。预测力学性能。"
-        waiting = stored_run(client, post(client, conversation.conversation_id, content_text=goal).json()["data"]["agent_run"])
-        assert waiting["status"] == "WAITING_FOR_USER", waiting["error_code"]
-        assert [s["action"]["type"] for s in waiting["steps"]] == ["CallTool", "AskUser"]
-        assert waiting["draft"]["issues"] == {key: "Missing" for key in missing}
-        assert waiting["tool_executions"] == tool.calls == 0
-        assert [c["role"] for c in waiting["calls"]] == ["agent_decision"] * 2
-        with api_harness.engine.connect() as connection:
             assert connection.scalar(select(func.count()).select_from(TaskInputRevisionRow)) == 1
-        assert client.get(f"/api/v1/agent-runs/{waiting['agent_run_id']}").json()["data"]["waiting"]["question"] == waiting["waiting"]["question"]
 
-        resumed = stored_run(client, post(client, conversation.conversation_id, "supply-aging", mode="RESUME_RUN",
-            content_text="时效温度 730℃，时效时间 2 小时", agent_run_id=waiting["agent_run_id"],
-            waiting_version=waiting["waiting_version"]).json()["data"]["agent_run"])
-        assert resumed["status"] == "SUCCEEDED", resumed["error_code"]
-        assert resumed["agent_run_id"] == waiting["agent_run_id"]
-        assert resumed["tool_executions"] == tool.calls == 1
-        assert sum(c["role"] == "tool_arg_resolution" for c in resumed["calls"]) == 1
-        assert resumed["executions"][0]["arguments"] == {**known, **delta}
+
+def test_managed_question_reuses_main_loop_and_requires_complete_arguments(api_harness):
+    from materialsagent.infrastructure.db.conversation_task import TaskInputRevisionRow
+    actor="managed-known-restatement"
+    api_harness.persist_actor(actor);conversation=api_harness.persist_conversation(actor)
+    known={key:value for key,value in ARGUMENTS.items() if key not in {"aging_temperature","aging_time"}}
+    tool=_Runtime()
+    def respond(role,payload):
+        assert role=="agent_decision"
+        if payload["observations"]:return {"type":"Finish","answer":"预测完成"}
+        if payload["user_inputs"]:return {"type":"CallTool","tool_name":"zta35g_sem_virtual_lab","arguments":ARGUMENTS}
+        if payload["draft"]:return {"type":"AskUser","question":"请提供时效温度和时效时间，已收到固溶 1000℃ / 2 小时。"}
+        return {"type":"CallTool","tool_name":"zta35g_sem_virtual_lab","arguments":known}
+    with api_harness.create_client(actor,settings=api_harness.settings.model_copy(update={"agent_max_llm_tokens":64000}),agent_model=MockAgentModel(respond),tool_registry=build_tool_registry(tool),storage_service=_MemoryStorage()) as client:
+        waiting=stored_run(client,post(client,conversation.conversation_id,content_text="固溶 1000℃ 2 小时").json()["data"]["agent_run"])
+        assert waiting["status"]=="WAITING_FOR_USER" and tool.calls==0
+        assert [s["action_type"] for s in waiting["steps"]]==["CallTool","AskUser"]
         with api_harness.engine.connect() as connection:
-            assert connection.scalar(select(func.count()).select_from(TaskInputRevisionRow)) == 2
+            assert connection.scalar(select(func.count()).select_from(TaskInputRevisionRow))==0
+        resumed=stored_run(client,post(client,conversation.conversation_id,"supply-aging",mode="RESUME_RUN",content_text="时效温度 730℃，时效时间 2 小时",agent_run_id=waiting["agent_run_id"],waiting_version=waiting["waiting_version"]).json()["data"]["agent_run"])
+        assert resumed["status"]=="SUCCEEDED" and resumed["agent_run_id"]==waiting["agent_run_id"]
+        assert resumed["tool_executions"]==tool.calls==1
+        with api_harness.engine.connect() as connection:
+            assert connection.scalar(select(func.count()).select_from(TaskInputRevisionRow))==1
 
 
 def test_restart_repairs_committed_result_without_redispatch_or_model(api_harness, monkeypatch):
@@ -278,7 +250,7 @@ def test_restart_repairs_committed_result_without_redispatch_or_model(api_harnes
         monkeypatch.setattr(gateway, "execute", process_exit)
         run, _ = runtime.store.submit(conversation, "agent-test", "1000 MPa 转 GPa", "interrupted")
         with pytest.raises(SystemExit):
-            runtime.advance(run.agent_run_id, "agent-test")
+            asyncio.run(runtime.advance(run.agent_run_id, "agent-test"))
         assert runtime.store.get(run.agent_run_id, "agent-test").status == "RUNNING"
         runtime.store.recover_interrupted("replacement", repair=gateway.repair)
         recovered = runtime.store.get(run.agent_run_id, "agent-test")
@@ -287,44 +259,41 @@ def test_restart_repairs_committed_result_without_redispatch_or_model(api_harnes
         assert recovered.executions[0].status == "SUCCEEDED" and calls == [1]
         runtime.store.recover_interrupted("replacement", repair=gateway.repair)
         assert len(runtime.store.get(run.agent_run_id, "agent-test").observations) == 1
-        response = client.post(f"/api/v1/agent-runs/{run.agent_run_id}/retry", json={"retry_type":"ANSWER_REGENERATION"}, headers={"Idempotency-Key":"answer-after-restart"})
-        assert response.json()["data"]["agent_run"]["status"] == "SUCCEEDED" and calls == [1]
+        response = post_operation(client, f"/api/v1/agent-runs/{run.agent_run_id}/retry", json={"retry_type":"ANSWER_REGENERATION"}, headers={"Idempotency-Key":"answer-after-restart"})
+        assert response.status_code == 422 and calls == [1]
 
 
 def test_invalid_managed_parameter_pauses_and_resumes_from_resolver_facts(api_harness):
-    api_harness.persist_actor("invalid-managed")
-    conversation = api_harness.persist_conversation("invalid-managed")
-    bad = {**ARGUMENTS, "solution_temperature":{"value":1200,"unit":"°C"}}
-    def respond(role, payload):
-        if role == "tool_arg_resolution": return {"solution_temperature":{"value":1000,"unit":"°C"}}
-        draft = payload.get("draft")
-        if draft and draft["issues"]:
-            return {"type":"AskUser", "reason":"TOOL_ARGUMENT_CLARIFICATION", "tool_name":"zta35g_sem_virtual_lab", "fields":["solution_temperature"], "question":"请修正温度"}
-        if any(o["kind"] == "TOOL_RESULT" for o in payload["observations"]): return {"type":"Finish", "answer":"完成"}
-        return {"type":"CallTool", "tool_name":"zta35g_sem_virtual_lab", "arguments":{} if draft else bad}
-    with api_harness.create_client("invalid-managed", settings=api_harness.settings.model_copy(update={"agent_max_llm_tokens":64000}), agent_model=MockAgentModel(respond), tool_registry=build_tool_registry(_Runtime()), storage_service=_MemoryStorage()) as client:
-        waiting = stored_run(client, post(client, conversation.conversation_id).json()["data"]["agent_run"])
-        assert waiting["status"] == "WAITING_FOR_USER", waiting["error_code"]
-        assert waiting["draft"]["issues"] == {"solution_temperature":"Invalid"}
-        resumed = stored_run(client, post(client, conversation.conversation_id, "fixed", mode="RESUME_RUN", content_text="1000 摄氏度", agent_run_id=waiting["agent_run_id"], waiting_version=waiting["waiting_version"]).json()["data"]["agent_run"])
-        assert resumed["status"] == "SUCCEEDED", resumed["error_code"]
+    actor="invalid-managed";api_harness.persist_actor(actor);conversation=api_harness.persist_conversation(actor)
+    bad={**ARGUMENTS,"solution_temperature":{"value":1200,"unit":"°C"}}
+    def respond(role,payload):
+        if payload["observations"]:return {"type":"Finish","answer":"完成"}
+        if payload["user_inputs"]:return {"type":"CallTool","tool_name":"zta35g_sem_virtual_lab","arguments":ARGUMENTS}
+        if payload["draft"]:return {"type":"AskUser","question":"请修正温度"}
+        return {"type":"CallTool","tool_name":"zta35g_sem_virtual_lab","arguments":bad}
+    with api_harness.create_client(actor,settings=api_harness.settings.model_copy(update={"agent_max_llm_tokens":64000}),agent_model=MockAgentModel(respond),tool_registry=build_tool_registry(_Runtime()),storage_service=_MemoryStorage()) as client:
+        waiting=stored_run(client,post(client,conversation.conversation_id).json()["data"]["agent_run"])
+        assert waiting["status"]=="WAITING_FOR_USER" and waiting["draft"]["issues"]=={"solution_temperature":"Invalid"}
+        resumed=stored_run(client,post(client,conversation.conversation_id,"fixed",mode="RESUME_RUN",content_text="1000 摄氏度",agent_run_id=waiting["agent_run_id"],waiting_version=waiting["waiting_version"]).json()["data"]["agent_run"])
+        assert resumed["status"]=="SUCCEEDED"
 
 
 def test_final_answer_transaction_failure_does_not_publish_success_or_message(api_harness):
     from sqlalchemy import event
     from materialsagent.infrastructure.db.conversation_task import MessageRow
     client, conversation = client_and_conversation(api_harness)
-    def fail(*args): raise ValueError("simulated final answer write failure")
+    def fail(mapper, connection, target):
+        if target.phase == "answer": raise ValueError("simulated final answer write failure")
     with client:
-        event.listen(FinalAnswerRow, "before_insert", fail)
+        event.listen(MessageRow, "before_insert", fail)
         try:
             run = stored_run(client, post(client, conversation).json()["data"]["agent_run"])
         finally:
-            event.remove(FinalAnswerRow, "before_insert", fail)
+            event.remove(MessageRow, "before_insert", fail)
         assert run["status"] == "TERMINATED" and run["final_answer"] is None
         assert run["observations"][0]["status"] == "SUCCEEDED"
         with api_harness.engine.connect() as connection:
-            assert connection.scalar(select(func.count()).select_from(FinalAnswerRow)) == 0
+            assert connection.scalar(select(func.count()).select_from(MessageRow).where(MessageRow.phase == "answer")) == 0
             assert connection.scalar(select(func.count()).select_from(MessageRow).where(MessageRow.role == "ASSISTANT")) == 0
 
 
@@ -341,7 +310,7 @@ def test_restart_between_managed_result_and_invocation_repairs_both(api_harness,
             raise SystemExit("after committed managed result")
         monkeypatch.setattr(runtime.tools.workflow, "execute", process_exit)
         run, _ = runtime.store.submit(conversation.conversation_id, "managed-gap", "ZTA35G", "gap")
-        with pytest.raises(SystemExit): runtime.advance(run.agent_run_id, "managed-gap")
+        with pytest.raises(SystemExit): asyncio.run(runtime.advance(run.agent_run_id, "managed-gap"))
         before = dict(storage.objects)
         with api_harness.engine.connect() as connection:
             assert connection.scalar(select(InvocationRunRow.status)) == "RUNNING"

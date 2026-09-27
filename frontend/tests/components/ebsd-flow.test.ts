@@ -23,7 +23,8 @@ beforeEach(() => {
       if (failUpload) throw new TypeError("network");
       return response({ attachment: { attachment_id: "asset_image", kind: "ebsd_image", name: "ebsd.png" } });
     }
-    if (url.endsWith("/messages")) { messages.push(JSON.parse(String(init?.body))); throw new TypeError("network"); }
+    if (url.endsWith("/messages") && init?.method === "POST") { messages.push(JSON.parse(String(init?.body))); throw new TypeError("network"); }
+    if (url.endsWith("/messages")) return response({items: [], next_cursor: null});
     if (url.includes("/assets/")) return response({ asset_id: "asset_image", status: "AVAILABLE", width: 200, height: 200, media_type: "image/png", role: "supporting" });
     if (url.includes("/agent-runs")) return response({ items: [], next_cursor: null });
     return response({ items: [conversation], next_cursor: null });
@@ -41,7 +42,7 @@ it("submits an uploaded EBSD reference and preserves it across uncertain reload"
   const wrapper = await show(); await selectImage(wrapper);
   await wrapper.get("textarea").setValue("预测屈服强度");
   await wrapper.get("form").trigger("submit"); await flushPromises();
-  expect(messages[0]).toMatchObject({ mode: "NEW_RUN", attachments: [{ attachment_id: "asset_image", kind: "ebsd_image", name: "ebsd.png" }], content_text: "预测屈服强度" });
+  expect(messages[0]).toMatchObject({ attachments: [{ attachment_id: "asset_image", kind: "ebsd_image", name: "ebsd.png" }], content_text: "预测屈服强度" });
   wrapper.unmount(); wrappers.pop();
   const reloaded = await show();
   expect(reloaded.text()).toContain("检查原提交");
@@ -91,9 +92,9 @@ it("renders a single generic performance metric without SEM process fields", () 
 
 
 it("keeps an uncertain resume asset on reload without copying it into a new target draft", async () => {
-  sessionStorage.setItem("materials-agent.pending-run.v2", JSON.stringify({
+  sessionStorage.setItem("materials-agent.pending-run.v3", JSON.stringify({
     path: "/conversations/conv/messages", conversationId: "conv", key: "original-resume",
-    body: {mode: "RESUME_RUN", content_text: "补图", agent_run_id: "waiting", waiting_version: 2, attachments: [{ attachment_id: "asset_image", kind: "ebsd_image", name: "ebsd.png" }]},
+    body: {content_text: "补图", reply_to: {question_message_id: "question", waiting_version: 2}, attachments: [{ attachment_id: "asset_image", kind: "ebsd_image", name: "ebsd.png" }]},
   }));
   const wrapper = await show();
   expect((wrapper.get("textarea").element as HTMLTextAreaElement).value).toBe("补图");
@@ -102,9 +103,9 @@ it("keeps an uncertain resume asset on reload without copying it into a new targ
 });
 
 it("does not show another conversation's uncertain text or image", async () => {
-  sessionStorage.setItem("materials-agent.pending-run.v2", JSON.stringify({
+  sessionStorage.setItem("materials-agent.pending-run.v3", JSON.stringify({
     path: "/conversations/other/messages", conversationId: "other", key: "original-other",
-    body: {mode: "NEW_RUN", content_text: "other draft", attachments: [{ attachment_id: "asset_other", kind: "ebsd_image", name: "other.png" }]},
+    body: {content_text: "other draft", attachments: [{ attachment_id: "asset_other", kind: "ebsd_image", name: "other.png" }]},
   }));
   const wrapper = await show();
   expect((wrapper.get("textarea").element as HTMLTextAreaElement).value).toBe("");

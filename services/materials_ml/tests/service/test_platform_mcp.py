@@ -95,6 +95,15 @@ def conversation(http, key):
     return response.json()["data"]["conversation_id"]
 
 
+def post_message(http, path, *, json, headers=None):
+    accepted=http.post(path,json=json,headers=headers)
+    if accepted.status_code != 202:return accepted
+    data=accepted.json()["data"]
+    advanced=http.post(f"/api/v1/agent-runs/{data['agent_run']['agent_run_id']}/advance",json={"submission_id":data["submission_id"]})
+    if advanced.status_code != 200:return advanced
+    return httpx.Response(200,json={"data":{**data,"agent_run":advanced.json()["data"]}})
+
+
 def diagnostic_run(http, view):
     return http.get("/acceptance/runs/" + view["agent_run_id"]).json()["data"]
 
@@ -112,16 +121,16 @@ def invoke(http, scope, tool, arguments, key):
         ref = response.json()["data"]
         bound[fields[field][1]] = {"resource_type": fields[field][0],
             **({"dataset_ordinal": ref["dataset_ordinal"]} if ref.get("dataset_ordinal") is not None else {})}
-    response = http.post(f"/api/v1/conversations/{scope}/messages", headers={"Idempotency-Key": key},
-        json={"mode": "NEW_RUN", "content_text": json.dumps({"acceptance_tool": "materials_ml_" + tool,
+    response = post_message(http, f"/api/v1/conversations/{scope}/messages", headers={"Idempotency-Key": key},
+        json={"content_text": json.dumps({"acceptance_tool": "materials_ml_" + tool,
             "arguments": {k: v for k, v in arguments.items() if k not in fields}, "reference_selectors": bound})})
     assert response.status_code == 200, response.text
     return diagnostic_run(http, response.json()["data"]["agent_run"])
 
 
 def supplement(http, scope, run, text, key):
-    response = http.post(f"/api/v1/conversations/{scope}/messages", headers={"Idempotency-Key": key}, json={
-        "mode": "RESUME_RUN", "agent_run_id": run["agent_run_id"], "waiting_version": run["waiting_version"],
+    response = post_message(http, f"/api/v1/conversations/{scope}/messages", headers={"Idempotency-Key": key}, json={
+        "reply_to": {"question_message_id": run["question_message_id"], "waiting_version": run["waiting_version"]},
         "content_text": text})
     assert response.status_code == 200, response.text
     return diagnostic_run(http, response.json()["data"]["agent_run"])
@@ -165,22 +174,20 @@ def test_platform_real_agent_invocation_mcp_worker_prediction(platform, csv_payl
         assert waiting["pending_execution"]["unit_annotations"][0]["provenance"] == "confirmed"
         assert not {"units", "semantic_annotations"} & waiting["pending_execution"]["arguments"].keys()
         assert resource.get(root + "/training-runs").json()["items"] == []
-        # Populate every pool slot, then invalidate the sessions while the user
-        # reviews confirmation. Confirmation must renew preflight, not fail or
-        # resubmit a tools/call. Both LR and RF still create exactly one run.
-        result(invoke(http, scope, "analyze_tabular_dataset", {"dataset_id": dataset["id"]}, "warm-pool"))
+        # Invalidate preflight sessions while this conversation awaits confirmation.
+        # The existing analysis and training preflight already exercised the pool.
         ml.stop(); ml.start()
         submitted = confirm(http, waiting)
         run = result(submitted)
         training_observation = next(o for o in submitted["observations"] if o["kind"] == "TOOL_RESULT")
         assert training_observation["unit_annotations"][0]["provenance"] == "confirmed"
-        assert "用户确认" in submitted["final_answer"]["text"]
+        assert "用户确认" in submitted["answer_message"]["text"]
         assert run["status"] == "PENDING"
         assert result(confirm(http, waiting))["id"] == run["id"]
         assert len(resource.get(root + "/training-runs").json()["items"]) == 1
         worker = worker_process(ml)
         try:
-            assert worker.wait(timeout=45) == 0, "Worker failed"
+            assert worker.wait(timeout=45) == 0, worker.stderr.read().decode(errors="replace")
         finally:
             if worker.poll() is None:
                 worker.kill(); worker.wait(timeout=5)
@@ -202,7 +209,7 @@ def test_platform_real_agent_invocation_mcp_worker_prediction(platform, csv_payl
         assert prediction["status"] == "SUCCEEDED"
         prediction_observation = next(o for o in predicted["observations"] if o["kind"] == "TOOL_RESULT")
         assert prediction_observation["unit_annotations"][0]["provenance"] == "confirmed"
-        assert "用户确认" in predicted["final_answer"]["text"]
+        assert "用户确认" in predicted["answer_message"]["text"]
         values = resource.get(root + f"/predictions/{prediction['id']}/content").json()
         for member in ("manifest.json", "pipeline.joblib", "evaluation.json", "splits.json"):
             (tmp_path / member).write_bytes(resource.get(root + f"/models/{trained['model_id']}/files/{member}").content)
@@ -254,7 +261,7 @@ def test_real_local_commit_uncertainty_never_overwrites_success_or_resubmits(pla
             assert result(completed)["id"] == runs[0]["id"]
             assert result(confirm(http, waiting))["id"] == runs[0]["id"]
         else:
-            assert completed["status"] == "TERMINATED" and completed["final_answer"] is None
+            assert completed["status"] == "TERMINATED" and completed["answer_message"] is None
             observation = next(o for o in completed["observations"] if o["kind"] == "TOOL_RESULT")
             assert observation["error"]["code"] == "MCP_OUTCOME_UNKNOWN"
             prefix = f"/api/v1/agent-runs/{waiting['agent_run_id']}/invocations/{observation['invocation_run_id']}"
@@ -312,7 +319,7 @@ def test_unknown_training_safe_observation_historical_receipt_and_no_reexecution
             backend.settings["enable_materials_ml_resource_context"] = False
             backend.start()
             stopped = diagnostic_run(http, http.get(f"/api/v1/agent-runs/{waiting['agent_run_id']}").json()["data"])
-        assert stopped["status"] == "TERMINATED" and stopped["final_answer"] is None
+        assert stopped["status"] == "TERMINATED" and stopped["answer_message"] is None
         assert len(stopped["calls"]) == len(waiting["calls"]), "Model continued after unknown"
         observation = next(o for o in stopped["observations"] if o["kind"] == "TOOL_RESULT")
         assert observation["error"]["code"] == "MCP_OUTCOME_UNKNOWN"
@@ -337,7 +344,7 @@ def test_unknown_training_safe_observation_historical_receipt_and_no_reexecution
         assert len(resource.get(root + "/training-runs").json()["items"]) == 1
         worker = worker_process(ml)
         try:
-            assert worker.wait(timeout=45) == 0
+            assert worker.wait(timeout=45) == 0, worker.stderr.read().decode(errors="replace")
         finally:
             if worker.poll() is None:
                 worker.kill(); worker.wait(timeout=5)
@@ -370,7 +377,7 @@ def test_platform_prediction_interruption_stops_tree_and_blocks_agent(platform, 
             {"dataset_id": dataset["id"], "features": ["x", "z"], "target": "strength_MPa"}, "train")))
         worker = worker_process(ml)
         try:
-            assert worker.wait(timeout=45) == 0
+            assert worker.wait(timeout=45) == 0, worker.stderr.read().decode(errors="replace")
         finally:
             if worker.poll() is None:
                 worker.kill(); worker.wait(timeout=5)
@@ -406,7 +413,7 @@ def test_platform_prediction_interruption_stops_tree_and_blocks_agent(platform, 
                 stopped = pending.result(timeout=15)
             for handle in handles:
                 assert_exited(handle)
-        assert stopped["status"] == "TERMINATED" and stopped["final_answer"] is None
+        assert stopped["status"] == "TERMINATED" and stopped["answer_message"] is None
         assert len(stopped["calls"]) == len(waiting["calls"])
         observation = next(o for o in stopped["observations"] if o["kind"] == "TOOL_RESULT")
         assert observation["error"]["code"] == "MCP_OUTCOME_UNKNOWN"

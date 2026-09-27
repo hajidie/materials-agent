@@ -233,7 +233,8 @@ class SQLAlchemyUnitOfWork:
                 from materialsagent.infrastructure.db.agent import AgentRunRow
                 from materialsagent.domain.ports.agent import AgentConflictError
                 row = session.scalar(select(AgentRunRow).where(AgentRunRow.agent_run_id == owner[0]).with_for_update())
-                if row is None or row.version != owner[1] or row.status != "RUNNING" or row.document.get("claim") != owner[2]:
+                active = row is not None and row.version == owner[1] and row.status == "RUNNING" and row.document.get("claim") == owner[2]
+                if not active and not self._stopped_receipt_allowed(session, row, owner):
                     session.rollback()
                     raise AgentConflictError("Execution owner is stale.")
             self._validate_routing_states(session)
@@ -261,6 +262,31 @@ class SQLAlchemyUnitOfWork:
             raise DatabaseUnavailableError("Database unavailable.") from None
         except SQLAlchemyError:
             raise PersistenceError("Persistence operation failed.") from None
+
+    @staticmethod
+    def _stopped_receipt_allowed(session, row, owner):
+        """A stopped Agent cannot dispatch; its frozen Invocation may finish publication."""
+        if (row is None or row.status != "TERMINATED" or row.document.get("error_code") != "USER_STOPPED"
+                or row.document.get("claim") != owner[2] or len(owner) < 4 or not owner[3]):
+            return False
+        pending = row.document.get("pending_execution") or {}
+        if not pending.get("dispatched") or pending.get("invocation_run_id") != owner[3]:
+            return False
+        from .tool_invocation import InvocationRunRow, InvocationResultRow
+        from .tool_run import ToolRunRow
+        from .tool_result import ToolResultRow, ResultAssetLinkRow
+        from .asset import AssetRow
+        permitted = (InvocationRunRow, InvocationResultRow, ToolRunRow, ToolResultRow, ResultAssetLinkRow, AssetRow, TaskRow)
+        for changed in set(session.new) | set(session.dirty):
+            if not isinstance(changed, permitted):
+                return False
+            if isinstance(changed, InvocationRunRow):
+                if changed in session.new or changed.invocation_run_id != owner[3] or changed.status not in ("SUCCEEDED", "FAILED", "OUTCOME_UNKNOWN"):
+                    return False
+            if isinstance(changed, (ToolRunRow, TaskRow)):
+                if changed in session.new or changed.current_status not in ("SUCCEEDED", "PARTIALLY_SUCCEEDED", "FAILED"):
+                    return False
+        return True
 
     @staticmethod
     def _validate_routing_states(session: Session) -> None:

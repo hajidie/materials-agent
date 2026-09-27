@@ -8,7 +8,7 @@ import pytest
 from materials_ml import load_package, predict
 from test_platform_resource_context import context_platform
 from test_platform_resources import resources_platform
-from test_platform_mcp import platform, conversation, confirm, diagnostic_run
+from test_platform_mcp import platform, conversation, confirm, diagnostic_run, post_message
 from test_end_to_end import worker_process
 
 
@@ -23,7 +23,7 @@ def test_chat_attachment_view_and_immutable_completion(context_platform, csv_pay
             assert response.status_code == 200, response.text
             return response.json()["data"]["attachment"]
         def send(text, attachment, key):
-            response = http.post(root + "/messages", json={"mode": "NEW_RUN", "content_text": text, "attachments": [attachment]},
+            response = post_message(http, root + "/messages", json={ "content_text": text, "attachments": [attachment]},
                 headers={"Idempotency-Key": key})
             assert response.status_code == 200, response.text
             return diagnostic_run(http, response.json()["data"]["agent_run"])
@@ -53,7 +53,7 @@ def test_chat_attachment_view_and_immutable_completion(context_platform, csv_pay
             if worker.poll() is None:
                 worker.kill(); worker.wait(timeout=10)
         training = original["result_attachments"][0]
-        answer_message = original["final_answer"]["answer_id"]
+        answer_message = original["final_message_id"]
         before = state()
         assert http.get(root + f"/messages/{answer_message}/artifacts/{training['attachment_id']}").status_code == 200
         assert state() == before  # Viewing never discovers the model or selects inputs.
@@ -71,7 +71,7 @@ def test_chat_attachment_view_and_immutable_completion(context_platform, csv_pay
         prediction = confirm(http, send("用刚才训练好的模型对第二个数据集执行预测。", attachment, "predict"))
         public = http.get(f"/api/v1/agent-runs/{prediction['agent_run_id']}").json()["data"]
         output = next(a for a in public["result_attachments"] if a["kind"] == "prediction")
-        viewer = root + f"/messages/{public['final_answer']['answer_id']}/artifacts/{output['attachment_id']}"
+        viewer = root + f"/messages/{public['final_message_id']}/artifacts/{output['attachment_id']}"
         details = http.get(viewer).json()["data"]
         response = http.get(details["downloads"][0]["url"])
         assert response.status_code == 200 and "text/csv" in response.headers["content-type"]

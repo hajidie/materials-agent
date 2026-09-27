@@ -27,11 +27,9 @@ LLM_CONFIG_FILE: Final = (
 )
 ROLE_NAMES: Final = (
     "agent_decision",
-    "tool_arg_resolution",
-    "final_answer",
 )
 STRUCTURED_ROLES: Final = frozenset(
-    {"agent_decision", "tool_arg_resolution"}
+    {"agent_decision"}
 )
 PROVIDER_ENDPOINTS: Final = {
     "deepseek": "https://api.deepseek.com",
@@ -251,8 +249,6 @@ class RoleDefinition(_StrictModel):
 
 class RolesDefinition(_StrictModel):
     agent_decision: RoleDefinition
-    tool_arg_resolution: RoleDefinition
-    final_answer: RoleDefinition
 
 
 class LLMDocument(_StrictModel):

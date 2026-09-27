@@ -1,4 +1,5 @@
 from __future__ import annotations
+from backend.tests.agent_state import post_message
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -418,7 +419,7 @@ def test_message_submission_rejects_invalid_m3_inputs_without_writes(
     original_updated_at = conversation.updated_at
 
     with api_harness.create_client(actor_id) as client:
-        response = client.post(
+        response = post_message(client,
             f"/api/v1/conversations/{conversation.conversation_id}/messages",
             headers=_message_headers(),
             json=payload,
@@ -444,12 +445,12 @@ def test_foreign_and_missing_conversation_have_indistinguishable_safe_404(
     payload = {"mode": "NEW_RUN", "content_text": "valid"}
 
     with api_harness.create_client(actor_id) as client:
-        foreign_response = client.post(
+        foreign_response = post_message(client,
             f"/api/v1/conversations/{foreign.conversation_id}/messages",
             headers=_message_headers(),
             json=payload,
         )
-        missing_response = client.post(
+        missing_response = post_message(client,
             "/api/v1/conversations/conv_missing/messages",
             headers=_message_headers(),
             json=payload,
@@ -457,7 +458,7 @@ def test_foreign_and_missing_conversation_have_indistinguishable_safe_404(
 
     for response in (foreign_response, missing_response):
         assert response.status_code == 404
-        assert response.json()["error"]["code"] == "CONVERSATION_NOT_FOUND"
+        assert response.json()["error"]["code"] == "RESOURCE_NOT_FOUND"
         assert response.json()["error"]["details"] == []
     assert foreign_response.json()["error"] == missing_response.json()["error"]
     assert api_harness.counts()["message"] == 0

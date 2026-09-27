@@ -25,11 +25,11 @@ def remaining_timeout(default: float) -> float:
     return min(default, remaining)
 
 
-_execution_owner: ContextVar[tuple[str, int, str] | None] = ContextVar("agent_execution_owner", default=None)
+_execution_owner: ContextVar[tuple | None] = ContextVar("agent_execution_owner", default=None)
 
 @contextmanager
-def execution_owner(run_id: str, version: int, claim: str):
-    token = _execution_owner.set((run_id, version, claim))
+def execution_owner(run_id: str, version: int, claim: str, invocation_id: str | None = None):
+    token = _execution_owner.set((run_id, version, claim, invocation_id))
     try:
         yield
     finally:

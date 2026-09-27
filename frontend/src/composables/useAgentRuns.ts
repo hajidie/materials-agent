@@ -1,6 +1,6 @@
 import { computed, onUnmounted, ref, watch } from "vue";
 import { createMaterialsAgentApi } from "../api/client";
-import { agentRequest, AgentRequestError, type AgentRun } from "../api/agent";
+import { agentRequest, AgentRequestError, type AgentRun, type ChatMessage, type AcceptedSubmission } from "../api/agent";
 import type { Attachment } from "../api/artifacts";
 import type { ConversationListItem } from "../api/types";
 
@@ -10,18 +10,26 @@ interface PendingOperation {
   key: string;
   conversationId: string | null;
   createKey?: string;
+  accepted?: { runId: string; submissionId: string };
+  stopRequested?: boolean;
 }
-const PENDING_KEY = "materials-agent.pending-run.v2";
+const PENDING_KEY = "materials-agent.pending-run.v3";
 const SELECTED_KEY = "materials-agent.selected-conversation.v1";
 
 export function useAgentRuns() {
   // Incompatible drafts must never replay the former message contract.
   sessionStorage.removeItem("materials-agent.pending-run.v1");
+  sessionStorage.removeItem("materials-agent.pending-run.v2");
+  sessionStorage.removeItem("materials-agent.attachments-drafts.v2");
   sessionStorage.removeItem("materials-agent.ebsd-drafts.v1");
   const conversationsApi = createMaterialsAgentApi();
   const conversations = ref<ConversationListItem[]>([]);
   const selectedId = ref<string | null>(sessionStorage.getItem(SELECTED_KEY));
   const runs = ref<AgentRun[]>([]);
+  const messages = ref<ChatMessage[]>([]);
+  const stopping = ref(false);
+  let advanceController: AbortController | null = null;
+  let stopPromise: Promise<void> | null = null;
   const loading = ref(false);
   const sending = ref(false);
   const completed = ref(0);
@@ -39,7 +47,7 @@ export function useAgentRuns() {
     if (raw) {
       const value = JSON.parse(raw);
       if (typeof value.key === "string" && typeof value.path === "string" && value.body &&
-          /^\/(conversations\/[^/]+\/messages|agent-runs\/[^/]+\/(retry|invocations\/[^/]+\/(confirm|reject)))$/.test(value.path)) {
+          /^\/(conversations\/[^/]+\/messages|messages\/[^/]+\/regenerate|agent-runs\/[^/]+\/(retry|invocations\/[^/]+\/(confirm|reject)))$/.test(value.path)) {
         pending.value = value;
       }
     }
@@ -48,7 +56,7 @@ export function useAgentRuns() {
   const canRetryUpload = ref(false);
   const uploadError = ref<string | null>(null);
   const draftKey = computed(() => `${selectedId.value ?? 'new'}:${resumeTarget.value?.agent_run_id ?? 'new'}`);
-  const DRAFT_KEY = "materials-agent.attachments-drafts.v2";
+  const DRAFT_KEY = "materials-agent.attachments-drafts.v3";
   const drafts = ref<Record<string, { text: string; attachment?: Attachment }>>({});
   try {
     const stored = JSON.parse(sessionStorage.getItem(DRAFT_KEY) ?? "{}");
@@ -83,7 +91,8 @@ export function useAgentRuns() {
     uploadError.value = canRetryUpload.value ? "上传结果尚未确认，请核查原请求。" : null;
   }
   watch(draftKey, showPendingUpload, { immediate: true });
-  const busy = computed(() => sending.value || pending.value !== null || uploading.value || writeBlocked.value);
+  const generating = computed(() => sending.value || stopping.value || runs.value.some(r => ["PENDING", "RUNNING"].includes(r.status)));
+  const busy = computed(() => generating.value || pending.value !== null || uploading.value || writeBlocked.value);
 
   async function checkUpload() {
     const attempt = uploadAttempts[draftKey.value];
@@ -156,7 +165,8 @@ export function useAgentRuns() {
     const epoch = generation;
     polling = true;
     try {
-      const query = more && nextCursor.value ? `?before=${encodeURIComponent(nextCursor.value)}` : "";
+      const messageBefore = more ? nextCursor.value : null;
+      const query = "";
       const page = await agentRequest<{ items: AgentRun[]; next_cursor: string | null }>(`/conversations/${encodeURIComponent(id)}/agent-runs${query}`);
       if (epoch !== generation || selectedId.value !== id) return;
       const map = new Map(runs.value.map(run => [run.agent_run_id, run]));
@@ -165,8 +175,14 @@ export function useAgentRuns() {
         if (!existing || run.version >= existing.version) map.set(run.agent_run_id, run);
       }
       runs.value = [...map.values()].sort((a, b) => a.created_at.localeCompare(b.created_at) || a.agent_run_id.localeCompare(b.agent_run_id));
-      if (more || !nextCursor.value) nextCursor.value = page.next_cursor;
-      if (resumeTarget.value) resumeTarget.value = runs.value.find(run => run.agent_run_id === resumeTarget.value?.agent_run_id && run.status === "WAITING_FOR_USER") ?? null;
+      resumeTarget.value = runs.value.find(run => run.status === "WAITING_FOR_USER") ?? null;
+      const messageQuery = messageBefore ? `?before=${encodeURIComponent(messageBefore)}` : "";
+      const messagePage = await agentRequest<{ items: ChatMessage[]; next_cursor: number | null }>(`/conversations/${encodeURIComponent(id)}/messages${messageQuery}`);
+      if (epoch !== generation || selectedId.value !== id) return;
+      const groups = new Map(messages.value.map(m => [m.answer_root_message_id ?? m.message_id, m]));
+      for (const message of messagePage.items) groups.set(message.answer_root_message_id ?? message.message_id, message);
+      messages.value = [...groups.values()].sort((a, b) => a.sequence - b.sequence);
+      if (more || nextCursor.value === null) nextCursor.value = messagePage.next_cursor === null ? null : String(messagePage.next_cursor);
     } finally { polling = false; }
   }
 
@@ -175,6 +191,7 @@ export function useAgentRuns() {
     generation++;
     selectedId.value = id;
     runs.value = [];
+    messages.value = [];
     nextCursor.value = null;
     resumeTarget.value = null;
     if (id) sessionStorage.setItem(SELECTED_KEY, id);
@@ -185,41 +202,76 @@ export function useAgentRuns() {
     finally { loading.value = false; }
   }
 
+  async function stop() {
+    if (stopPromise) return stopPromise;
+    const operation = pending.value;
+    const run = runs.value.find(r => ["PENDING", "RUNNING"].includes(r.status));
+    if (!operation && !run) return;
+    if (operation) { operation.stopRequested = true; persistPending(); }
+    stopping.value = true;
+    const target = operation?.accepted ?? (run?.submission_id ? { runId: run.agent_run_id, submissionId: run.submission_id } : null);
+    if (!target) return; // Acceptance is short; sendPending observes the intent before starting advance.
+    stopPromise = (async () => {
+      try {
+        const stopped = await agentRequest<{ agent_run: AgentRun }>(`/agent-runs/${encodeURIComponent(target.runId)}/stop`, { body: { submission_id: target.submissionId } });
+        if (stopped.agent_run.conversation_id === selectedId.value) {
+          runs.value = [...runs.value.filter(r => r.agent_run_id !== stopped.agent_run.agent_run_id), stopped.agent_run];
+        }
+        advanceController?.abort();
+        if (pending.value === operation) { pending.value = null; persistPending(); }
+        sending.value = false;
+        await refresh();
+      } catch {
+        error.value = "暂时无法确认中止结果，请再次点击中止核查。";
+        await refresh().catch(() => undefined);
+      } finally { stopping.value = false; stopPromise = null; }
+    })();
+    return stopPromise;
+  }
+
   async function sendPending() {
     if (!pending.value || sending.value) return;
-    sending.value = true;
-    error.value = null;
+    const operation = pending.value;
+    let controller: AbortController | null = null;
+    sending.value = true; error.value = null;
     try {
-      const operation = pending.value;
-      if (operation.conversationId === null) {
+      if (!operation.conversationId) {
         const created = await conversationsApi.createConversation(undefined, operation.createKey);
         operation.conversationId = created.data.conversation_id;
-        operation.path = `/conversations/${encodeURIComponent(operation.conversationId)}/messages`;
+        operation.path = `/conversations/${operation.conversationId}/messages`;
+        persistPending(); await select(operation.conversationId);
+      }
+      if (!operation.accepted) {
+        const result = await agentRequest<AcceptedSubmission>(operation.path, { body: operation.body, key: operation.key });
+        if (pending.value !== operation) return;
+        if (!("agent_run" in result)) {
+          pending.value = null; persistPending(); await refresh(); return;
+        }
+        operation.accepted = { runId: result.agent_run.agent_run_id, submissionId: result.submission_id };
         persistPending();
-        await select(operation.conversationId);
-        await refreshConversations();
+        if (operation.path.endsWith("/messages")) { saveDraft({ text: "" }); completed.value++; }
       }
-      const result = await agentRequest<{ agent_run?: AgentRun } | AgentRun>(operation.path, { body: operation.body, key: operation.key });
-      const run = "agent_run_id" in result ? result : result.agent_run;
-      if (run && selectedId.value === run.conversation_id) {
-        runs.value = [...runs.value.filter(item => item.agent_run_id !== run.agent_run_id), run].sort((a, b) => a.created_at.localeCompare(b.created_at));
-      }
-      pending.value = null;
-      if (operation.path.endsWith("/messages")) {
-        const context = `${operation.conversationId}:${operation.body.agent_run_id ?? 'new'}`;
-        delete drafts.value[context];
-        sessionStorage.setItem(DRAFT_KEY, JSON.stringify(drafts.value));
-        completed.value++;
-      }
-      persistPending();
-      resumeTarget.value = null;
-      try { await refresh(); await refreshConversations(); }
-      catch { error.value = "提交已保存，列表暂时无法刷新。"; }
+      if (operation.stopRequested) { await stop(); return; }
+      await refresh();
+      controller = new AbortController();
+      advanceController = controller;
+      await agentRequest<AgentRun>(`/agent-runs/${encodeURIComponent(operation.accepted.runId)}/advance`,
+        { body: { submission_id: operation.accepted.submissionId }, signal: controller.signal });
+      if (pending.value === operation) { pending.value = null; persistPending(); }
+      await refresh(); await refreshConversations();
     } catch (cause) {
-      const uncertain = !(cause instanceof AgentRequestError) || cause.uncertain;
-      error.value = uncertain ? "连接中断，执行结果尚不确定。可以检查原提交；这不会创建新的目标。" : "操作未完成，请刷新状态后重试。";
-      if (!uncertain) { pending.value = null; persistPending(); }
-    } finally { sending.value = false; }
+      if (pending.value !== operation) return;
+      stopping.value = false;
+      if (operation.stopRequested) error.value = "尚未确认原提交，请检查原提交后继续中止。";
+      if (!operation.stopRequested) {
+        const uncertain = !(cause instanceof AgentRequestError) || cause.uncertain;
+        error.value = uncertain ? "请求结果尚未确认，请核查原提交。" : "请求未被接受，请检查当前对话后重试。";
+        if (!uncertain && pending.value === operation) { pending.value = null; persistPending(); }
+      }
+    } finally {
+      if (!pending.value || pending.value === operation) sending.value = false;
+      if (advanceController === controller) advanceController = null;
+    }
   }
 
   async function submit(text: string) {
@@ -227,8 +279,8 @@ export function useAgentRuns() {
     const target = resumeTarget.value;
     pending.value = {
       path: `/conversations/${selectedId.value ? encodeURIComponent(selectedId.value) : "new"}/messages`,
-      body: target ? { mode: "RESUME_RUN", content_text: text, agent_run_id: target.agent_run_id, waiting_version: target.waiting_version }
-        : { mode: "NEW_RUN", content_text: text },
+      body: target ? { content_text: text, reply_to: { question_message_id: target.question_message_id, waiting_version: target.waiting_version } }
+        : { content_text: text },
       key: crypto.randomUUID(), conversationId: selectedId.value,
       ...(selectedId.value ? {} : { createKey: crypto.randomUUID() }),
     };
@@ -247,13 +299,18 @@ export function useAgentRuns() {
     await sendPending();
   }
 
-  async function retry(run: AgentRun, invocationId?: string) {
+  async function regenerate(message: ChatMessage) {
+    if (busy.value || message.phase !== "answer") return;
+    pending.value = { path: `/messages/${encodeURIComponent(message.message_id)}/regenerate`, body: {},
+      key: crypto.randomUUID(), conversationId: selectedId.value };
+    persistPending(); await sendPending();
+  }
+
+  async function retry(run: AgentRun, invocationId: string) {
     if (busy.value) return;
-    pending.value = { path: `/agent-runs/${run.agent_run_id}/retry`, body: invocationId
-      ? { retry_type: "TOOL_RETRY", invocation_run_id: invocationId } : { retry_type: "ANSWER_REGENERATION" },
-      key: crypto.randomUUID(), conversationId: run.conversation_id };
-    persistPending();
-    await sendPending();
+    pending.value = { path: `/agent-runs/${encodeURIComponent(run.agent_run_id)}/retry`,
+      body: { retry_type: "TOOL_RETRY", invocation_run_id: invocationId }, key: crypto.randomUUID(), conversationId: run.conversation_id };
+    persistPending(); await sendPending();
   }
 
   async function remove(id: string) {
@@ -293,7 +350,7 @@ export function useAgentRuns() {
     timer = setInterval(() => { void refresh().catch(() => undefined); }, 3000);
   }
   onUnmounted(() => { if (timer) clearInterval(timer); generation++; });
-  return { conversations, selectedId, runs, loading, sending, completed, busy, writeBlocked, error, pending, nextCursor, conversationCursor, ensureConversation, deleted,
+  return { conversations, selectedId, runs, messages, loading, sending, generating, stopping, stop, regenerate, completed, busy, writeBlocked, error, pending, nextCursor, conversationCursor, ensureConversation, deleted,
     uploading, uploadError, canRetryUpload, draft, setDraftText, uploadAttachment, checkUpload, removeAttachment,
     resumeTarget, initialize, select, refresh, refreshConversations, submit, sendPending, confirm, retry, remove };
 }

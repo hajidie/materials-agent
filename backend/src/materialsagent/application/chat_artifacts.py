@@ -24,15 +24,16 @@ def presentation_text(value):
     return "\n".join(lines)
 
 
-def run_artifacts(session, run):
+def run_artifacts(session, run, observation_ids=None):
     """Only already registered execution outputs; no discovery on read/save."""
     from materialsagent.infrastructure.db.ml_resources import references
-    sources = ["invocation:" + r.invocation_run_id for r in run.executions if r.invocation_run_id]
+    observations = [o for o in run.observations if observation_ids is None or o.observation_id in observation_ids]
+    sources = ["invocation:" + o.invocation_run_id for o in observations if o.invocation_run_id]
     refs = session.scalars(select(references.c.document).where(references.c.conversation_id == run.conversation_id,
         references.c.actor_id == run.actor_id, references.c.document["source"].as_string().in_(sources))).all() if sources else []
     result = [{"attachment_id": r["reference_id"], "kind": r["resource_type"],
         "name": {"training_run": "训练结果", "prediction": "预测结果", "model": "模型评估", "dataset": "数据概况"}[r["resource_type"]]} for r in refs]
-    for observation in run.observations:
+    for observation in observations:
         for asset in observation.artifacts:
             value = asset if isinstance(asset, dict) else asset.model_dump(mode="json")
             if value.get("asset_id"):
@@ -171,7 +172,7 @@ class ChatArtifacts:
                     stamp = now()
                     session.add(MessageRow(message_id=identifier(), event_key=key, conversation_id=conversation, actor_id=actor,
                         task_id=None, request_id=identifier(), role="ASSISTANT", generation_source="AGENT",
-                        content_text=presentation_text(presentation), structured_content={"contract": "chat-v1",
+                        content_text=presentation_text(presentation), structured_content={"contract": "chat-v2",
                             "presentation": presentation, "artifacts": artifacts,
                             "source": {"reference_id": ref["reference_id"], "state": value["status"]}},
                         created_at=stamp))

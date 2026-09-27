@@ -1,3 +1,4 @@
+from backend.tests.agent_state import agent_run
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -47,7 +48,7 @@ class Resources:
 
 
 def run(**values):
-    return AgentRun(conversation_id="scope", actor_id="actor", source_message_id="message",
+    return agent_run(conversation_id="scope", actor_id="actor", source_message_id="message",
                     goal="分析我上传的数据", **values)
 
 
@@ -169,16 +170,16 @@ def test_provider_window_reduction_only_removes_public_resources():
     assert original["complete"] and len(original["resources"]) == 20
 
 
-def test_argument_prompt_contains_resource_ref_protocol_not_events():
+def test_decision_prompt_contains_resource_ref_protocol_not_events():
     from backend.tests.unit.test_llm_provider_factory import _role
     from materialsagent.infrastructure.llm.agent_model import AgentModelAdapter
-    adapter = AgentModelAdapter({"tool_arg_resolution": _role("deepseek", "tool_arg_resolution", prompt_limit_tokens=8192)})
-    request = adapter.prepare("tool_arg_resolution", {"user_input": "先上传的那份", "resource_context": {
+    adapter = AgentModelAdapter({"agent_decision": _role("deepseek", "agent_decision", prompt_limit_tokens=8192)})
+    request = adapter.prepare("agent_decision", {"user_input": "先上传的那份", "resource_context": {
         "resources": [{"resource_ref": "r1", "resource_type": "dataset", "name": "训练集", "source": "uploaded"}],
         "complete": True, "omitted_count": 0}}, 32000, 10)
     instructions = request.messages[0]["content"]
     assert "resource_ref" in instructions and "event_mapping" not in instructions
-    assert "Finish" not in instructions and "CallTool" not in instructions
+    assert "Finish" in instructions and "CallTool" in instructions
 
 
 def test_execution_facts_do_not_depend_on_resource_snapshots():

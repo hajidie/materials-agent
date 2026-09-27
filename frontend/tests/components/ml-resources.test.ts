@@ -17,9 +17,9 @@ async function show() { const w = mount(App, { attachTo: document.body }); wrapp
 beforeEach(() => {
   sessionStorage.clear(); sessionStorage.setItem("materials-agent.selected-conversation.v1", "conv");
   calls.length = 0; fence = null; results = [];
-  run = { agent_run_id: "private-run", conversation_id: "conv", source_message_id: "private-message", goal: "分析实验数据", status: "SUCCEEDED", version: 1,
-    waiting_version: 0, waiting: null, pending_execution: null, executions: [], observations: [], final_answer: { answer_id: "answer", text: "训练已提交。" },
-    error_message: null, outcome_unknown: false, user_inputs: [], user_messages: [{message_id: "private-message", text: "分析实验数据", attachments: [attachment]}], attachments: [attachment], result_attachments: [], created_at: timestamp };
+  run = { agent_run_id: "private-run", conversation_id: "conv", source_message_id: "private-message", source_answer_message_id: null, answer_root_message_id: null, goal: "分析实验数据", status: "SUCCEEDED", version: 1,
+    waiting_version: 0, waiting: null, pending_execution: null, executions: [], observations: [], submission_id: "submission", question_message_id: null, final_message_id: "answer", stopped: false,
+    error_message: null, outcome_unknown: false,  attachments: [attachment], result_attachments: [], created_at: timestamp };
   HTMLDialogElement.prototype.showModal = vi.fn(function (this: HTMLDialogElement) { this.setAttribute("open", ""); });
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input), method = init?.method ?? "GET";
@@ -29,6 +29,11 @@ beforeEach(() => {
     if (url.endsWith("/results/reconcile")) return response({ messages: results, pending: false });
     if (url.includes("/artifacts/")) return response({ ...attachment, presentation, downloads: [{ name: "下载 CSV", url: "/controlled.csv" }] });
     if (url.endsWith("/attachments")) return response({ attachment });
+    if (url.endsWith("/messages")) return response({ items: [
+      { message_id: "private-message", agent_run_id: run.agent_run_id, role: "USER", phase: "user", text: "分析实验数据", sequence: 1, created_at: timestamp, attachments: [attachment], artifacts: [], answer_root_message_id: null, answer_version: null, version_count: 0 },
+      ...(run.final_message_id ? [{ message_id: "answer", agent_run_id: run.agent_run_id, role: "ASSISTANT", phase: "answer", text: "训练已提交。", sequence: 2, created_at: timestamp, attachments: [], artifacts: [], answer_root_message_id: "answer", answer_version: 1, version_count: 1 }] : []),
+      ...results.map((m, i) => ({ ...m, role: "ASSISTANT", phase: "notification", sequence: 3+i, attachments: [], answer_root_message_id: null, answer_version: null, version_count: 0 }))
+    ], next_cursor: null });
     if (url.endsWith("/agent-runs")) return response({ items: [run], next_cursor: null });
     if (url === "/api/v1/conversations?limit=20") return response({ items: [{ conversation_id: "conv", title: "研究", created_at: timestamp, updated_at: timestamp }], next_cursor: null });
     return response({ items: [], next_cursor: null });
@@ -76,9 +81,9 @@ it("has one upload entry and no resource management or internal identity text", 
 
 it("keeps initial replies immutable and displays a terminal result once across reload", async () => {
   results = [{ message_id: "terminal-message", text: "模型训练完成。R² = 0.957", created_at: "2026-09-15T00:01:00Z", presentation, artifacts: [attachment] }];
-  let w = await show(); expect(w.text()).toContain("训练已提交。"); expect(w.findAll(".chat-result")).toHaveLength(1);
-  expect(run.final_answer?.text).toBe("训练已提交。");
-  w.unmount(); wrappers.pop(); w = await show(); expect(w.findAll(".chat-result")).toHaveLength(1);
+  let w = await show(); expect(w.text()).toContain("训练已提交。"); expect(w.text().match(/模型训练完成/g)).toHaveLength(1);
+  expect(run.final_message_id).toBe("answer");
+  w.unmount(); wrappers.pop(); w = await show(); expect(w.text().match(/模型训练完成/g)).toHaveLength(1);
   expect(w.text()).toContain("0.957");
 });
 
@@ -90,7 +95,7 @@ it("keeps deletion fences after refresh and never starts observation under a kno
 });
 
 it("unknown execution only offers original receipt checks and hides diagnostic codes", async () => {
-  run.status = "TERMINATED"; run.outcome_unknown = true; run.final_answer = null;
+  run.status = "TERMINATED"; run.outcome_unknown = true; run.final_message_id = null;
   run.executions = [{ invocation_run_id: "internal-invocation", tool_name: "materials_ml_train_tabular_regression", status: "OUTCOME_UNKNOWN", retryable: false, confirmation: [], confirmation_version: null, confirmation_expires_at: null }];
   const w = await show(); expect(button(w, "核查原操作").exists()).toBe(true);
   expect(w.text()).not.toContain("OUTCOME_UNKNOWN"); expect(w.text()).not.toContain("internal-invocation");

@@ -1,3 +1,4 @@
+from backend.tests.agent_state import post_message, post_operation
 from backend.tests.agent_inspection import stored_run
 from hashlib import sha256
 from io import BytesIO
@@ -51,7 +52,7 @@ def upload(client, conversation, payload=None, key="image"):
 
 
 def submit(client, conversation, asset=None, key="run", **extra):
-    return client.post(f"/api/v1/conversations/{conversation}/messages",
+    return post_message(client, f"/api/v1/conversations/{conversation}/messages",
         json={"mode": "NEW_RUN", "content_text": "预测 EBSD 屈服强度", **({"attachments": [{"attachment_id": asset, "kind": "ebsd_image", "name": "ebsd.png"}]} if asset else {}), **extra},
         headers={"Idempotency-Key": key})
 
@@ -78,8 +79,7 @@ def test_ebsd_upload_managed_prediction_replay_history_and_cleanup(ebsd):
     reloaded = client.get(f"/api/v1/agent-runs/{run['agent_run_id']}").json()["data"]
     assert reloaded["attachments"][0]["attachment_id"] == asset
     assert stored_run(client, reloaded)["observations"] == run["observations"]
-    regenerated = client.post(f"/api/v1/agent-runs/{run['agent_run_id']}/retry",
-        json={"retry_type": "ANSWER_REGENERATION"}, headers={"Idempotency-Key": "answer"})
+    regenerated = post_operation(client, f"/api/v1/messages/{run['final_message_id']}/regenerate", headers={"Idempotency-Key": "answer"})
     assert regenerated.json()["data"]["agent_run"]["status"] == "SUCCEEDED", regenerated.text
     assert runtime.execution_count == 1
     deleted = client.delete(f"/api/v1/conversations/{conversation}")
@@ -97,14 +97,7 @@ def test_invalid_upload_never_creates_object(ebsd, payload):
 
 def test_missing_image_resume_and_cross_conversation_rejection(ebsd, api_harness):
     client, conversation, storage, runtime = ebsd
-    def responder(role, payload):
-        draft = payload.get("draft")
-        if role == "agent_decision" and draft and not draft["issues"]:
-            # The validated binding is frozen in the draft; the model does not
-            # receive or echo its execution identity on the next decision.
-            return {"type": "CallTool", "tool_name": draft["tool_name"], "arguments": {}}
-        return MockAgentModel._respond(role, payload)
-    client.app.state.agent_runtime.model = MockAgentModel(responder)
+    client.app.state.agent_runtime.model = MockAgentModel()
     run = stored_run(client, submit(client, conversation).json()["data"]["agent_run"])
     assert run["status"] == "WAITING_FOR_USER", run
     asset = upload(client, conversation).json()["data"]["attachment"]["attachment_id"]
@@ -128,7 +121,7 @@ def test_storage_failure_replays_original_upload_and_busy_is_explicit_retry(ebsd
     run = stored_run(client, response.json()["data"]["agent_run"])
     failed = next(e for e in run["executions"] if e["status"] == "FAILED")
     assert runtime.execution_count == 0
-    response = client.post(f"/api/v1/agent-runs/{run['agent_run_id']}/retry",
+    response = post_operation(client, f"/api/v1/agent-runs/{run['agent_run_id']}/retry",
         json={"retry_type": "TOOL_RETRY", "invocation_run_id": failed["invocation_run_id"]}, headers={"Idempotency-Key": "retry"})
     assert response.json()["data"]["agent_run"]["status"] == "SUCCEEDED", response.text
     assert runtime.execution_count == 1
@@ -165,7 +158,7 @@ def test_ebsd_provider_boundary_contains_text_and_references_only(ebsd):
     def factory(config):
         class Model:
             def bind(self, **kwargs): return self
-            def invoke(self, messages):
+            async def ainvoke(self, messages):
                 captured.extend(messages)
                 payload = json.loads(messages[-1]["content"])
                 value = MockAgentModel._respond(config.role, payload)
@@ -173,7 +166,7 @@ def test_ebsd_provider_boundary_contains_text_and_references_only(ebsd):
                     usage_metadata={"input_tokens": 100, "output_tokens": 100, "total_tokens": 200})
         return Model()
     client.app.state.agent_runtime.model = AgentModelAdapter({role: _role("deepseek", role)
-        for role in ("agent_decision", "tool_arg_resolution", "final_answer")}, factory=factory)
+        for role in ("agent_decision",)}, factory=factory)
     asset = upload(client, conversation).json()["data"]["attachment"]["attachment_id"]
     result = stored_run(client, submit(client, conversation, asset).json()["data"]["agent_run"])
     assert result["status"] == "SUCCEEDED", result
@@ -223,7 +216,7 @@ def test_unavailable_ebsd_runtime_requires_explicit_retry(ebsd, connection_refus
     assert not any((o.get("result_summary") or {}).get("data") for o in run["observations"])
     if not connection_refused:
         return
-    response = client.post(f"/api/v1/agent-runs/{run['agent_run_id']}/retry",
+    response = post_operation(client, f"/api/v1/agent-runs/{run['agent_run_id']}/retry",
         json={"retry_type": "TOOL_RETRY", "invocation_run_id": failed["invocation_run_id"]},
         headers={"Idempotency-Key": "runtime-reconnected"})
     assert response.json()["data"]["agent_run"]["status"] == "SUCCEEDED", response.text

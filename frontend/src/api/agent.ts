@@ -20,21 +20,24 @@ export interface AgentRun {
   agent_run_id: string;
   conversation_id: string;
   source_message_id: string;
+  source_answer_message_id: string | null;
+  answer_root_message_id: string | null;
   goal: string;
   status: "PENDING" | "RUNNING" | "WAITING_FOR_USER" | "WAITING_FOR_CONFIRMATION" | "SUCCEEDED" | "TERMINATED";
   version: number;
   waiting_version: number;
-  waiting: { reason: "INTENT_CLARIFICATION" | "TOOL_ARGUMENT_CLARIFICATION"; question: string } | null;
+  waiting: { question: string } | null;
+  submission_id: string | null;
+  question_message_id: string | null;
+  final_message_id: string | null;
+  stopped: boolean;
   pending_execution: AgentExecution | null;
   executions: AgentExecution[];
   observations: Observation[];
-  final_answer: { text: string; answer_id: string } | null;
   error_message: string | null;
   outcome_unknown: boolean;
   attachments: Attachment[];
   result_attachments: Attachment[];
-  user_inputs: string[];
-  user_messages: Array<{ message_id: string; text: string; attachments: Attachment[] }>;
   created_at: string;
 }
 
@@ -72,7 +75,23 @@ export function toolLabel(name: string): string {
     materials_ml_get_training_run: "训练状态查询", materials_ml_predict_with_model: "模型预测"} as Record<string, string>)[name] ?? name;
 }
 
-export function clarificationLabel(question: string): string {
-  const fields: Record<string, string> = {ebsd_asset_id: "EBSD 图片", solution_temperature: "固溶温度", solution_time: "固溶时间", aging_temperature: "时效温度", aging_time: "时效时间", requested_outputs: "所需结果类型", from_unit: "原始单位", to_unit: "目标单位", value: "数值", material: "材料"};
-  return question.replace(/\b(ebsd_asset_id|solution_time|aging_temperature|aging_time|requested_outputs|from_unit|to_unit|value|material)\b/g, field => fields[field] ?? field);
+export interface ChatMessage {
+  message_id: string;
+  agent_run_id: string | null;
+  role: "USER" | "ASSISTANT";
+  phase: "user" | "question" | "answer" | "notification";
+  content_status: "complete";
+  text: string;
+  sequence: number;
+  created_at: string;
+  attachments: Attachment[];
+  artifacts: Attachment[];
+  answer_root_message_id: string | null;
+  answer_version: number | null;
+  version_count: number;
+}
+export interface AcceptedSubmission {
+  agent_run: AgentRun;
+  submission_id: string;
+  idempotency_replayed: boolean;
 }

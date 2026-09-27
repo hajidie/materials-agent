@@ -26,15 +26,22 @@ def decision_schema():
     schema = deepcopy(ACTION_ADAPTER.json_schema())
     properties = schema["$defs"]["Finish"]["properties"]
     properties["sources"] = properties.pop("observation_ids")
+    from materialsagent.domain.models.semantic_units import UNIT_DIMENSIONS
+    schema["$defs"]["CallTool"]["properties"]["user_unit_assertions"]["items"] = {
+        "type": "object", "additionalProperties": False,
+        "required": ["resource_parameter", "column", "unit", "source_message", "evidence"],
+        "properties": {"resource_parameter": {"type": "string", "minLength": 1},
+            "column": {"type": "string", "minLength": 1}, "unit": {"enum": list(UNIT_DIMENSIONS)},
+            "source_message": {"type": "string", "minLength": 1}, "evidence": {"type": "string", "minLength": 1}},
+    }
     return schema
 
 
 PROFILES = {
-    "agent_decision": ContextProfile(frozenset({"goal", "conversation_context", "user_inputs", "resource_context", "question",
-        "execution_facts", "attachments", "tools", "tool_execution_disabled", "retry_target", "draft", "observations"}), decision_schema(), True),
-    "tool_arg_resolution": ContextProfile(frozenset({"tool", "draft", "user_input", "resource_context", "question", "goal", "context", "reference_resolution", "attachments"}), {"type": "object"}),
-    "final_answer": ContextProfile(frozenset({"goal", "user_inputs", "context", "observations"}), {"type": "object", "required": ["text", "sources"],
-        "properties": {"text": {"type": "string", "minLength": 1, "maxLength": 16384}, "sources": {"type": "array", "items": {"type": "string"}, "uniqueItems": True}}, "additionalProperties": False}),
+    "agent_decision": ContextProfile(frozenset({"goal", "conversation_context", "user_inputs", "user_messages", "resource_context", "question",
+        "execution_facts", "attachments", "tools", "tool_execution_disabled", "retry_target", "draft", "observations", "proposal_error"}), decision_schema(), True),
+    "answer_regeneration": ContextProfile(frozenset({"goal", "conversation_context", "user_inputs", "observations",
+        "execution_facts", "tools", "tool_execution_disabled", "proposal_error"}), decision_schema(), True),
     "recovery": ContextProfile(frozenset({"goal", "facts", "allowed_actions"}), {"type": "object", "required": ["summary"],
         "properties": {"summary": {"type": "string", "minLength": 1}, "guidance": {"type": "array", "items": {"type": "string"}}}, "additionalProperties": False}),
 }
@@ -83,6 +90,7 @@ class ContextFrame:
     private: set[str]
     resource_map: dict[str, dict]
     tool_contracts: dict[str, dict]
+    inputs: dict[str, str]
 
 
 class ContextFramework:
@@ -115,18 +123,12 @@ class ContextFramework:
             value["draft"] = model_draft(run.draft)
         if "tools" in value:
             value["tools"] = proposal_catalog(payload["tools"])
-        if "tool" in value:
-            value["tool"] = proposal_catalog([payload["tool"]])[0]
-            contract = value["tool"]["schema"]
-            profile = replace(profile, output_schema={"type": "object", "additionalProperties": False,
-                "$defs": contract.get("$defs", {}), "properties": {
-                    key: schema if key in {item["model_argument"] for item in resource_specs(payload["tool"])}
-                    or key == "semantic_annotations" else {} for key, schema in contract.get("properties", {}).items()}})
-        if "question" in value and run.waiting:
-            aliases = {item["execution_argument"]: item["model_argument"]
-                       for tool in payload.get("tools", [payload.get("tool", {})]) for item in resource_specs(tool)}
-            value["question"] = {"question": run.waiting.question,
-                "fields": [aliases.get(field, field) for field in run.waiting.fields]}
+        if "question" in value:
+            value["question"] = {"question": run.waiting.question} if run.waiting else None
+        inputs = {f"用户输入 {i + 1}": m["message_id"] for i, m in enumerate(run.user_messages)}
+        if "user_messages" in value:
+            value["user_messages"] = [{"source": label, "text": next(m["text"] for m in run.user_messages
+                if m["message_id"] == identity)} for label, identity in inputs.items()]
         if "execution_facts" in value:
             value["execution_facts"] = []
             for observation in run.observations:
@@ -154,7 +156,7 @@ class ContextFramework:
                 if k in facts and (isinstance(facts[k], str) or isinstance(facts[k], list)
                     and all(isinstance(item, str) for item in facts[k]))}
             value["allowed_actions"] = [item for item in value.get("allowed_actions", []) if isinstance(item, str)]
-        if role in ("agent_decision", "tool_arg_resolution"):
+        if role == "agent_decision":
             value["attachments"] = [{"name": a.get("name", "已上传文件"), "type": a["kind"]} for a in run.attachments]
         resource_context = payload.get("resource_context")
         resource_map = deepcopy(resource_context.get("mapping", {})) if isinstance(resource_context, dict) else {}
@@ -162,7 +164,7 @@ class ContextFramework:
             value["resource_context"] = deepcopy(resource_context.get("view")) if isinstance(resource_context, dict) else None
         private = internal_values(run.model_dump(mode="json")) | internal_values(resource_map)
         value = protect_text(value, private)
-        return ContextFrame(profile, value, sources, private, resource_map, tool_contracts)
+        return ContextFrame(profile, value, sources, private, resource_map, tool_contracts, inputs)
 
     def output(self, frame, value, run):
         try:
@@ -178,33 +180,28 @@ class ContextFramework:
                 if any(label not in frame.sources for label in labels):
                     raise AgentFailure("FINAL_ANSWER_SOURCE_MISMATCH")
                 value["observation_ids"] = [frame.sources[label] for label in labels]
-            elif value["type"] in ("CallTool", "AskUser"):
-                if value["type"] == "CallTool" and run.tool_execution_disabled:
+            elif value["type"] == "CallTool":
+                if run.tool_execution_disabled:
                     raise AgentFailure("TOOL_EXECUTION_DISABLED")
-                name = value.get("tool_name")
-                if name is not None:
-                    tool = frame.tool_contracts.get(name)
-                    if tool is None:
-                        raise AgentFailure("UNKNOWN_TOOL")
-                    key = "arguments" if value["type"] == "CallTool" else "known_arguments"
-                    try:
-                        value[key] = self.arguments(name, value.get(key, {}), tool, run, frame.resource_map)
-                    except AgentFailure:
-                        if value["type"] == "AskUser":
-                            raise AgentFailure("CLARIFICATION_CONTRADICTS_RESOLVER") from None
-                        raise
-                    if "fields" in value:
-                        reverse = {item["model_argument"]: item["execution_argument"] for item in resource_specs(tool)}
-                        value["fields"] = [reverse.get(f, f) for f in value["fields"]]
+                name = value["tool_name"]
+                tool = frame.tool_contracts.get(name)
+                if tool is None:
+                    raise AgentFailure("UNKNOWN_TOOL")
+                value["arguments"] = self.arguments(name, value["arguments"], tool, run, frame.resource_map)
+                for assertion in value.get("user_unit_assertions", []):
+                    required = {"resource_parameter", "unit", "source_message", "evidence"}
+                    if (not required <= set(assertion) or set(assertion) - (required | {"column"})
+                            or assertion["resource_parameter"] not in {spec["model_argument"] for spec in resource_specs(tool)}):
+                        raise AgentFailure("INVALID_UNIT_ASSERTION")
+                    identity = frame.inputs.get(assertion["source_message"])
+                    current = run.user_messages[-1] if run.user_messages else None
+                    if (not current or identity != current["message_id"] or not assertion["evidence"].strip()
+                            or assertion["evidence"] not in current["text"]):
+                        raise AgentFailure("INVALID_UNIT_ASSERTION")
+                    assertion["source_message"] = identity
+            elif run.tool_execution_disabled and value["type"] != "Finish":
+                raise AgentFailure("ANSWER_REGENERATION_NOT_ALLOWED")
             return value
-        if "tool" in frame.payload:
-            name = frame.payload["tool"]["tool_name"]
-            return self.arguments(name, value, frame.tool_contracts[name], run, frame.resource_map)
-        if "observations" in frame.payload:
-            allowed = {o["source"] for o in frame.payload["observations"]}
-            if any(source not in allowed for source in value["sources"]):
-                raise AgentFailure("FINAL_ANSWER_SOURCE_MISMATCH")
-            return value["text"]
         return value
 
     @staticmethod
@@ -213,7 +210,7 @@ class ContextFramework:
         properties = projected["schema"].get("properties", {})
         if not set(values) <= set(properties):
             raise AgentFailure("TOOL_ARGUMENT_FIELD_INVALID")
-        # Parameter deltas may omit required fields; provided values still obey
+        # Full proposals may contain missing values; provided values still obey
         # the advertised schema. Domain normalization owns units/defaults/issues.
         for key, value in values.items():
             if key == "semantic_annotations":

@@ -34,7 +34,7 @@ class RunBudget(Contract):
     max_action_steps: int = Field(default=12, ge=1, le=100)
     max_tool_executions: int = Field(default=4, ge=1, le=32)
     max_active_seconds: float = Field(default=3600, gt=0, le=86400)
-    max_llm_tokens: int = Field(default=32000, ge=1, le=2000000)
+    max_llm_tokens: int = Field(default=64000, ge=1, le=2000000)
     standard_timeout_seconds: float = Field(default=10, gt=0, le=3600)
     managed_timeout_seconds: float = Field(default=1200, gt=0, le=86400)
 
@@ -43,31 +43,18 @@ class CallTool(Contract):
     type: Literal["CallTool"]
     tool_name: str = Field(min_length=1, max_length=128)
     arguments: dict[str, Any]
+    user_unit_assertions: list[dict[str, str]] = Field(default_factory=list, max_length=16)
 
 
 class AskUser(Contract):
     type: Literal["AskUser"]
-    reason: Literal["INTENT_CLARIFICATION", "TOOL_ARGUMENT_CLARIFICATION"]
     question: str = Field(min_length=1, max_length=2048)
-    tool_name: str | None = None
-    fields: list[str] = Field(default_factory=list, max_length=32)
-    known_arguments: dict[str, Any] = Field(default_factory=dict)
-
-    @model_validator(mode="after")
-    def valid_reason(self):
-        if self.reason == "TOOL_ARGUMENT_CLARIFICATION":
-            if not self.tool_name or not self.fields:
-                raise ValueError("Tool clarification requires a Tool and field references.")
-        elif self.tool_name is not None or self.fields or self.known_arguments:
-            raise ValueError("Intent clarification cannot bind a Tool.")
-        return self
 
 
 class Finish(Contract):
     type: Literal["Finish"]
-    answer: str | None = Field(default=None, max_length=16384)
+    answer: str = Field(min_length=1, max_length=16384)
     observation_ids: list[str] = Field(default_factory=list)
-    needs_synthesis: bool = False
 
 
 AgentAction = Annotated[CallTool | AskUser | Finish, Field(discriminator="type")]
@@ -94,7 +81,7 @@ class TokenUsage(Contract):
 class ModelCall(Contract):
     call_id: str = Field(default_factory=identifier)
     step_id: str
-    role: Literal["agent_decision", "tool_arg_resolution", "final_answer"]
+    role: Literal["agent_decision"]
     status: Literal["RUNNING", "SUCCEEDED", "FAILED"] = "RUNNING"
     prompt_digest: str
     output_limit: int = Field(ge=1)
@@ -109,6 +96,8 @@ class AgentStep(Contract):
     number: int = Field(ge=1)
     status: Literal["RUNNING", "COMPLETED", "FAILED"] = "RUNNING"
     action: AgentAction | None = None
+    action_type: Literal["CallTool", "AskUser", "Finish"] | None = None
+    message_id: str | None = None
     created_at: datetime = Field(default_factory=now)
 
 
@@ -198,22 +187,12 @@ class ExecutionRecord(Contract):
     tool_run_id: str | None = None
 
 
-class FinalAnswer(Contract):
-    answer_id: str = Field(default_factory=identifier)
-    step_id: str
-    text: str = Field(min_length=1, max_length=16384)
-    observation_ids: list[str] = Field(default_factory=list)
-    generated: bool = False
-    created_at: datetime = Field(default_factory=now)
-
-
 class AgentRun(Contract):
     resource_protocol_version: Literal["resource-ref-v1"] = "resource-ref-v1"
     agent_run_id: str = Field(default_factory=identifier)
     conversation_id: str
     actor_id: str
     source_message_id: str
-    goal: str = Field(min_length=1, max_length=32768)
     status: Literal["PENDING", "RUNNING", "WAITING_FOR_USER", "WAITING_FOR_CONFIRMATION", "SUCCEEDED", "TERMINATED"] = "PENDING"
     version: int = 0
     claim: str | None = None
@@ -223,21 +202,26 @@ class AgentRun(Contract):
     llm_tokens: int = 0
     tool_executions: int = 0
     waiting_version: int = 0
-    accepted_waiting_version: int | None = None
-    accepted_input_hash: str | None = None
-    waiting: AskUser | None = None
+    submission_id: str | None = None
+    accepted_submission_id: str | None = Field(default=None, exclude=True)
+    question_message_id: str | None = None
+    final_message_id: str | None = None
+    source_answer_message_id: str | None = None
+    answer_root_message_id: str | None = None
+    stop_requested_at: datetime | None = None
     draft: ArgumentDraft | None = None
     pending_execution: ExecutionRecord | None = None
     steps: list[AgentStep] = Field(default_factory=list)
     observations: list[Observation] = Field(default_factory=list)
     executions: list[ExecutionRecord] = Field(default_factory=list)
     calls: list[ModelCall] = Field(default_factory=list)
-    user_inputs: list[str] = Field(default_factory=list)
+    user_message_ids: list[str] = Field(default_factory=list)
+    context_message_ids: list[str] = Field(default_factory=list)
+    messages: list[dict[str, Any]] = Field(default_factory=list, exclude=True)
+    pending_message: dict[str, Any] | None = Field(default=None, exclude=True)
+    current_unit_assertions: list[dict[str, str]] = Field(default_factory=list, exclude=True)
     attachments: list[dict[str, Any]] = Field(default_factory=list, max_length=1)
-    result_attachments: list[dict[str, Any]] = Field(default_factory=list)
-    user_messages: list[dict[str, Any]] = Field(default_factory=list)
-    context: list[dict[str, Any]] = Field(default_factory=list)
-    final_answer: FinalAnswer | None = None
+    result_attachments: list[dict[str, Any]] = Field(default_factory=list, exclude=True)
     error_code: str | None = None
     last_completed_step: int = 0
     duplicate_of_invocation_run_id: str | None = None
@@ -252,16 +236,41 @@ class AgentRun(Contract):
     def terminal(self) -> bool:
         return self.status in {"SUCCEEDED", "TERMINATED"}
 
+    @property
+    def goal(self) -> str:
+        return next((m["text"] for m in self.messages if m["message_id"] == self.source_message_id), "待处理请求")
+
+    @property
+    def user_messages(self) -> list[dict[str, Any]]:
+        by_id = {m["message_id"]: m for m in self.messages}
+        return [by_id[i] for i in self.user_message_ids if i in by_id]
+
+    @property
+    def user_inputs(self) -> list[str]:
+        return [m["text"] for m in self.user_messages if m["message_id"] != self.source_message_id]
+
+    @property
+    def context(self) -> list[dict[str, Any]]:
+        by_id = {m["message_id"]: m for m in self.messages}
+        return [{"role": by_id[i]["role"].lower(), "content": by_id[i]["text"],
+                 "additional_inputs": by_id[i].get("attachments", [])}
+                for i in self.context_message_ids if i in by_id]
+
+    @property
+    def waiting(self) -> AskUser | None:
+        message = next((m for m in self.messages if m["message_id"] == self.question_message_id), None)
+        return AskUser(type="AskUser", question=message["text"]) if message else None
+
     def validate_transition(self, previous: AgentRun) -> None:
         allowed = {
             "PENDING": {"RUNNING", "TERMINATED"},
             "RUNNING": {"RUNNING", "WAITING_FOR_USER", "WAITING_FOR_CONFIRMATION", "SUCCEEDED", "TERMINATED"},
-            "WAITING_FOR_USER": {"RUNNING", "TERMINATED"},
+            "WAITING_FOR_USER": {"PENDING", "RUNNING", "TERMINATED"},
             "WAITING_FOR_CONFIRMATION": {"RUNNING", "TERMINATED"},
         }
         if self.status not in allowed.get(previous.status, set()):
             raise ValueError("AgentRun transition is invalid.")
-        if self.status == "SUCCEEDED" and self.final_answer is None:
-            raise ValueError("Successful AgentRun requires a persisted FinalAnswer.")
+        if self.status == "SUCCEEDED" and self.final_message_id is None:
+            raise ValueError("Successful AgentRun requires a published answer message.")
         if self.budget != previous.budget or self.llm_tokens < previous.llm_tokens or self.tool_executions < previous.tool_executions:
             raise ValueError("Run budgets cannot reset.")

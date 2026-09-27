@@ -376,8 +376,7 @@ def create_app(
         else:
             from materialsagent.infrastructure.llm.configuration import load_llm_configuration
             configuration = load_llm_configuration(resolved_settings)
-            resolved_agent_model = AgentModelAdapter({role: configuration.for_role(role) for role in (
-                "agent_decision", "tool_arg_resolution", "final_answer")})
+            resolved_agent_model = AgentModelAdapter({"agent_decision": configuration.for_role("agent_decision")})
     resolved_agent_runtime = agent_runtime
     if resolved_agent_runtime is None and resolved_agent_store and resolved_invocation_service:
         gateway = RegistryAgentGateway(resolved_tool_registry, resolved_unit_of_work_factory,
@@ -449,6 +448,8 @@ def create_app(
                 await run_in_threadpool(ml_deletion_coordinator.recover, resolved_actor_context)
             yield
         finally:
+            if resolved_agent_runtime is not None:
+                await resolved_agent_runtime.close()
             if mcp_client is not None:
                 from starlette.concurrency import run_in_threadpool
                 await run_in_threadpool(mcp_client.close)

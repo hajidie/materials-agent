@@ -402,16 +402,14 @@ def test_committed_llm_toml_resolves_default_roles_and_keeps_secret_safe() -> No
     )
 
     chat = configured.for_role("agent_decision")
-    explanation = configured.for_role("final_answer")
-    assert chat.provider == explanation.provider == "deepseek"
+    assert set(configured.roles) == {"agent_decision"}
+    assert chat.provider == "deepseek"
     assert chat.model_name == "deepseek-flash"
-    assert chat.max_tokens == 1024
+    assert chat.max_tokens == 4096
     assert chat.context_window_tokens == 1_000_000
     assert chat.prompt_limit_tokens == 50_000
     assert chat.history_token_budget == 8_192
     assert chat.safety_margin_tokens == 1_024
-    assert explanation.max_tokens == 768
-    assert explanation.history_token_budget == 0
     assert chat.endpoint == "https://api.deepseek.com"
     assert chat.api_key.get_secret_value() == secret
     assert secret not in repr(configured)
@@ -456,8 +454,8 @@ def test_qwen_default_and_role_override_select_only_required_keys(tmp_path) -> N
     mixed = tmp_path / "mixed.toml"
     mixed.write_text(
         text.replace(
-            "[roles.final_answer]\n",
-            '[roles.final_answer]\nmodel = "qwen_default"\n',
+            "[roles.agent_decision]\n",
+            '[roles.agent_decision]\nmodel = "qwen_default"\n',
         ),
         encoding="utf-8",
     )
@@ -471,68 +469,19 @@ def test_qwen_default_and_role_override_select_only_required_keys(tmp_path) -> N
         ),
         mixed,
     )
-    assert mixed_configuration.for_role("agent_decision").provider == "deepseek"
-    assert mixed_configuration.for_role("final_answer").provider == "qwen"
+    assert mixed_configuration.for_role("agent_decision").provider == "qwen"
 
 
-def test_qwen_explanation_role_resolves_independent_reasoning_parameters(
-    tmp_path,
-) -> None:
+def test_qwen_decision_role_resolves_structured_parameters(tmp_path):
     from materialsagent.infrastructure.config import load_settings
-    from materialsagent.infrastructure.llm.configuration import (
-        LLM_CONFIG_FILE,
-        load_llm_configuration,
-    )
-
-    candidate = tmp_path / "qwen-explanation.toml"
-    source = LLM_CONFIG_FILE.read_text(encoding="utf-8")
-    old_block = (
-        "[roles.final_answer]\n"
-        "temperature = 0.0\n"
-        "max_tokens = 768\n"
-        'reasoning_mode = "disabled"'
-    )
-    new_block = (
-        "[roles.final_answer]\n"
-        'model = "qwen_default"\n'
-        "top_p = 0.9\n"
-        "top_k = 20\n"
-        "max_tokens = 768\n"
-        'reasoning_mode = "enabled"\n'
-        'reasoning_effort = "high"\n'
-        "thinking_budget = 4096"
-    )
-    candidate.write_text(source.replace(old_block, new_block), encoding="utf-8")
-
-    configured = load_llm_configuration(
-        load_settings(
-            {
-                "LLM_ADAPTER": "provider",
-                "DEEPSEEK_API_KEY": "test-deepseek-key",
-                "DASHSCOPE_API_KEY": "test-qwen-key",
-            }
-        ),
-        candidate,
-    )
-    role = configured.for_role("final_answer")
-
-    assert role.provider == "qwen"
-    assert role.top_p == 0.9
-    assert role.top_k == 20
-    assert role.reasoning_effort == "high"
-    assert role.thinking_budget == 4096
-    assert role.streaming is True
-    assert dict(role.generation_parameters) == {
-        "schema_version": 1,
-        "top_p": 0.9,
-        "top_k": 20,
-        "max_tokens": 768,
-        "reasoning_mode": "enabled",
-        "reasoning_effort": "high",
-        "thinking_budget": 4096,
-        "response_format": "text",
-        "streaming": True,
-    }
+    from materialsagent.infrastructure.llm.configuration import LLM_CONFIG_FILE, load_llm_configuration
+    source=LLM_CONFIG_FILE.read_text(encoding="utf-8")
+    source=source.replace('[roles.agent_decision]','[roles.agent_decision]\nmodel = "qwen_default"\ntop_p = 0.9\ntop_k = 20')
+    source=source.replace('reasoning_mode = "enabled"','reasoning_mode = "disabled"').replace('reasoning_effort = "high"\n','')
+    candidate=tmp_path/"qwen-decision.toml";candidate.write_text(source,encoding="utf-8")
+    role=load_llm_configuration(load_settings({"LLM_ADAPTER":"provider","DASHSCOPE_API_KEY":"test-qwen-key"}),candidate).for_role("agent_decision")
+    assert role.provider=="qwen" and role.top_p==0.9 and role.top_k==20
+    assert role.response_format=="json_object" and role.reasoning_mode=="disabled"
 
 
 @pytest.mark.parametrize(
@@ -775,7 +724,7 @@ def test_injected_side_effect_registry_is_forbidden_in_production() -> None:
         )
 
 
-@pytest.mark.parametrize("role_name", ["agent_decision", "tool_arg_resolution", "final_answer"])
+@pytest.mark.parametrize("role_name", ["agent_decision"])
 @pytest.mark.parametrize("top_p", [0.1, 0.95, 0.98, 1.0])
 def test_deepseek_thinking_accepts_temperature_and_top_p(tmp_path, role_name, top_p):
     from materialsagent.infrastructure.config import load_settings
@@ -811,3 +760,23 @@ def test_thinking_does_not_relax_top_p_validation(top_p):
             prompt_limit_tokens=8192, history_token_budget=0,
             safety_margin_tokens=1024,
         )
+
+
+def test_provider_app_initializes_only_the_main_agent_role(monkeypatch):
+    import materialsagent.main as main
+    from materialsagent.infrastructure.config import load_settings
+    import materialsagent.infrastructure.llm.agent_model as models
+    original = models.AgentModelAdapter
+    configured = []
+    def capture(roles):
+        configured.extend(roles)
+        return original(roles)
+    monkeypatch.setattr(models, "AgentModelAdapter", capture)
+    main.create_app(settings=load_settings({"LLM_ADAPTER": "provider", "DEEPSEEK_API_KEY": "test-provider-key"}))
+    assert configured == ["agent_decision"]
+
+
+def test_default_run_budget_supports_multi_turn_loop_without_resetting():
+    from materialsagent.domain.models.agent import RunBudget
+    from materialsagent.infrastructure.config import load_settings
+    assert RunBudget().max_llm_tokens == load_settings({}).agent_max_llm_tokens == 64000

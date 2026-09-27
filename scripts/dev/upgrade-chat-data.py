@@ -1,4 +1,4 @@
-"""Run while services are stopped, before the 0021 upgrade. Prints targets before an explicit --apply.
+"""Run before a breaking chat upgrade. Prints targets before an explicit --apply.
 
 Uses the existing conversation deletion/scope-close/object cleanup lifecycle.
 Never clears volumes, migration history, model packages, or unrelated scopes.
@@ -22,19 +22,23 @@ def main():
     parser.add_argument("--conversation", action="append", default=[])
     parser.add_argument("--all-incompatible", action="store_true",
         help="Apply to the complete, printed incompatible set after the safety preflight.")
+    parser.add_argument("--all-conversations", action="store_true",
+        help="Delete all printed local-actor conversations through the existing cleanup lifecycle.")
     args = parser.parse_args()
     settings = load_settings()
     if settings.app_env not in ("local", "test") or not settings.local_actor_id:
         raise SystemExit("Local/test actor configuration required.")
     sessions = create_session_factory(create_engine_from_settings(settings))
-    targets = inventory(sessions, settings.local_actor_id)
+    targets = inventory(sessions, settings.local_actor_id, all_conversations=args.all_conversations)
     print(json.dumps({"count": len(targets), "targets": targets}, ensure_ascii=False), flush=True)
     if not args.apply:
         return
     selected = {item["conversation_id"]: item for item in targets}
-    if args.all_incompatible and args.conversation:
-        raise SystemExit("Choose exact conversation IDs or --all-incompatible, not both.")
-    chosen = list(selected) if args.all_incompatible else args.conversation
+    if sum((args.all_incompatible, args.all_conversations, bool(args.conversation))) != 1:
+        raise SystemExit("Choose exact conversation IDs, --all-incompatible or --all-conversations.")
+    chosen = list(selected) if args.all_incompatible or args.all_conversations else args.conversation
+    if not chosen and args.all_conversations:
+        return
     if not chosen or any(identity not in selected for identity in chosen):
         raise SystemExit("Apply requires exact conversation IDs from the preflight inventory.")
     if any(selected[identity]["blocked"] for identity in chosen):
@@ -47,7 +51,7 @@ def main():
     actor = ActorContext(actor_id=settings.local_actor_id)
     for identity in chosen:
         # Re-evaluate local work just before the authoritative deletion transaction.
-        current = next((item for item in inventory(sessions, actor.actor_id) if item["conversation_id"] == identity), None)
+        current = next((item for item in inventory(sessions, actor.actor_id, all_conversations=args.all_conversations) if item["conversation_id"] == identity), None)
         if current is None or current["blocked"]:
             raise SystemExit("Stopped: preflight changed.")
         try:

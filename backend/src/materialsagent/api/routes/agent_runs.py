@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
@@ -21,19 +22,22 @@ class AgentRunView(BaseModel):
     agent_run_id: str
     conversation_id: str
     source_message_id: str
+    source_answer_message_id: str | None
+    answer_root_message_id: str | None
     goal: str
     status: str
     version: int
     waiting_version: int
+    submission_id: str | None
+    question_message_id: str | None
+    final_message_id: str | None
+    stopped: bool
     waiting: dict | None
     pending_execution: dict | None
     executions: list[dict]
     observations: list[dict]
-    final_answer: dict | None
     error_message: str | None
     outcome_unknown: bool
-    user_inputs: list[str]
-    user_messages: list[dict]
     attachments: list[dict]
     result_attachments: list[dict]
     created_at: str
@@ -42,6 +46,7 @@ class AgentRunView(BaseModel):
 class RunData(BaseModel):
     agent_run: AgentRunView
     idempotency_replayed: bool
+    submission_id: str
 
 class SubmissionResponse(BaseModel):
     request_id: str
@@ -52,23 +57,28 @@ class RunResponse(BaseModel):
     data: AgentRunView
 
 
+class ReplyTo(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    question_message_id: str = Field(min_length=1)
+    waiting_version: int = Field(ge=1)
+
+
 class Submission(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    mode: Literal["NEW_RUN", "RESUME_RUN"]
     content_text: str = Field(min_length=1, max_length=32768)
     attachments: list[Attachment] = Field(default_factory=list, max_length=1)
-    agent_run_id: str | None = None
-    waiting_version: int | None = Field(default=None, ge=1)
+    reply_to: ReplyTo | None = None
 
     @model_validator(mode="after")
-    def valid_target(self):
+    def valid_text(self):
         if not self.content_text.strip():
             raise ValueError("Message cannot be blank.")
-        if self.mode == "RESUME_RUN" and (not self.agent_run_id or self.waiting_version is None):
-            raise ValueError("Resume requires a Run and waiting version.")
-        if self.mode == "NEW_RUN" and (self.agent_run_id is not None or self.waiting_version is not None):
-            raise ValueError("New Run cannot target an existing Run.")
         return self
+
+
+class TurnRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    submission_id: str = Field(min_length=1)
 
 
 class Confirmation(BaseModel):
@@ -79,7 +89,7 @@ class Confirmation(BaseModel):
 
 class RetryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    retry_type: Literal["TOOL_RETRY", "ANSWER_REGENERATION"]
+    retry_type: Literal["TOOL_RETRY"]
     invocation_run_id: str | None = None
 
 
@@ -115,17 +125,18 @@ def public(run: AgentRun):
             "confirmation_expires_at": record.confirmation_expires_at.isoformat() if record.confirmation_expires_at else None,
             "confirmation": facts}
     value = {key: getattr(run, key) for key in ("agent_run_id", "conversation_id", "source_message_id", "goal", "status", "version",
-        "waiting_version", "user_inputs", "user_messages", "attachments", "result_attachments")}
+        "waiting_version", "submission_id", "question_message_id", "final_message_id", "source_answer_message_id", "answer_root_message_id", "attachments", "result_attachments")}
     value.update(created_at=run.created_at.isoformat(),
-        waiting={"reason": run.waiting.reason, "question": protect_text(run.waiting.question, private)} if run.waiting else None,
+        waiting={"question": protect_text(run.waiting.question, private)} if run.waiting else None,
+        stopped=run.error_code == "USER_STOPPED",
         pending_execution=execution(run.pending_execution), executions=[execution(e) for e in run.executions],
         observations=[{"observation_id": o.observation_id, "kind": o.kind, "tool_name": o.tool_name,
             "status": o.status, "presentation": protect_text(project_result(o), private),
             "artifacts": [{"attachment_id": a["asset_id"], "kind": "image", "name": "结果图片"} for a in o.artifacts if a.get("asset_id")]
             } for o in run.observations if o.kind == "TOOL_RESULT"],
-        final_answer={"text": protect_text(run.final_answer.text, private), "answer_id": run.final_answer.answer_id} if run.final_answer else None,
         outcome_unknown=run.error_code == "MCP_OUTCOME_UNKNOWN" or any(e.status == "OUTCOME_UNKNOWN" for e in run.executions),
         error_message={
+            "USER_STOPPED": "已停止生成，已保存的内容仍保留。",
             "CONTEXT_BUDGET_EXCEEDED": "本次请求所需的上下文超出处理上限，未能继续。已上传的附件和已保存的结果仍保留。",
             "LLM_TOKEN_BUDGET_EXCEEDED": "本次处理已达到推理额度上限，未能继续。已上传的附件和已保存的结果仍保留。",
         }.get(run.error_code, "本次处理未完成，已保存的结果仍可查看。") if run.error_code else None)
@@ -142,18 +153,67 @@ def key_value(value):
         raise HTTPException(422, detail="INVALID_IDEMPOTENCY_KEY") from None
 
 
-@router.post("/api/v1/conversations/{conversation_id}/messages", response_model=SubmissionResponse)
+def accepted(run, replayed, request):
+    return {"request_id": request.state.request_id, "data": {"agent_run": public(run),
+        "submission_id": run.accepted_submission_id or run.submission_id, "idempotency_replayed": replayed}}
+
+
+@router.post("/api/v1/conversations/{conversation_id}/messages", response_model=SubmissionResponse, status_code=202)
 def submit(conversation_id: str, body: Submission, request: Request,
            actor: Annotated[ActorContext, Depends(get_actor_context)],
            idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None):
     runtime = runtime_for(request)
-    run, replayed = runtime.store.submit(conversation_id, actor.actor_id, body.content_text,
-        key_value(idempotency_key), run_id=body.agent_run_id, waiting_version=body.waiting_version,
+    target = None
+    if body.reply_to:
+        from materialsagent.infrastructure.db.conversation_task import MessageRow
+        with runtime.store.sessions() as session:
+            message = session.get(MessageRow, body.reply_to.question_message_id)
+            if not message or message.actor_id != actor.actor_id or message.conversation_id != conversation_id or message.phase != "question":
+                raise AgentFailure("MESSAGE_NOT_FOUND")
+            target = message.agent_run_id
+    run, replayed = runtime.store.submit(conversation_id, actor.actor_id, body.content_text, key_value(idempotency_key),
+        run_id=target, waiting_version=body.reply_to.waiting_version if body.reply_to else None,
+        question_message_id=body.reply_to.question_message_id if body.reply_to else None,
         budget=request.app.state.agent_budget, attachments=[a.model_dump() for a in body.attachments])
-    if run.status == "PENDING" or (body.mode == "RESUME_RUN" and run.status == "WAITING_FOR_USER" and run.waiting_version == body.waiting_version):
-        run = runtime.advance(run.agent_run_id, actor.actor_id, waiting_version=body.waiting_version,
-            user_input=body.content_text if body.mode == "RESUME_RUN" else None)
-    return {"request_id": request.state.request_id, "data": {"agent_run": public(run), "idempotency_replayed": replayed}}
+    return accepted(run, replayed, request)
+
+
+@router.post("/api/v1/agent-runs/{run_id}/advance", response_model=RunResponse)
+async def advance(run_id: str, body: TurnRequest, request: Request,
+                  actor: Annotated[ActorContext, Depends(get_actor_context)]):
+    run = await runtime_for(request).advance(run_id, actor.actor_id, submission_id=body.submission_id)
+    return {"request_id": request.state.request_id, "data": public(run)}
+
+
+@router.post("/api/v1/agent-runs/{run_id}/stop")
+async def stop(run_id: str, body: TurnRequest, request: Request,
+               actor: Annotated[ActorContext, Depends(get_actor_context)]):
+    run, stopped = await runtime_for(request).stop(run_id, actor.actor_id, body.submission_id)
+    return {"request_id": request.state.request_id, "data": {"agent_run": public(run),
+        "outcome": "stopped" if stopped else "already_completed"}}
+
+
+@router.get("/api/v1/conversations/{conversation_id}/messages")
+def messages(conversation_id: str, request: Request, actor: Annotated[ActorContext, Depends(get_actor_context)],
+             limit: Annotated[int, Query(ge=1, le=100)] = 50, before: Annotated[int | None, Query(ge=1)] = None):
+    return {"data": runtime_for(request).store.messages(conversation_id, actor.actor_id, before=before, limit=limit)}
+
+
+@router.get("/api/v1/messages/{message_id}/versions")
+def versions(message_id: str, request: Request, actor: Annotated[ActorContext, Depends(get_actor_context)],
+             limit: Annotated[int, Query(ge=1, le=100)] = 20, before: Annotated[int | None, Query(ge=1)] = None):
+    return {"data": runtime_for(request).store.versions(message_id, actor.actor_id, before=before, limit=limit)}
+
+
+@router.post("/api/v1/messages/{message_id}/regenerate", response_model=SubmissionResponse, status_code=202)
+def regenerate(message_id: str, request: Request, actor: Annotated[ActorContext, Depends(get_actor_context)],
+               idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None):
+    runtime = runtime_for(request)
+    source = runtime.store.answer_run(message_id, actor.actor_id)
+    run, replayed = runtime.store.submit(source.conversation_id, actor.actor_id, source.goal, key_value(idempotency_key),
+        budget=request.app.state.agent_budget, retry_source=source, retry_type="ANSWER_REGENERATION",
+        source_answer_message_id=message_id)
+    return accepted(run, replayed, request)
 
 
 @router.get("/api/v1/agent-runs/{run_id}", response_model=RunResponse)
@@ -184,7 +244,7 @@ def trace(run_id: str, request: Request, actor: Annotated[ActorContext, Depends(
         "next_offset": offset + limit if offset + limit < len(run.steps) else None}}
 
 
-def _confirmation(run_id, invocation_id, body, request, actor, approved):
+async def _confirmation(run_id, invocation_id, body, request, actor, approved):
     runtime = runtime_for(request)
     run = runtime.store.get(run_id, actor.actor_id)
     pending = run.pending_execution
@@ -194,20 +254,20 @@ def _confirmation(run_id, invocation_id, body, request, actor, approved):
         if recorded and approved:
             return {"request_id": request.state.request_id, "data": public(run)}
         raise AgentConflictError("Confirmation target changed.")
-    run = runtime.advance(run_id, actor.actor_id, waiting_version=body.waiting_version, confirmation=approved)
+    run = await runtime.advance(run_id, actor.actor_id, waiting_version=body.waiting_version, confirmation=approved)
     return {"request_id": request.state.request_id, "data": public(run)}
 
 
 @router.post("/api/v1/agent-runs/{run_id}/invocations/{invocation_id}/confirm")
-def confirm(run_id: str, invocation_id: str, body: Confirmation, request: Request,
+async def confirm(run_id: str, invocation_id: str, body: Confirmation, request: Request,
             actor: Annotated[ActorContext, Depends(get_actor_context)]):
-    return _confirmation(run_id, invocation_id, body, request, actor, True)
+    return await _confirmation(run_id, invocation_id, body, request, actor, True)
 
 
 @router.post("/api/v1/agent-runs/{run_id}/invocations/{invocation_id}/reject")
-def reject(run_id: str, invocation_id: str, body: Confirmation, request: Request,
+async def reject(run_id: str, invocation_id: str, body: Confirmation, request: Request,
            actor: Annotated[ActorContext, Depends(get_actor_context)]):
-    return _confirmation(run_id, invocation_id, body, request, actor, False)
+    return await _confirmation(run_id, invocation_id, body, request, actor, False)
 
 
 def receipt_target(run_id, invocation_id, request, actor):
@@ -264,7 +324,7 @@ def reconcile_resources(run_id: str, request: Request, actor: Annotated[ActorCon
     return {"data": [registrar.explicit_reconcile(run, record) for record in known]}
 
 
-@router.post("/api/v1/agent-runs/{run_id}/retry", response_model=SubmissionResponse)
+@router.post("/api/v1/agent-runs/{run_id}/retry", response_model=SubmissionResponse, status_code=202)
 def retry(run_id: str, body: RetryRequest, request: Request,
           actor: Annotated[ActorContext, Depends(get_actor_context)],
           idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None):
@@ -272,16 +332,10 @@ def retry(run_id: str, body: RetryRequest, request: Request,
     source = runtime.store.get(run_id, actor.actor_id)
     if not source.terminal:
         raise AgentConflictError("Only terminal Runs can be retried.")
-    if body.retry_type == "ANSWER_REGENERATION":
-        if body.invocation_run_id or not any(o.kind == "TOOL_RESULT" and o.status == "SUCCEEDED" for o in source.observations):
-            raise AgentFailure("ANSWER_REGENERATION_NOT_ALLOWED")
-    else:
-        execution = next((e for e in source.executions if e.invocation_run_id == body.invocation_run_id), None)
-        if execution is None or execution.status != "FAILED" or not execution.retryable:
-            raise AgentFailure("TOOL_RETRY_NOT_ALLOWED")
+    execution = next((e for e in source.executions if e.invocation_run_id == body.invocation_run_id), None)
+    if execution is None or execution.status != "FAILED" or not execution.retryable:
+        raise AgentFailure("TOOL_RETRY_NOT_ALLOWED")
     run, replayed = runtime.store.submit(source.conversation_id, actor.actor_id, source.goal, key_value(idempotency_key),
         budget=request.app.state.agent_budget, retry_source=source, retry_type=body.retry_type,
         retry_invocation_id=body.invocation_run_id)
-    if run.status == "PENDING":
-        run = runtime.advance(run.agent_run_id, actor.actor_id)
-    return {"request_id": request.state.request_id, "data": {"agent_run": public(run), "idempotency_replayed": replayed}}
+    return accepted(run, replayed, request)

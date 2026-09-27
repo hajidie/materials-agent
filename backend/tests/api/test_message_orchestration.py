@@ -1,6 +1,8 @@
+from backend.tests.agent_state import post_message, post_operation
 from backend.tests.agent_inspection import stored_run
 from sqlalchemy import func, select
-from materialsagent.infrastructure.db.agent import AgentRunRow, AgentObservationRow, FinalAnswerRow
+from materialsagent.infrastructure.db.agent import AgentRunRow, AgentObservationRow
+from materialsagent.infrastructure.db.conversation_task import MessageRow
 from materialsagent.infrastructure.llm.agent_model import MockAgentModel
 
 
@@ -14,7 +16,7 @@ def client_and_conversation(harness, model=None):
 def test_new_message_executes_tool_then_decides_and_persists_answer(api_harness):
     client, conversation_id = client_and_conversation(api_harness)
     with client:
-        response = client.post(f"/api/v1/conversations/{conversation_id}/messages",
+        response = post_message(client, f"/api/v1/conversations/{conversation_id}/messages",
             json={"mode": "NEW_RUN", "content_text": "1000 MPa 转 GPa"}, headers={"Idempotency-Key": "agent-api-convert"})
         assert response.status_code == 200, response.text
         run = stored_run(client, response.json()["data"]["agent_run"])
@@ -22,25 +24,24 @@ def test_new_message_executes_tool_then_decides_and_persists_answer(api_harness)
         assert len(run["executions"]) == 1
         assert run["observations"][0]["data"]["value"] == 1
         assert len(run["steps"]) == 2
-        replay = client.post(f"/api/v1/conversations/{conversation_id}/messages",
+        replay = post_message(client, f"/api/v1/conversations/{conversation_id}/messages",
             json={"mode": "NEW_RUN", "content_text": "1000 MPa 转 GPa"}, headers={"Idempotency-Key": "agent-api-convert"})
         assert stored_run(client, replay.json()["data"]["agent_run"])["final_answer"] == run["final_answer"]
         assert replay.json()["data"]["idempotency_replayed"]
     with api_harness.engine.connect() as connection:
         assert connection.scalar(select(func.count()).select_from(AgentRunRow)) == 1
         assert connection.scalar(select(func.count()).select_from(AgentObservationRow)) == 1
-        assert connection.scalar(select(func.count()).select_from(FinalAnswerRow)) == 1
+        assert connection.scalar(select(func.count()).select_from(MessageRow).where(MessageRow.phase == "answer")) == 1
 
 
 def test_regeneration_reuses_observation_without_executor(api_harness):
     client, conversation_id = client_and_conversation(api_harness)
     with client:
-        first = client.post(f"/api/v1/conversations/{conversation_id}/messages",
+        first = post_message(client, f"/api/v1/conversations/{conversation_id}/messages",
             json={"mode": "NEW_RUN", "content_text": "1000 MPa 转 GPa"}, headers={"Idempotency-Key": "agent-first"})
         run = stored_run(client, first.json()["data"]["agent_run"])
         assert run["status"] == "SUCCEEDED", (run["error_code"], run["steps"], run["observations"], run["pending_execution"])
-        regenerated = client.post(f"/api/v1/agent-runs/{run['agent_run_id']}/retry",
-            json={"retry_type": "ANSWER_REGENERATION"}, headers={"Idempotency-Key": "agent-regenerate"})
+        regenerated = post_operation(client, f"/api/v1/messages/{run['final_message_id']}/regenerate", headers={"Idempotency-Key": "agent-regenerate"})
         assert regenerated.status_code == 200, regenerated.text
         result = stored_run(client, regenerated.json()["data"]["agent_run"])
         assert result["status"] == "SUCCEEDED", result
@@ -52,7 +53,7 @@ def test_regeneration_reuses_observation_without_executor(api_harness):
 def test_removed_message_contract_rejected(api_harness):
     client, conversation_id = client_and_conversation(api_harness)
     with client:
-        response = client.post(f"/api/v1/conversations/{conversation_id}/messages",
+        response = post_message(client, f"/api/v1/conversations/{conversation_id}/messages",
             json={"submission_mode": "NEW_TASK", "content_text": "hi"}, headers={"Idempotency-Key": "old-mode"})
         assert response.status_code == 422
 
@@ -65,8 +66,6 @@ def test_managed_result_is_observed_then_converted(api_harness, monkeypatch):
     from backend.tests.agent_fakes import _Runtime
     runtime_tool = _Runtime()
     def respond(role, payload):
-        if role == "final_answer":
-            return {"text": "两个工具结果已完成。", "sources": [o["source"] for o in payload["observations"]]}
         results = [o for o in payload["observations"] if o["kind"] == "TOOL_RESULT"]
         if len(results) == 0:
             return {"type": "CallTool", "tool_name": "zta35g_sem_virtual_lab", "arguments": {
@@ -77,7 +76,7 @@ def test_managed_result_is_observed_then_converted(api_harness, monkeypatch):
             assert results[0]["source"] and "result_id" not in results[0]
             return {"type": "CallTool", "tool_name": "materials_unit_conversion", "arguments": {
                 "value": results[0]["data"]["yield_strength"]["value"], "from_unit": "MPa", "to_unit": "GPa"}}
-        return {"type": "Finish", "needs_synthesis": True}
+        return {"type": "Finish", "answer": "两个工具结果已完成。", "sources": [o["source"] for o in results]}
     with api_harness.create_client("agent-managed", agent_model=MockAgentModel(respond),
             tool_registry=build_tool_registry(runtime_tool), storage_service=_MemoryStorage()) as client:
         execution_errors = []
@@ -90,7 +89,7 @@ def test_managed_result_is_observed_then_converted(api_harness, monkeypatch):
                 execution_errors.append(traceback.format_exc())
                 raise
         monkeypatch.setattr(client.app.state.agent_runtime.tools, "execute", capture)
-        response = client.post(f"/api/v1/conversations/{conversation.conversation_id}/messages",
+        response = post_message(client, f"/api/v1/conversations/{conversation.conversation_id}/messages",
             json={"mode": "NEW_RUN", "content_text": "预测并换算性能"}, headers={"Idempotency-Key": "managed-two-tools"})
         assert response.status_code == 200, response.text
         run = stored_run(client, response.json()["data"]["agent_run"])

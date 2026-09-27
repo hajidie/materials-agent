@@ -1,3 +1,4 @@
+from backend.tests.agent_state import agent_run
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
@@ -30,7 +31,7 @@ def context_with_refs(repo, count=25):
             self.calls.append((scope, kind, identity))
             return descriptors[identity]
     service = MLResources(repo, Client())
-    current = AgentRun(conversation_id="conversation_1", actor_id="actor_1", source_message_id="user-message",
+    current = agent_run(conversation_id="conversation_1", actor_id="actor_1", source_message_id="user-message",
         goal="请分析数据")
     registry = SimpleNamespace(resolve=lambda _: REGISTRATION)
     return ResourceContextResolver(service, registry, None), current, descriptors

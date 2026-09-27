@@ -132,7 +132,7 @@ def test_real_restart_reconciles_original_upload_or_scope_close(resources_platfo
                 assert response.status_code == 503, response.text
                 assert response.json()["error"]["code"] == "CONVERSATION_DELETE_PENDING"
                 blocked = http.post(f"/api/v1/conversations/{scope}/messages", headers={"Idempotency-Key": "new-work"},
-                    json={"mode": "NEW_RUN", "content_text": "must be fenced"})
+                    json={"content_text": "must be fenced"})
                 assert blocked.status_code == 409, blocked.text
                 assert http.post(prefix + "/resources", json={"resource_type": "dataset", "resource_id": "anything"}).status_code == 409
                 if waiting:
@@ -237,7 +237,7 @@ def test_unknown_requires_terminal_receipt_before_conversation_delete(resources_
             "features": ["x", "z"], "target": "strength_MPa"}, "training")
         stopped = confirm(http, waiting)
         observation = next(o for o in stopped["observations"] if o["kind"] == "TOOL_RESULT")
-        assert observation["error"]["code"] == "MCP_OUTCOME_UNKNOWN" and stopped["final_answer"] is None
+        assert observation["error"]["code"] == "MCP_OUTCOME_UNKNOWN" and stopped["answer_message"] is None
         inv = f"/api/v1/agent-runs/{waiting['agent_run_id']}/invocations/{observation['invocation_run_id']}"
         assert http.delete(f"/api/v1/conversations/{scope}").status_code == 409
         receipt = http.post(inv + "/reconcile").json()["data"]["remote_receipt"]
@@ -254,24 +254,3 @@ def test_unknown_requires_terminal_receipt_before_conversation_delete(resources_
         assert checked["remote_receipt"]["resource"]["status"] == "CANCELLED"
         assert len(remote.get(f"/api/v1/scopes/{scope}/training-runs").json()["items"]) == 1
         assert http.delete(f"/api/v1/conversations/{scope}").status_code == 200
-
-
-def test_historical_migration_adopts_only_verified_owned_invocation(resources_platform, csv_payload):
-    import psycopg
-    backend, ml = resources_platform
-    with httpx.Client(base_url=backend.url, timeout=30, trust_env=False) as http, client(ml) as remote:
-        scope = conversation(http, "history")
-        data = remote.post(f"/api/v1/scopes/{scope}/datasets", headers={"Idempotency-Key": "data"},
-            files={"file": ("data.csv", csv_payload, "text/csv")}).json()
-        result(confirm(http, invoke(http, scope, "train_tabular_regression", {"dataset_id": data["id"],
-            "features": ["x", "z"], "target": "strength_MPa"}, "train")))
-        backend.stop(); backend.fault = "historical-migration"; backend.start(); backend.fault = None
-        settings = backend.settings
-        with psycopg.connect(host=settings["postgres_host"], port=settings["postgres_port"],
-            user=settings["postgres_user"], password=settings["postgres_password"], dbname=settings["postgres_db"]) as db:
-            found = db.execute("SELECT document FROM ml_scope_binding WHERE conversation_id=%s", (scope,)).fetchone()
-            assert found is not None, "Complete verified historical evidence was not adopted"
-            record = found[0]
-            assert record["source"].startswith("verified-history:") and record["scope_id"] == scope
-        # Migration recognition does not invent a ResourceRef or availability cache.
-        assert http.get(f"/api/v1/conversations/{scope}/ml/resources").json()["data"]["items"] == []

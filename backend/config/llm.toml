@@ -36,25 +36,9 @@ timeout_seconds = 60
 
 [roles.agent_decision]
 temperature = 0.0
-max_tokens = 1024
+max_tokens = 4096
 reasoning_mode = "enabled"
 reasoning_effort = "high"
 prompt_limit_tokens =50000
 history_token_budget = 8192
-safety_margin_tokens = 1024
-
-[roles.tool_arg_resolution]
-temperature = 0.0
-max_tokens = 1024
-reasoning_mode = "disabled"
-prompt_limit_tokens = 8192
-history_token_budget = 4096
-safety_margin_tokens = 1024
-
-[roles.final_answer]
-temperature = 0.0
-max_tokens = 768
-reasoning_mode = "disabled"
-prompt_limit_tokens = 8192
-history_token_budget = 0
 safety_margin_tokens = 1024

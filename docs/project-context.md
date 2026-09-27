@@ -9,7 +9,7 @@
 Python 3.8 和旧模型依赖。SEM 与 EBSD 研究目录是只读外部模型包；Backend 不加载权重、不安装旧模型依赖。
 
 默认 Registry 注册材料单位换算 Standard Tool、ZTA35G SEM 虚拟实验与 EBSD 屈服强度预测 Managed Tool。请求宿主
-同步推进 AgentRun；AgentRuntime 应用层不依赖 HTTP，ZTA35G 模型 Runtime 通过受控 HTTP 合同接入。
+以异步请求推进 AgentRun；AgentRuntime 应用层不依赖 HTTP，ZTA35G 模型 Runtime 通过受控 HTTP 合同接入。
 Agent 平台本身没有后台 Worker、队列、Planner、多 Agent、WebSocket、SSE 或任意 checkpoint 接管；
 可选 Materials ML 训练 Worker 是独立领域进程，不推进或接管 AgentRun。生产 Catalog 拒绝 Side-effect Tool。
 
@@ -19,14 +19,14 @@ Agent 平台本身没有后台 Worker、队列、Planner、多 Agent、WebSocket
                           │                 │                                      ↓
                           └──── Observation ┴─────────────────────────────────可信工具结果
                                             ├─ AskUser → 持久化等待 → 用户输入恢复
-                                            └─ Finish → Final Response Policy → FinalAnswer
+                                            └─ Finish → 校验来源 → 原子发布回答消息
 ```
 
 ## 领域分层
 
-AgentRun 保存目标、来源消息、版本和 claim、预算快照、累计 Token/活跃时间/执行数、Steps、等待项、
-参数草稿、Invocation 关联、Observations、FinalAnswer 和重试来源。Step 是有序决策尝试；失败尝试
-也占步骤额度。DecisionEngine 只接受 CallTool、AskUser、Finish 三种动作，未知动作终止运行。
+AgentRun 保存来源消息 ID、固定历史消息 ID、版本和 claim、预算快照、累计 Token/活跃时间/执行数、Steps、问题消息 ID 与等待版本、
+参数草稿、Invocation 关联、Observations、回答消息 ID 和重试来源。消息正文只在 Message 保存，Run 按需读取。Step 是有序决策尝试；失败尝试
+也占步骤额度。DecisionEngine 只接受 CallTool、AskUser、Finish 三种动作，无效动作按下文的有界纠正规则处理。
 
 Standard Tool 只创建 Invocation。Managed Tool 保留 Task → InputRevision → ToolRun → ToolResult →
 Asset 子任务链路。每个 Managed 调用有自己的来源身份，不能拼接不同 ToolRun 的性能、图像或解释。
@@ -37,18 +37,19 @@ Invocation 的幂等键来自 AgentAction（Step ID），不再以单条消息�
 
 旧 Router、消息补参服务、固定 Explanation、旧 Task/Invocation 写 API、Native Tool Calling
 独立执行路径已删除。迁移 0022 同步移除旧 llm_call、natural_language_explanation 表、关联字段与映射；
-Agent Loop 的模型计量和最终回答分别写入 agent_model_call、agent_final_answer。
+Agent Loop 的模型计量写入 agent_model_call；迁移 0023 删除 agent_final_answer，回答统一保存到 Message。
+0023 要求先通过受控删除流程清空历史 Agent 对话，不转换旧补参或最终回答。降级不会恢复被删除的数据。
 运行记录通过 agent_runs 路由和前端 api/agent 查询；结果、资产和对话共享类型保留在 api/types。
 
 ## 状态与事务
 
 PENDING → RUNNING → WAITING_FOR_USER / WAITING_FOR_CONFIRMATION / SUCCEEDED / TERMINATED。
-两个业务等待状态可恢复，其他终态保持只读。FinalAnswer、assistant Message 和 Run 成功状态在
+两个业务等待状态可恢复，其他终态不能继续模型循环。回答 Message、Step 来源和 Run 成功状态在
 同一短事务提交。HTTP 发送失败不能回滚业务成功；重放返回已保存答案。
 
 Run version + claim 决定唯一推进者；Invocation 另有 version/status/claim CAS。派发 marker 在
 外部调用前提交。LLM、Runtime 和 MinIO 调用期间不持有数据库事务或锁。外部结果返回后的领域
-提交会复核当前 Run 所有权，过期执行者不能覆盖终态或新状态。lease 到期不允许重新派发。
+提交会复核当前 Run 所有权；USER_STOPPED 只允许原 claim 与已派发 Invocation 的回执写入，不授予决策或新派发权。lease 到期不允许重新派发。
 
 现有 Managed ResultService 和 Invocation 使用独立短事务，结果与 Observation 存在分段提交。
 Runtime 在下一次决策前实施一致性门禁；丢失返回值时，Gateway.repair 仅从已提交的 Invocation /
@@ -60,42 +61,47 @@ Runtime、不重新上传 MinIO、不调用 LLM；无法修复则终止并保留
 
 ## 工具参数与人工参与
 
-INTENT_CLARIFICATION 澄清目标或下一步；TOOL_ARGUMENT_CLARIFICATION 针对已经绑定的工具。
-Agent 可以主动询问真实存在且未可靠确定的字段；应用检查工具绑定、Schema 字段、已知值和
-Resolver 状态。公共补参问题由实际字段生成，避免模型虚构必填条件、范围或默认值。
+AskUser 仅包含 question，在普通助手消息中发布问题，同时更新 WAITING_FOR_USER、question_message_id 和 waiting_version。
+前端自动关联当前问题，用户在原输入框回复；POST messages 携带 reply_to.question_message_id 与 waiting_version。
+短事务校验身份和版本后接受用户消息，原 Run 进入 PENDING；后续 advance 使用同一个主模型循环。
+不单独调用补参模型，不重置 Run 预算，不把问题分类为独立业务状态。
 
-独立 ToolArgResolver 负责规范化、合并和校验。初次 CallTool 直接校验候选参数，不额外调用 LLM。
-恢复时仅让 tool_arg_resolution 模型从用户新增输入提取一次增量，然后确定性处理。
-Missing / Invalid / Conflict / Ambiguous 成为参数事实，Agent 不能自行覆盖；参数解析结果作为
-Observation 回流。Managed 使用 Task/InputRevision，Standard 使用 Run 参数草稿。
-Resolver 已确定参数状态后，AskUser 可以原样复述无 issue 的规范化已知值，但不会合并回草稿；
-改值、为未解决字段补值或询问已可靠确定的字段仍按协议冲突终止。
+CallTool 每次提交完整参数与当前 ContextFrame 的资源引用。ToolArgResolver 只做规范化和确定性校验，
+不合并上一轮增量、不替模型选择资源或工具。Missing / Invalid / Conflict / Ambiguous 作为 Observation / draft 事实回流；
+模型根据目标、用户回复与这些事实决定提问、重新提交完整 Proposal 或结束。只有合法 Managed 参数创建 Task/InputRevision。
+确认仍绑定 Invocation、参数指纹与确认版本；重新授权后执行。仅 test/dev Fake Tool 验证副作用确认。
 
-AskUser 持久化 waiting_version 后结束当前请求。恢复必须携带原 Run ID、waiting_version 和新增
-文本，不能悄悄更换工具或重置预算。需要确认时绑定 Invocation、有效参数指纹和确认版本；确认
-时重新授权，参数变化、过期或拒绝终止运行。仅 test/dev Fake Tool 验证副作用确认流程。
+## 最终回答、中止与重试
 
-## 最终回答与重试
+Finish 必须包含完整且非空的 answer，sources 只能引用当前调用提供的可信结果标签。
+应用校验来源、参数状态和预算后直接发布回答；没有二次最终回答调用或 Presenter 自动替代回答。
+Message 使用对话内 sequence 排序；助手消息 phase 区分 question、answer 和 notification。
+答案的 answer_root_message_id 与 answer_version 约束同一位置的版本，正文只保存一份。
 
-Final Response Policy 根据 Finish 的完整答案、可直接展示的 Presenter 结果以及是否需要综合
-Observation 决定是否调用 FinalAnswerGenerator。Managed/Standard 类型不决定生成次数。
-所有最终回答必须经过 Finish 和 FinalAnswer 持久化。
+POST messages / messages/{id}/regenerate / agent-runs/{id}/retry 先返回 202 和 submission_id；
+POST agent-runs/{id}/advance 由请求宿主推进，返回完整 JSON。当前没有流式消息，客户端 AbortSignal 为未来流式传输保留。
+POST agent-runs/{id}/stop 校验提交身份，以短事务和 CAS 提交 USER_STOPPED，再取消原生异步 Provider 请求。
+停止后保留已发布内容，禁止后续决策与新工具派发。已派发 GPU/ML 计算继续，回执独立保存；
+停止期间取得的结果以通知消息发布。启动恢复只核查已提交结果，不重新派发；未确定结果继续保留回执与删除 fence。
+前端输入框在生成期间将 Send 切换为圆形 Stop，不能重复发送，确认停止或正常完成后恢复 Send。
 
-Tool Retry 仅针对失败且可重试的 Invocation，创建新 AgentRun 和 Invocation 并记录来源；Managed
-重试沿用原 Task、有效 Revision，生成新 attempt 和 seed。结果不确定的超时或协议失败不能作为
-可安全重试失败。成功结果重算属于新目标，不提供 RECOMPUTE 类型。
+Tool Retry 只针对失败且可重试的 Invocation，创建新 AgentRun 和 Invocation；Managed 重试沿用原 Task、
+有效 Revision，生成新 attempt 和 seed。结果不确定不能视为可安全重试。成功结果重算属于新目标。
 
-Answer Regeneration 只导入可信成功 Observation，设置 tool_execution_disabled，给 DecisionEngine
-空工具集合；模型若返回 CallTool 则按协议终止，执行边界再次拒绝派发。仍经过决策、Finish、
-Final Response Policy、预算和持久化流程。
+每条助手消息有复制操作，已完成回答另外有重新生成操作。重新生成以被点击的 message_id / 版本为来源，
+冻结原请求上下文与可信 Observation，创建受限 Run，不追加虚构用户消息。DecisionEngine 注入空工具集合，
+输出与执行边界都禁止 CallTool，AskUser 也不允许。只有成功发布才追加同一 root 的新版本；旧版本可查看、复制和作为再生成来源，
+查看旧版本不改变会话上下文。后续新目标采用接受时的最新版本。
 
 ## 预算与模型适配
 
-默认预算：12 个动作步骤、4 次工具执行、3600 秒活跃时间、32000 Token；Standard timeout 10 秒，
+模型响应格式或动作 Schema 校验失败时，Loop 可回到同一个 Decision 模型纠正一次；连续两次无效即终止。纠正消耗正常步骤与 Token 预算，不回传原始响应、不重执行已完成工具。相同完整参数的成功执行再次被提出时，门禁只反馈一次已有结果，不创建新 Task/Invocation；继续重复则终止。
+
+默认预算：12 个动作步骤、4 次工具执行、3600 秒活跃时间、64000 Token；Standard timeout 10 秒，
 ZTA35G timeout 1200 秒。创建 Run 时固化配置；等待用户/确认不计活跃时间，恢复不重置预算。
 外部调用 timeout 取单次配置与 Run 剩余时间的较小值。超时不宣称远端 GPU 已被取消。
 
-三种模型角色为 agent_decision、tool_arg_resolution、final_answer，受控 DeepSeek/Qwen 目录和
+业务模型仅使用 agent_decision 角色，提问、工具选择与最终回答共用一个循环；普通决策与回答再生成有独立 Context Profile。受控 DeepSeek/Qwen 目录和
 参数能力声明位于 backend/config/llm.toml。LangChain 仅实现模型适配，不能独立决定工具执行。
 训练 Proposal 不开放 `units`：该远端可选字段是已登记单位的相等断言，不是单位声明入口。
 ML Service 从数据集不可变元数据继承单位；null 表示未登记。Agent 可从字段名或用户原文推断单位，
@@ -105,14 +111,14 @@ ArgumentDraft、ExecutionRecord 和 Observation；不传入 ML `units`，不写�
 确定性有效性只基于已绑定资源、真实数值字段、受支持的单位系统以及 declared/confirmed metadata。
 所有仅由模型推断且未声明/确认的单位都进入通用补参流程；evidence 仅是 provenance 与结果说明，缺失、自由措辞或不包含字段名都不单独决定有效性。
 已登记/可信确认事实优先，冲突保留说明；执行确认不等于单位确认。
-换算的单位澄清回复由 Tool Argument 提取明确的 from_unit/to_unit 增量，Backend 仅在当前单位问题
-中建立临时 confirmed 事实；未明确单位的回复不解除限制，改变数值单位参数会使该确认失效。
+模型通过 CallTool.user_unit_assertions 提交用户原文中的明确单位、当前用户输入标签及原文证据。Backend 校验当前消息、
+证据、单位系统及最终绑定资源/列后建立临时 confirmed 事实；不能用模糊确认替代明确单位，改变绑定或单位会使确认失效。
 Result Projection 保留 provenance 和原文依据，最终消息与只读 Viewer 从对应执行事实读取注解；
 原始指标与 canonical 单位不变，推断不能冒充已登记事实或跨资源复用。预检领域拒绝按白名单
 投影具体原因，不能误报为连接失败；工具失败只展示一次结果说明，不叠加通用 Run 错误。
-决策上下文上限为 50000，补参与最终解释为 8192；均扣除 1024 安全余量并预留输出。
+主模型上下文上限为 50000，扣除 1024 安全余量并预留最多 4096 输出。
 完整工具目录与当前附件的首轮请求覆盖 UTF-8 保守估算回归；超限仍裁剪历史与候选，不能绕过 Run 总预算。
-MockAgentModel 只实现固定离线规则和 JSON 补参增量；自然语言多工具编排由 Provider 决策验证。
+MockAgentModel 只实现有限离线协议夹具和完整参数 Proposal；自然语言多工具编排由 Provider 决策验证。
 
 统一 Usage 优先 Provider input/output/reasoning/total；reasoning 已包含在 completion/total 中时
 不重复累计。缺失 Usage 使用版本化 cl100k-x2-or-utf8-framing-v1 保守估算，标记 estimated；不能
@@ -125,7 +131,7 @@ Conversation Context 来自同一对话的最近 20 条消息，包括追加的�
 Provider 原文、隐藏思维链、图片 bytes、内部路径、权重或 Secret。
 
 重复执行指纹由 Tool ID、版本、schema hash 和规范化有效参数组成；同一 Run 成功执行过相同指纹
-则 DUPLICATE_TOOL_CALL 终止。Backend 自动生成的 seed 不进入指纹，不能绕过检测。
+则拒绝重复派发并反馈已有结果；同一推进中继续提出该指纹时以 DUPLICATE_TOOL_CALL 终止。Backend 自动生成的 seed 不进入指纹，不能绕过检测。
 
 ## Tool 与 Runtime 合同
 
@@ -178,11 +184,10 @@ Profile 声明输入字段白名单、输出 JSON Schema 与安全约束；共�
 | Profile | 模型输入 | 输出与约束 |
 |---|---|---|
 | Decision | 用户需求、语义历史、授权工具、资源摘要、结果投影 | CallTool/AskUser/Finish；禁止内部对象参数 |
-| Tool Argument | 固定工具 Schema、草稿、受控资源上下文、新增输入 | 仅允许当前工具的参数增量或临时 resource_ref；领域 normalizer 校验值 |
-| Result Explanation | 用户问题、投影事实与临时结果标签 | text/sources；无工具执行权限，不接受原始结果 |
+| Answer Regeneration | 原请求的固定语义历史、用户回复、可信结果投影 | 仅允许 Finish；空工具集合，不能新增执行或提问 |
 | Recovery | 已核验说明、事实、未知项、允许建议 | summary/guidance；仅解释，不能授权重派发 |
 
-当前有前三类模型调用；Recovery 合同已定义，既有确定性回执核查不因此增加模型请求。
+当前业务调用使用前两类 Profile 和同一个主模型角色；Recovery 合同已定义，既有确定性回执核查不因此增加模型请求。
 Profile 输出校验后才转换为 Runtime 内部动作。临时“结果 N”标签在本次调用内映射 Observation，
 模型不会看到真实来源 ID。重试、补参和回答再生成经过同一边界；执行重试只复核原冻结身份。
 
@@ -194,20 +199,21 @@ Result Presenter/Projection 是确定性白名单函数：ToolResult → 用户�
 
 `POST conversations/{id}/attachments` 接收 multipart 单文件与 Idempotency-Key，复用 CSV 和 EBSD 上传服务。
 CSV 沿用 20 MiB 限制；PNG/JPEG 仍要求单帧 RGB、正方形 128–4096 像素、最大 10 MiB，不裁剪重编码。
-`POST conversations/{id}/messages` 使用 NEW_RUN/RESUME_RUN 与 `attachments`（最多一个）。
+`POST conversations/{id}/messages` 使用 content_text、可选 reply_to 与 `attachments`（最多一个）。
 附件包含受控传输引用、类型与名称，计入幂等摘要，保存到来源消息并校验同 actor/Conversation、类型与状态。
 EBSD 内部执行仍冻结 Asset 身份，但模型只看到 image_reference；旧 ebsd_asset_id 消息字段不再接受。
 上传结果不确定时显式 POST attachments/reconcile 核查原键，不自动重复上传；解除草稿关联不删除文件。
 
-GET AgentRun 返回普通展示 DTO：消息、语义结果、确认摘要与必要传输句柄；不返回原始结果、草稿、调用记录或资源快照。
+GET messages 返回消息时间线与每个回答的最新版本；GET messages/{id}/versions 按需读取历史版本。
+GET AgentRun 返回普通展示 DTO：运行进度、消息引用、语义结果、确认摘要与必要传输句柄；不返回原始结果、草稿、调用记录或资源快照。
 `GET agent-runs/{id}/trace` 仅在显式本地开发诊断开关下提供。确认/拒绝/重试沿用现有版本与权限边界。
 内部 ID 可用于受控 API 寻址，不出现在可见文案或模型上下文。前端仅保留对话列表与聊天工作区。
 
 `ArtifactViewer` 从消息附件/结果卡片打开，提供图片、数据概况、指标、预测预览和受控下载。
 查看 GET、预览、关闭与下载不调用模型、不登记资源/血缘、不发布消息、不刷新用户选择或工具绑定。
 详情与消息必须同归属；Dataset 下载保留原 CSV，Prediction 下载转换为只含行、数值、单位的 CSV。
-没有资源中心、分类管理侧栏、训练配置页面。sessionStorage 的 v2 草稿/待提交格式隔离对话及补参目标，
-移除失效 v1 格式；不保存文件内容。中文 IME、原键恢复、焦点和删除 fence 继续由聊天组件统一处理。
+没有资源中心、分类管理侧栏、训练配置页面。sessionStorage 的 v3 草稿/待提交格式隔离对话及提问目标，
+移除失效 v1/v2 消息格式；不保存文件内容。中文 IME、原键恢复、焦点和删除 fence 继续由聊天组件统一处理。
 
 本地栈由 scripts/dev/local-dev.ps1 管理；Mock 与真实模式独立选择。任一 ML 功能开关启用时，
 同一入口在独立 ML Python 3.11 环境执行迁移并托管 ML Service/Worker，不把其依赖或凭据并入 Backend。
@@ -427,7 +433,7 @@ retryable=false、outcome=UNKNOWN，并说明“远端操作结果尚未确认�
 
 GET `/api/v1/agent-runs/{run_id}/invocations/{id}/receipt` 与 POST 同前缀 `/reconcile` 验证平台所有权，
 不占 Tool Budget。仅 Unknown 写操作可显式 reconcile；核查结果以版本 CAS 追加，不改变 Invocation 历史终态、
-AgentRun、Observation 或 FinalAnswer。较晚失败查询不抹去已确认资源，迟到并发查询不能覆盖更新事实。
+AgentRun、Observation 或既有回答消息。较晚失败查询不抹去已确认资源，迟到并发查询不能覆盖更新事实。
 启动时分批收敛旧 RUNNING 为 Unknown/预派发失败，再最多核查 20 条 Unknown 并复用既有 Observation 修复。
 远端 IO 不进入数据库事务，不增加后台 Worker、持续查询队列或自动恢复 Agent。
 
@@ -469,7 +475,7 @@ ML 原子提交 CLOSED 与清理意图；关闭永久生效，拒绝迟到创建
 
 历史 MCP scope 补建只接受完整 actor/Conversation/AgentRun/Message 归属、批准 binding、
 可信结果或匹配原 digest 的 receipt 及一致 scope。迁移无远端 IO；证据不足不纳管，须显式核验登记。
-Unknown 即使未纳管也不能绕过 BUSY。核查不改写 Invocation/Observation/FinalAnswer，不自动恢复 Agent。
+Unknown 即使未纳管也不能绕过 BUSY。核查不改写 Invocation、Observation 或既有 Message，不自动恢复 Agent。
 
 ### 可信资源上下文与自然语言引用
 
@@ -487,7 +493,7 @@ Dataset ordinal 与受信的 schema/单位摘要，不看到平台 ID、远端 I
 已确认、已派发或重试使用 `resource-binding-v1` 冻结绑定，派发前复核原身份，不再让模型选择。
 
 确定回执或经核验的模型血缘登记仍走原 ResourceRef/fence/epoch CAS。Unknown 只显式核查原操作，
-不重派发、不重写 Observation/FinalAnswer、不恢复旧 Run。ResourceRef 是身份事实，不是可用性缓存。
+不重派发、不重写 Observation 或既有回答消息、不恢复旧 Run。ResourceRef 是身份事实，不是可用性缓存。
 `ENABLE_MATERIALS_ML_RESOURCE_CONTEXT` 默认关闭，仅 local/test 与 MCP/Resource 配置齐全时开启；
 关闭时 Runtime 不向模型提供这些资源工具。底座直接执行的内部合同不因此更改。
 
@@ -500,14 +506,17 @@ Dataset ordinal 与受信的 schema/单位摘要，不看到平台 ID、远端 I
 
 迁移 0020 给 Message 增加可空 event_key 和对话内唯一约束。外部核验/必要模型血缘登记在事务外，
 确定终态与语义投影后，短事务锁同 Conversation、核对 fence/epoch、按终态事件去重并追加助手消息。
-并发轮询、多标签页与丢失回包不会重复发布；原启动回答、FinalAnswer、Observation 与回执保持不变。
+并发轮询、多标签页与丢失回包不会重复发布；既有消息正文、Observation 与回执保持不变。
+回答重新生成只在用户显式操作后追加新版本，不改写旧消息正文。
 追加结果进入后续 Message 历史，模型能够解释真实指标而非只看到提交说明。
 
 ### 合同升级与旧业务数据
 
 保留全部 schema migration history；没有旧 DTO、Proposal、Snapshot 或消息格式的兼容读取路径。
 停止本地服务和新派发后，先运行 `scripts/dev/upgrade-chat-data.py` 输出全部不兼容聚合的目标清单、数量与阻塞原因。
-可使用 `--apply --all-incompatible` 对完整预检集执行一次明确批准的批量清理，或用 `--conversation <精确 ID>` 限定集合；两者不能混用。
+可使用 `--apply --all-incompatible` 清理完整不兼容预检集，或用 `--conversation <精确 ID>` 限定集合。
+0023 升级和降级要求没有 AgentRun；仅清理不兼容数据不足以满足这一门禁。
+经明确授权清空当前本地用户全部对话时，先用 `--all-conversations` 预检，再加 `--apply` 执行；三个目标模式互斥。
 清理复用聚合删除、ML scope close 和受限对象清理，完成后再执行正常 Alembic upgrade head。
 升级脚本不启动应用生命周期恢复，只消费本次删除返回的 cleanup ID；旧消息未清理的对话拒绝新提交。
 活动工作、未知回执/上传、删除 fence 或归属不明时停止，不强删、不取消、不重派发，不清空共享卷或迁移表。

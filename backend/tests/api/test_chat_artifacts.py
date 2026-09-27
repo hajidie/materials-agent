@@ -1,3 +1,4 @@
+from backend.tests.agent_state import post_message
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from threading import Event
@@ -17,7 +18,7 @@ from backend.tests.api.test_message_orchestration import client_and_conversation
 def chat(api_harness):
     client, conversation = client_and_conversation(api_harness)
     with client:
-        view = client.post(f"/api/v1/conversations/{conversation}/messages", json={"mode": "NEW_RUN", "content_text": "1000 MPa 转 GPa"},
+        view = post_message(client, f"/api/v1/conversations/{conversation}/messages", json={"mode": "NEW_RUN", "content_text": "1000 MPa 转 GPa"},
             headers={"Idempotency-Key": "original"}).json()["data"]["agent_run"]
         sessions = client.app.state.agent_runtime.store.sessions
         with sessions.begin() as session:
@@ -49,7 +50,7 @@ def chat(api_harness):
         resources = MLResources(MLResourceRepository(sessions), remote)
         with resources.repo.transaction("agent-test", conversation, writable=True) as tx:
             ref = tx.register(remote.service, descriptor, source)
-            message = tx.session.get(MessageRow, view["final_answer"]["answer_id"])
+            message = tx.session.get(MessageRow, view["final_message_id"])
             message.structured_content = {**message.structured_content, "artifacts": [{"attachment_id": ref["reference_id"], "kind": "training_run", "name": "训练结果"}]}
         yield ChatArtifacts(sessions, resources), remote, conversation, view, ref
 
@@ -61,7 +62,7 @@ def test_view_is_read_only_even_when_training_completed(chat):
         before = deepcopy(session.get(AgentRunRow, run["agent_run_id"]).document)
     with service.resources.repo.transaction("agent-test", conversation) as tx:
         references = tx.rows("reference")
-    value = service.view("agent-test", conversation, run["final_answer"]["answer_id"], ref["reference_id"])
+    value = service.view("agent-test", conversation, run["final_message_id"], ref["reference_id"])
     assert "SUCCEEDED" not in str(value["presentation"]) and "model-private" not in str(value["presentation"])
     assert service.messages("agent-test", conversation) == []
     with service.resources.repo.transaction("agent-test", conversation) as tx:
@@ -69,7 +70,7 @@ def test_view_is_read_only_even_when_training_completed(chat):
     with service.sessions() as session:
         assert session.get(AgentRunRow, run["agent_run_id"]).document == before
     with pytest.raises(ResourceNotFoundError):
-        service.view("other-actor", conversation, run["final_answer"]["answer_id"], ref["reference_id"])
+        service.view("other-actor", conversation, run["final_message_id"], ref["reference_id"])
     with pytest.raises(ResourceNotFoundError):
         service.view("agent-test", conversation, run["source_message_id"], ref["reference_id"])
 
@@ -122,7 +123,7 @@ def test_inferred_units_survive_completion_and_read_only_model_view(chat):
     with service.sessions.begin() as session:
         execution = session.scalar(select(AgentExecutionRow))
         execution.document = {**execution.document, "unit_annotations": [annotation]}
-        old_message = deepcopy(session.get(MessageRow, run["final_answer"]["answer_id"]).content_text)
+        old_message = deepcopy(session.get(MessageRow, run["final_message_id"]).content_text)
     remote.state = "SUCCEEDED"
     messages = service.observe("agent-test", conversation)["messages"]
     assert len(messages) == 1 and "模型语义推断" in messages[0]["text"] and "strength_MPa" in messages[0]["text"]
@@ -136,7 +137,7 @@ def test_inferred_units_survive_completion_and_read_only_model_view(chat):
     with service.resources.repo.transaction("agent-test", conversation) as tx:
         assert references == tx.rows("reference")
     with service.sessions() as session:
-        assert session.get(MessageRow, run["final_answer"]["answer_id"]).content_text == old_message
+        assert session.get(MessageRow, run["final_message_id"]).content_text == old_message
     assert remote.units == {"strength_MPa": None}
     next_run, _ = SQLAlchemyAgentStore(service.sessions).submit(conversation, "agent-test", "解释单位", "unit-follow-up")
     assert any("模型语义推断" in item["content"] for item in next_run.context)
@@ -145,10 +146,10 @@ def test_inferred_units_survive_completion_and_read_only_model_view(chat):
 def test_public_run_has_no_raw_tool_result_or_diagnostics(api_harness):
     client, conversation = client_and_conversation(api_harness)
     with client:
-        response = client.post(f"/api/v1/conversations/{conversation}/messages", json={"mode": "NEW_RUN", "content_text": "1000 MPa 转 GPa"}, headers={"Idempotency-Key": "safe"})
+        response = post_message(client, f"/api/v1/conversations/{conversation}/messages", json={"mode": "NEW_RUN", "content_text": "1000 MPa 转 GPa"}, headers={"Idempotency-Key": "safe"})
         run = response.json()["data"]["agent_run"]
         assert run["observations"][0]["presentation"]["facts"]["value"] == 1
         assert not {"resource_snapshot", "draft", "calls", "steps", "error_code"} & run.keys()
         assert not {"data", "result_summary", "invocation_run_id", "error"} & run["observations"][0].keys()
         assert client.get(f"/api/v1/agent-runs/{run['agent_run_id']}/trace").status_code == 404
-        assert client.post(f"/api/v1/conversations/{conversation}/messages", json={"mode": "NEW_RUN", "content_text": "旧格式", "ebsd_asset_id": "old"}, headers={"Idempotency-Key": "old"}).status_code == 422
+        assert post_message(client, f"/api/v1/conversations/{conversation}/messages", json={"mode": "NEW_RUN", "content_text": "旧格式", "ebsd_asset_id": "old"}, headers={"Idempotency-Key": "old"}).status_code == 422

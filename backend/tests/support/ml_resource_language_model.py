@@ -11,6 +11,10 @@ def respond(role, payload):
         return values
 
     def choose(kind, text="", *, default="latest"):
+        # This finite transcript models a clarification reply replacing the
+        # original unresolved choice while retaining the original tool intent.
+        if payload.get("user_inputs"):
+            text = payload["user_inputs"][-1]
         values = candidates(kind)
         if not values:
             return {"unresolved": True}
@@ -26,21 +30,14 @@ def respond(role, payload):
             selected = values[0]
         return {"resource_ref": selected["resource_ref"]}
 
-    if role == "tool_arg_resolution":
-        text = payload.get("user_input", "")
-        return {field: choose("dataset", text) for field in payload["question"]["fields"]}
-    if role == "final_answer":
-        return {"text": "已完成本次工具调用。", "sources": [o["source"] for o in payload["observations"]]}
+    assert role == "agent_decision"
     results = payload["observations"]
     if results:
-        return {"type": "Finish", "sources": [o["source"] for o in results]}
+        return {"type": "Finish", "answer": "已完成本次工具调用。", "sources": [o["source"] for o in results]}
+    text = " ".join([payload["goal"], *payload.get("user_inputs", [])])
     draft = payload.get("draft")
-    if draft:
-        if draft["issues"]:
-            return {"type": "AskUser", "reason": "TOOL_ARGUMENT_CLARIFICATION", "question": "请选择输入",
-                "tool_name": draft["tool_name"], "fields": list(draft["issues"])}
-        return {"type": "CallTool", "tool_name": draft["tool_name"], "arguments": {}}
-    text = payload["goal"]
+    if draft and draft["issues"] and not payload.get("user_inputs"):
+        return {"type": "AskUser", "question": "请选择输入"}
     if "预测" in text:
         tool, args = "predict_with_model", {"model_reference": choose("model", text),
             "input_dataset_reference": choose("dataset", text)}

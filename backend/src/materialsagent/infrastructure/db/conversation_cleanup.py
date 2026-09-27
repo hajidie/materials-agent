@@ -292,6 +292,8 @@ class SQLAlchemyConversationLifecycleRepository:
             managed_ids = set()
             for row in linked:
                 document = row.document
+                if (document.get("pending_execution") or {}).get("dispatched"):
+                    return True
                 for record in [document.get("draft"), document.get("pending_execution"), *document.get("executions", []), *document.get("observations", [])]:
                     if record and record.get("task_id"):
                         managed_ids.add(record["task_id"])

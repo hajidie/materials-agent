@@ -3,13 +3,14 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 import time
+import asyncio
 from typing import Any, Callable
 
 from pydantic import ValidationError
 
 from materialsagent.domain.models.agent import (
     ACTION_ADAPTER, AgentRun, AgentStep, AskUser, CallTool, ExecutionRecord,
-    FinalAnswer, Finish, ModelCall, Observation, canonical, fingerprint, identifier, now,
+    Finish, ModelCall, Observation, canonical, fingerprint, identifier, now,
 )
 from materialsagent.domain.ports.agent import (
     AgentConflictError, AgentFailure, AgentModelPort, AgentStore, AgentToolGateway,
@@ -17,22 +18,6 @@ from materialsagent.domain.ports.agent import (
 from materialsagent.domain.models.ml_resource_context import model_observation, model_draft, PROTOCOL_VERSION
 from .context_framework import ContextFramework
 from .result_projection import project_result, FIELD_LABELS
-
-
-class FinalResponsePolicy:
-    """Answer completeness is explicit; execution profile is irrelevant."""
-    @staticmethod
-    def direct(action: Finish, observations: list[Observation]) -> str | None:
-        if action.needs_synthesis:
-            return None
-        if action.answer and action.answer.strip():
-            return action.answer.strip()
-        if len(observations) == 1:
-            presentation = project_result(observations[0])
-            text = presentation.get("text") or presentation.get("summary")
-            if isinstance(text, str) and text.strip():
-                return text.strip()
-        return None
 
 
 class DecisionEngine:
@@ -44,13 +29,6 @@ class DecisionEngine:
             raise AgentFailure("AGENT_ACTION_PROTOCOL_ERROR") from None
 
 
-class FinalAnswerGenerator:
-    @staticmethod
-    def generate(run, observations, step, model_call):
-        return model_call("final_answer", {"goal": run.goal, "user_inputs": run.user_inputs,
-            "context": run.context, "observations": [], "selected_observation_ids": [o.observation_id for o in observations]}, step)
-
-
 class AgentRuntime:
     def __init__(self, store: AgentStore, model: AgentModelPort, tools: AgentToolGateway,
                  *, process_id: str | None = None, monotonic: Callable[[], float] = time.monotonic, clock: Callable[[], datetime] = now):
@@ -59,39 +37,65 @@ class AgentRuntime:
         self.monotonic = monotonic
         self.clock = clock
         self.context_framework = ContextFramework()
+        self.model_tasks = {}
+        self.stop_events = {}
+        self.receipt_tasks = set()
 
-    def advance(self, run_id: str, actor_id: str, *, waiting_version: int | None = None,
-                user_input: str | None = None, confirmation: bool | None = None) -> AgentRun:
-        run = self.store.get(run_id, actor_id)
-        if run.resource_protocol_version != PROTOCOL_VERSION:
-            raise AgentFailure("CONVERSATION_UPGRADE_REQUIRED")
-        if run.terminal or run.status == "RUNNING":
+    async def close(self):
+        for task in list(self.model_tasks.values()):
+            task.cancel()
+        if self.model_tasks:
+            await asyncio.gather(*self.model_tasks.values(), return_exceptions=True)
+        if self.receipt_tasks:
+            await asyncio.wait(list(self.receipt_tasks), timeout=30)
+
+    async def stop(self, run_id: str, actor_id: str, submission_id: str):
+        run, stopped = await asyncio.to_thread(self.store.stop, run_id, actor_id, submission_id)
+        key = (run_id, submission_id)
+        event = self.stop_events.get(key)
+        if stopped and event is not None:
+            event.set()
+        task = self.model_tasks.get(key)
+        if stopped and task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass  # The persisted stop is authoritative even if the request also failed.
+        return run, stopped
+
+    async def advance(self, run_id: str, actor_id: str, *, submission_id: str | None = None,
+                      waiting_version: int | None = None, confirmation: bool | None = None) -> AgentRun:
+        run = await asyncio.to_thread(self.store.get, run_id, actor_id)
+        if submission_id is not None and run.submission_id != submission_id:
+            raise AgentConflictError("Submission is stale.")
+        if run.terminal or run.status in {"RUNNING", "WAITING_FOR_USER"}:
             return run
-        resuming_arguments = False
-        if run.status.startswith("WAITING_"):
-            if waiting_version != run.waiting_version:
-                raise AgentConflictError("Waiting version is stale.")
-            if run.status == "WAITING_FOR_USER":
-                if not user_input or not user_input.strip() or confirmation is not None:
-                    raise AgentConflictError("A user response is required.")
-                resuming_arguments = bool(run.waiting and run.waiting.reason == "TOOL_ARGUMENT_CLARIFICATION")
-                run.user_inputs.append(user_input)
-            elif confirmation is None or user_input is not None:
-                raise AgentConflictError("An Invocation confirmation is required.")
-        elif user_input is not None or confirmation is not None:
-            raise AgentConflictError("Run is not waiting.")
+        if run.status == "WAITING_FOR_CONFIRMATION":
+            if waiting_version != run.waiting_version or confirmation is None:
+                raise AgentConflictError("Confirmation version is stale.")
+        turn_key = (run_id, run.submission_id)
+        stopped_event = self.stop_events.setdefault(turn_key, asyncio.Event())
         run.status, run.claim, run.process_id = "RUNNING", identifier(), self.process_id
-        self.store.save(run)  # The only owner proceeds beyond this CAS.
+        try:
+            await asyncio.to_thread(self.store.save, run)  # Exactly one request owns advancement.
+        except AgentConflictError:
+            current = await asyncio.to_thread(self.store.get, run_id, actor_id)
+            if current.terminal:
+                self.stop_events.pop(turn_key, None)
+            return current
         last = self.monotonic()
         resources = getattr(self.tools, "resource_context", None)
 
-        def persist() -> None:
+        async def persist() -> None:
             nonlocal last
             current = self.monotonic()
             run.active_seconds += max(0, current - last)
             last = current
             run.updated_at = now()
-            self.store.save(run)
+            await asyncio.to_thread(self.store.save, run)
 
         def remaining_time() -> float:
             return run.budget.max_active_seconds - run.active_seconds - max(0, self.monotonic() - last)
@@ -104,17 +108,24 @@ class AgentRuntime:
             if decision and len(run.steps) >= run.budget.max_action_steps:
                 raise AgentFailure("AGENT_STEP_BUDGET_EXCEEDED")
 
-        def model_call(role: str, payload: dict[str, Any], step: AgentStep) -> Any:
+        async def model_call(role: str, payload: dict[str, Any], step: AgentStep) -> Any:
             check_budget()
-            if resources is not None and role in {"agent_decision", "tool_arg_resolution"}:
-                payload = {**payload, "resource_context": resources.context(run)}
-            frame = self.context_framework.build(role, payload, run)
+            if resources is not None and not run.tool_execution_disabled:
+                payload = {**payload, "resource_context": await asyncio.to_thread(resources.context, run)}
+            frame = self.context_framework.build("answer_regeneration" if run.tool_execution_disabled else role, payload, run)
             request = self.model.prepare(role, frame.payload, run.budget.max_llm_tokens - run.llm_tokens, remaining_time())
             call = ModelCall(step_id=step.step_id, role=role, prompt_digest=fingerprint(request.messages), output_limit=request.output_limit, input_reserved=request.input_estimate)
             run.calls.append(call)
-            persist()
+            await persist()
+            if stopped_event.is_set():
+                raise AgentConflictError("Submission was stopped before model dispatch.")
             try:
-                response = self.model.invoke(request)
+                task = asyncio.create_task(self.model.ainvoke(request))
+                self.model_tasks[(run_id, run.submission_id)] = task
+                try:
+                    response = await task
+                finally:
+                    self.model_tasks.pop((run_id, run.submission_id), None)
                 call.usage = response.usage
                 call.status = "FAILED" if response.error_code else "SUCCEEDED"
                 call.error_code = response.error_code
@@ -127,9 +138,9 @@ class AgentRuntime:
                                         total_tokens=request.input_estimate + request.output_limit,
                                         source="estimated", estimator_version="cl100k-x2-or-utf8-framing-v1")
                 run.llm_tokens += call.usage.total_tokens
-                persist()
+                await persist()
                 raise AgentFailure("LLM_CALL_FAILED") from None
-            persist()
+            await persist()
             check_budget()
             if response.error_code:
                 raise AgentFailure(response.error_code)
@@ -142,7 +153,8 @@ class AgentRuntime:
                 status="NEEDS_INPUT" if draft.issues else "READY", tool_name=draft.tool_name,
                 task_id=draft.task_id, data={"normalized": draft.normalized, "issues": draft.issues}))
 
-        def execute(record: ExecutionRecord) -> None:
+        async def execute(record: ExecutionRecord) -> None:
+            nonlocal run
             if run.tool_execution_disabled:
                 raise AgentFailure("TOOL_EXECUTION_DISABLED")
             check_budget()
@@ -156,34 +168,30 @@ class AgentRuntime:
             record.dispatched = True
             record.status = "RUNNING"
             run.tool_executions += 1
-            persist()
+            await persist()
             profile = next((t.get("execution_profile") for t in self.tools.catalog() if t["tool_name"] == record.tool_name), None)
             timeout = run.budget.managed_timeout_seconds if profile == "MANAGED" else run.budget.standard_timeout_seconds
-            try:
-                observation = self.tools.execute(run, record, min(timeout, remaining_time()))
-            except Exception:
-                # Repair only from committed facts; never execute again to fill an Observation gap.
-                observation = self.tools.repair(run, record)
-                if observation is None:
-                    record.status = "FAILED"
-                    persist()
-                    raise AgentFailure("TOOL_EXECUTION_FAILED") from None
-            observation.step_id = record.action_id
-            if observation.invocation_run_id != record.invocation_run_id:
-                raise AgentFailure("OBSERVATION_SOURCE_MISMATCH")
-            record.status = observation.status
-            record.task_id, record.tool_run_id = observation.task_id, observation.tool_run_id
-            record.retryable = bool(observation.error and observation.error.get("retryable") is True)
-            record.observation_id = observation.observation_id
-            run.observations.append(observation)
-            run.executions.append(record.model_copy(deep=True))
-            run.pending_execution = None
-            run.draft = None
-            run.retry_execution = None
-            step = next(s for s in run.steps if s.step_id == record.action_id)
-            step.status = "COMPLETED"
-            persist()  # Observation + completed Step + Run CAS form one store transaction.
-            if observation.status == "FAILED":
+            async def complete():
+                try:
+                    observation = await asyncio.to_thread(self.tools.execute, run, record, min(timeout, remaining_time()))
+                except Exception:
+                    observation = await asyncio.to_thread(self.tools.repair, run, record)
+                    if observation is None:
+                        return await asyncio.to_thread(self.store.fail_execution, run_id, actor_id, record)
+                if observation.invocation_run_id != record.invocation_run_id:
+                    raise AgentFailure("OBSERVATION_SOURCE_MISMATCH")
+                return await asyncio.to_thread(self.store.receipt, run_id, actor_id, record, observation)
+            receipt = asyncio.create_task(complete())
+            self.receipt_tasks.add(receipt)
+            def completed(task):
+                self.receipt_tasks.discard(task)
+                if not task.cancelled():
+                    task.exception()  # Retrieve failures even when the HTTP caller disconnected.
+            receipt.add_done_callback(completed)
+            run = await asyncio.shield(receipt)
+            if run.status == "TERMINATED":
+                return
+            if record.status == "FAILED":
                 raise AgentFailure("TOOL_EXECUTION_FAILED")
             check_budget()
 
@@ -197,73 +205,77 @@ class AgentRuntime:
                     raise AgentFailure("CONFIRMATION_INVALIDATED")
                 if record.confirmation_expires_at and self.clock() >= record.confirmation_expires_at:
                     raise AgentFailure("CONFIRMATION_EXPIRED")
-                self.tools.confirm(run, record, confirmation)
+                await asyncio.to_thread(self.tools.confirm, run, record, confirmation)
                 if not confirmation:
                     raise AgentFailure("CONFIRMATION_REJECTED")
                 record.confirmed = True
-                persist()
-                execute(record)
-            if resuming_arguments:
-                if run.draft is None:
-                    raise AgentFailure("ARGUMENT_STATE_MISSING")
-                step = run.steps[-1]
-                delta = model_call("tool_arg_resolution", {
-                    "tool": self._tool(run.draft.tool_name),
-                    "draft": model_draft(run.draft),
-                    "user_input": user_input,
-                    "waiting_version": run.waiting_version, "question": run.waiting.model_dump(mode="json") if run.waiting else None,
-                    "goal": run.goal, "context": run.context,
-                }, step)
-                if not isinstance(delta, dict):
-                    raise AgentFailure("ARGUMENT_PROTOCOL_ERROR")
-                run.draft = self.tools.resolve(run, run.draft.tool_name, delta)
-                argument_observation(step)
-                run.waiting = None
-                persist()
+                await persist()
+                await execute(record)
+            proposal_error = None
+            duplicate_corrections = set()
             while run.status == "RUNNING":
                 check_budget(decision=True)
                 for completed in run.executions:
                     if not any(o.invocation_run_id == completed.invocation_run_id for o in run.observations):
-                        repaired = self.tools.repair(run, completed)
+                        repaired = await asyncio.to_thread(self.tools.repair, run, completed)
                         if repaired is None:
                             raise AgentFailure("OBSERVATION_INCONSISTENT")
                         run.observations.append(repaired)
                         completed.observation_id = repaired.observation_id
-                        persist()
+                        await persist()
                 step = AgentStep(number=len(run.steps) + 1)
                 run.steps.append(step)
-                persist()
+                await persist()
                 payload = self._context(run)
-                raw = model_call("agent_decision", payload, step)
-                action = DecisionEngine.action(raw)
+                if proposal_error:
+                    payload["proposal_error"] = proposal_error
+                try:
+                    raw = await model_call("agent_decision", payload, step)
+                    action = DecisionEngine.action(raw)
+                except AgentFailure as failure:
+                    if failure.code not in {"LLM_INVALID_JSON", "LLM_EMPTY_RESPONSE", "AGENT_ACTION_PROTOCOL_ERROR"} or proposal_error:
+                        raise
+                    # One correction for a delivered, malformed proposal. It uses
+                    # the same decision model and cumulative budgets; no execution
+                    # or successful Observation is repeated and no raw output leaks.
+                    step.status = "FAILED"
+                    proposal_error = "上一次响应不符合输出合同。严格返回单个 CallTool、AskUser 或 Finish JSON 动作，不返回 Schema、格式描述或代码围栏。"
+                    await persist()
+                    continue
+                proposal_error = None
                 # The decoded proposal may temporarily contain trusted handles.
                 # Persist only business arguments; verified identities belong in
                 # the typed draft/execution bindings created below.
-                step.action = self._audit_action(action)
-                persist()
+                step.action_type = action.type
+                step.action = self._audit_action(action) if isinstance(action, CallTool) else None
+                await persist()
                 if isinstance(action, CallTool):
                     if run.tool_execution_disabled:
                         raise AgentFailure("TOOL_EXECUTION_DISABLED")
-                    if run.draft and run.draft.tool_name != action.tool_name:
-                        raise AgentFailure("BOUND_TOOL_MISMATCH")
-                    if run.draft and run.draft.resolver_authoritative and run.draft.issues:
-                        raise AgentFailure("ARGUMENT_STATE_REQUIRES_USER")
-                    run.draft = self.tools.resolve(run, action.tool_name, action.arguments)
+                    run.current_unit_assertions = action.user_unit_assertions
+                    run.draft = await asyncio.to_thread(self.tools.resolve, run, action.tool_name, action.arguments)
                     if run.draft.issues:
                         argument_observation(step)
                         step.status = "COMPLETED"
-                        persist()
+                        await persist()
                         continue
                     draft = run.draft
                     # A resolved intent question has been consumed. Keeping it in
                     # subsequent Decision context can replay the user's answer
                     # after the Tool result already satisfies the request.
-                    run.waiting = None
+                    run.question_message_id = None
                     signature = fingerprint([draft.tool_name, draft.version, draft.schema_hash, draft.normalized])
                     duplicate = next((e for e in run.executions if e.execution_fingerprint == signature and e.status == "SUCCEEDED"), None)
                     if duplicate:
                         run.duplicate_of_invocation_run_id = duplicate.invocation_run_id
-                        raise AgentFailure("DUPLICATE_TOOL_CALL")
+                        if signature in duplicate_corrections:
+                            raise AgentFailure("DUPLICATE_TOOL_CALL")
+                        duplicate_corrections.add(signature)
+                        step.status = "FAILED"
+                        run.draft = None
+                        proposal_error = "相同工具与完整参数已成功执行，禁止再次执行。所需结果已在 Observation 和 execution_facts 中；请使用已有结果继续，目标已满足时直接 Finish。"
+                        await persist()
+                        continue
                     if run.tool_executions >= run.budget.max_tool_executions:
                         raise AgentFailure("TOOL_EXECUTION_BUDGET_EXCEEDED")
                     record = ExecutionRecord(action_id=step.step_id, tool_name=draft.tool_name,
@@ -274,60 +286,65 @@ class AgentRuntime:
                             raise AgentFailure("TOOL_RETRY_ARGUMENT_MISMATCH")
                         record.retry_of_invocation_run_id = run.retry_execution.invocation_run_id
                     run.pending_execution = record
-                    persist()
-                    record = self.tools.prepare(run, record)
+                    await persist()
+                    record = await asyncio.to_thread(self.tools.prepare, run, record)
                     run.pending_execution = record
-                    persist()
+                    await persist()
                     if record.status == "PENDING_CONFIRMATION":
                         run.status = "WAITING_FOR_CONFIRMATION"
                         run.waiting_version += 1
                         record.confirmation_version = fingerprint([record.invocation_run_id, signature])
-                        persist()
+                        await persist()
                         break
-                    execute(record)
+                    await execute(record)
                 elif isinstance(action, AskUser):
-                    if action.reason == "TOOL_ARGUMENT_CLARIFICATION":
-                        if run.tool_execution_disabled:
-                            raise AgentFailure("TOOL_EXECUTION_DISABLED")
-                        self._validate_question(run, action)
-                    run.waiting = action
+                    run.question_message_id = identifier()
                     run.waiting_version += 1
+                    run.pending_message = {"message_id": run.question_message_id, "phase": "question",
+                                           "text": action.question, "sources": [], "step_id": step.step_id}
+                    step.message_id = run.question_message_id
                     run.status = "WAITING_FOR_USER"
                     step.status = "COMPLETED"
-                    persist()
+                    await persist()
                 else:
                     selected = self._finish_observations(run, action)
-                    answer = FinalResponsePolicy.direct(action, selected)
-                    generated = answer is None
-                    if answer is None:
-                        answer = FinalAnswerGenerator.generate(run, selected, step, model_call)
-                    if not isinstance(answer, str) or not answer.strip():
+                    answer = action.answer.strip()
+                    if not answer:
                         raise AgentFailure("FINAL_ANSWER_INVALID")
-                    # Preserve provenance even when a direct/model answer omits it.
                     from .unit_resolution import project_units
                     for observation in selected:
                         for note in project_units({"notes": []}, observation.unit_annotations)["notes"]:
                             if note not in answer:
                                 answer += "\n" + note
                     check_budget()
-                    run.final_answer = FinalAnswer(step_id=step.step_id, text=answer.strip(),
-                        observation_ids=[o.observation_id for o in selected], generated=generated)
-                    run.waiting = None
+                    run.final_message_id = identifier()
+                    run.pending_message = {"message_id": run.final_message_id, "phase": "answer", "text": answer,
+                                           "sources": [o.observation_id for o in selected], "step_id": step.step_id}
+                    step.message_id = run.final_message_id
+                    run.question_message_id = None
                     step.status, run.status = "COMPLETED", "SUCCEEDED"
-                    persist()
+                    await persist()
+        except asyncio.CancelledError:
+            current = await asyncio.to_thread(self.store.get, run_id, actor_id)
+            if current.error_code == "USER_STOPPED":
+                return current
+            raise
         except AgentConflictError:
-            return self.store.get(run_id, actor_id)
+            return await asyncio.to_thread(self.store.get, run_id, actor_id)
         except Exception as error:
             run.error_code = error.code if isinstance(error, AgentFailure) else "AGENT_INTERNAL_ERROR"
             run.status = "TERMINATED"
-            run.final_answer = None
+            run.final_message_id = None
+            run.pending_message = None
             if run.steps and run.steps[-1].status == "RUNNING":
                 run.steps[-1].status = "FAILED"
             try:
-                persist()
+                await persist()
             except AgentConflictError:
-                return self.store.get(run_id, actor_id)
-        return self.store.get(run_id, actor_id)
+                return await asyncio.to_thread(self.store.get, run_id, actor_id)
+        finally:
+            self.stop_events.pop(turn_key, None)
+        return await asyncio.to_thread(self.store.get, run_id, actor_id)
 
     def _tool(self, name: str) -> dict[str, Any]:
         for tool in self.tools.catalog():
@@ -344,39 +361,15 @@ class AgentRuntime:
         if not fields:
             return action
         value = action.model_dump(mode="json")
-        key = "arguments" if isinstance(action, CallTool) else "known_arguments"
+        key = "arguments"
+        value["user_unit_assertions"] = []
         value[key] = {field: item for field, item in value[key].items() if field not in fields}
         return DecisionEngine.action(value)
-
-    def _validate_question(self, run: AgentRun, action: AskUser) -> None:
-        tool = self._tool(action.tool_name or "")
-        fields = set(tool["schema"].get("properties", {}))
-        from materialsagent.domain.models.semantic_units import ANNOTATION_TOOLS
-        if tool["tool_name"] in ANNOTATION_TOOLS:
-            fields.add("semantic_annotations")
-        if not set(action.fields) <= fields or len(set(action.fields)) != len(action.fields):
-            raise AgentFailure("CLARIFICATION_FIELD_INVALID")
-        if run.draft and run.draft.tool_name != action.tool_name:
-            raise AgentFailure("BOUND_TOOL_MISMATCH")
-        if run.draft and run.draft.resolver_authoritative:
-            if not set(action.fields) <= set(run.draft.issues):
-                raise AgentFailure("CLARIFICATION_CONTRADICTS_RESOLVER")
-            # A model may restate resolved facts, but cannot add/change values or
-            # promote an unresolved field to known. Never merge this echo into the draft.
-            for field, value in action.known_arguments.items():
-                if (field not in fields or field in run.draft.issues
-                        or field not in run.draft.normalized
-                        or canonical(value) != canonical(run.draft.normalized[field])):
-                    raise AgentFailure("CLARIFICATION_CONTRADICTS_RESOLVER")
-        else:
-            # Deterministic validation only: proactive AskUser never manufactures a CallTool.
-            run.draft = self.tools.resolve(run, action.tool_name or "", action.known_arguments)
-            if not set(action.fields) <= set(run.draft.issues):
-                raise AgentFailure("CLARIFICATION_FIELD_ALREADY_KNOWN")
 
     def _context(self, run: AgentRun) -> dict[str, Any]:
         return {
             "goal": run.goal, "conversation_context": run.context, "user_inputs": run.user_inputs,
+            "user_messages": run.user_messages,
             "question": run.waiting.model_dump(mode="json") if run.waiting else None,
             "waiting_version": run.waiting_version,
             "execution_facts": [{"tool_name": e.tool_name, "arguments": e.arguments, "status": e.status,
@@ -386,9 +379,7 @@ class AgentRuntime:
                 "tool_executions": run.budget.max_tool_executions - run.tool_executions,
                 "llm_tokens": run.budget.max_llm_tokens - run.llm_tokens,
                 "active_seconds": max(0, run.budget.max_active_seconds - run.active_seconds)},
-            # A draft already binds the only legal Tool until resolution/execution.
-            "tools": [] if run.tool_execution_disabled else [t for t in self.tools.catalog()
-                if run.draft is None or t["tool_name"] == run.draft.tool_name],
+            "tools": [] if run.tool_execution_disabled else self.tools.catalog(),
             "tool_execution_disabled": run.tool_execution_disabled,
             "retry_target": None if run.retry_execution is None else run.retry_execution.model_dump(mode="json"),
             "draft": model_draft(run.draft),

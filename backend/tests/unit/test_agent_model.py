@@ -1,3 +1,5 @@
+import asyncio
+from backend.tests.agent_state import agent_run
 from types import SimpleNamespace
 import pytest
 from backend.tests.unit.test_llm_provider_factory import _role
@@ -10,7 +12,7 @@ def test_remaining_budget_is_sent_as_real_provider_output_limit(provider):
     captured = []
     class Model:
         def bind(self, **kwargs): return self
-        def invoke(self, messages):
+        async def ainvoke(self, messages):
             return SimpleNamespace(content='{"type":"Finish","answer":"ok"}', usage_metadata={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15})
     def factory(config):
         captured.append(provider_client_kwargs(config)); return Model()
@@ -18,7 +20,7 @@ def test_remaining_budget_is_sent_as_real_provider_output_limit(provider):
     adapter = AgentModelAdapter({"agent_decision": config}, factory=factory)
     initial = adapter.prepare("agent_decision", {"goal": "x"}, 32000, 30)
     request = adapter.prepare("agent_decision", {"goal": "x"}, initial.input_estimate + 100, 30)
-    result = adapter.invoke(request)
+    result = asyncio.run(adapter.ainvoke(request))
     assert captured[0]["max_tokens"] == 100
     if provider == "qwen": assert captured[0]["extra_body"]["thinking_budget"] == 100
     assert result.usage.total_tokens == 15 and result.usage.source == "actual"
@@ -61,9 +63,9 @@ def test_exhausted_budget_does_not_construct_or_invoke_provider():
 def test_invalid_json_retains_actual_consumption():
     class Model:
         def bind(self, **kwargs): return self
-        def invoke(self, messages): return SimpleNamespace(content="invalid", usage_metadata={"input_tokens":10,"output_tokens":3,"total_tokens":13})
+        async def ainvoke(self, messages): return SimpleNamespace(content="invalid", usage_metadata={"input_tokens":10,"output_tokens":3,"total_tokens":13})
     adapter = AgentModelAdapter({"agent_decision": _role("deepseek", "agent_decision")}, factory=lambda _:Model())
-    result = adapter.invoke(adapter.prepare("agent_decision", {"goal":"x"},32000,30))
+    result = asyncio.run(adapter.ainvoke(adapter.prepare("agent_decision", {"goal":"x"},32000,30)))
     assert result.error_code == "LLM_INVALID_JSON" and result.usage.total_tokens == 13
 
 def test_history_trim_preserves_pairs_and_current_goal():
@@ -98,7 +100,7 @@ def full_catalog_decision(monkeypatch):
     gateway = SimpleNamespace(registry=registry,
         resource_context=SimpleNamespace(supports=lambda registration: True))
     tools = SimpleNamespace(catalog=lambda: RegistryAgentGateway.catalog(gateway))
-    run = AgentRun(conversation_id="conversation-private", actor_id="actor-private",
+    run = agent_run(conversation_id="conversation-private", actor_id="actor-private",
         source_message_id="message-private", goal="使用这个数据集训练一个随机森林模型，用于预测强度",
         attachments=[{"attachment_id": "resource-private", "kind": "dataset", "name": "01-training.csv"}])
     payload = AgentRuntime._context(SimpleNamespace(tools=tools), run)
@@ -125,7 +127,7 @@ def test_committed_decision_budget_fits_all_tools_and_csv_with_utf8_fallback(ful
     assert sent["tools"] == payload["tools"]
     assert sent["resource_context"] == payload["resource_context"]
     assert sent["attachments"] == payload["attachments"]
-    assert request.output_limit == 1024
+    assert request.output_limit == 4096
     assert request.input_estimate > 16384
     assert request.input_estimate + request.output_limit <= config.prompt_limit_tokens - config.safety_margin_tokens
     assert payload == before
@@ -143,3 +145,40 @@ def test_full_catalog_still_respects_explicit_and_remaining_limits(full_catalog_
         factory=lambda _: pytest.fail("Provider called with insufficient budget"))
     with pytest.raises(AgentFailure, match=error):
         adapter.prepare("agent_decision", payload, remaining, 30)
+
+
+def test_native_async_provider_cancellation_closes_owned_transport():
+    async def scenario():
+        entered=asyncio.Event();closed=[]
+        class Client:
+            async def close(self):closed.append("async")
+        class SyncClient:
+            def close(self):closed.append("sync")
+        class Model:
+            root_async_client=Client();root_client=SyncClient()
+            def bind(self,**_):return self
+            async def ainvoke(self,messages):
+                entered.set();await asyncio.Event().wait()
+        adapter=AgentModelAdapter({"agent_decision":_role("deepseek","agent_decision")},factory=lambda _:Model())
+        task=asyncio.create_task(adapter.ainvoke(adapter.prepare("agent_decision",{"goal":"test"},32000,10)))
+        await entered.wait();task.cancel()
+        with pytest.raises(asyncio.CancelledError):await task
+        assert closed==["async","sync"]
+    asyncio.run(scenario())
+
+
+def test_default_factory_owns_fresh_transports_for_consecutive_calls(monkeypatch):
+    import materialsagent.infrastructure.llm.factory as factory
+    transports=[]
+    class Model:
+        def __init__(self,**kwargs):transports.append((kwargs["http_client"],kwargs["http_async_client"]))
+        def bind(self,**_):return self
+        async def ainvoke(self,_):return SimpleNamespace(content='{"type":"Finish","answer":"ok"}')
+    monkeypatch.setattr(factory,"ChatDeepSeek",Model)
+    adapter=AgentModelAdapter({"agent_decision":_role("deepseek","agent_decision")})
+    async def scenario():
+        request=adapter.prepare("agent_decision",{"goal":"test"},32000,10)
+        await adapter.ainvoke(request);await adapter.ainvoke(request)
+    asyncio.run(scenario())
+    assert transports[0][1] is not transports[1][1]
+    assert all(sync.is_closed and asynchronous.is_closed for sync,asynchronous in transports)

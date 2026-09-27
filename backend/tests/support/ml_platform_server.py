@@ -25,8 +25,6 @@ def main():
     assert settings.postgres_db.startswith("materialsagent_test_") and len(settings.postgres_db) == 36
     config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
     config.attributes["settings"] = settings
-    if setup.get("fault") == "historical-migration":
-        command.downgrade(config, "0017_mcp_invocation")
     command.upgrade(config, "head")
     engine = create_engine_from_settings(settings)
     sessions = create_session_factory(engine)
@@ -45,19 +43,10 @@ def main():
         if not isinstance(intent, dict) or "acceptance_tool" not in intent:
             from ml_resource_language_model import respond as language_response
             return language_response(role, payload)
-        if role == "final_answer":
-            return {"text": "本次受控工具调用已完成。", "sources": [o["source"] for o in payload["observations"]]}
-        if role == "tool_arg_resolution":
-            arguments = intent["arguments"]
-            return {field: arguments[field] for field in payload["draft"]["issues"] if field in arguments}
         if payload.get("observations"):
-            return {"type": "Finish", "sources": [o["source"] for o in payload["observations"]]}
-        if payload.get("draft"):
-            if payload["draft"]["issues"]:
-                return {"type": "AskUser", "reason": "TOOL_ARGUMENT_CLARIFICATION",
-                    "question": "请确认单位信息。", "tool_name": payload["draft"]["tool_name"],
-                    "fields": list(payload["draft"]["issues"])}
-            return {"type": "CallTool", "tool_name": payload["draft"]["tool_name"], "arguments": {}}
+            return {"type": "Finish", "answer": "本次受控工具调用已完成。", "sources": [o["source"] for o in payload["observations"]]}
+        if payload.get("draft") and payload["draft"]["issues"] and not payload.get("user_inputs"):
+            return {"type": "AskUser", "question": "请确认单位信息。"}
         args = dict(intent["arguments"])
         for field, selector in intent["reference_selectors"].items():
             candidate = next(item for item in payload["resource_context"]["resources"]
@@ -65,7 +54,13 @@ def main():
                 and (selector.get("dataset_ordinal") is None
                      or item.get("dataset_ordinal") == selector["dataset_ordinal"]))
             args[field] = {"resource_ref": candidate["resource_ref"]}
-        return {"type": "CallTool", "tool_name": intent["acceptance_tool"], "arguments": args}
+        assertions = []
+        if payload.get("user_inputs"):
+            for annotation in args.get("semantic_annotations", []):
+                if annotation["unit"] in payload["user_inputs"][-1]:
+                    assertions.append({"resource_parameter": annotation["resource_parameter"], "column": annotation["column"],
+                        "unit": annotation["unit"], "source_message": payload["user_messages"][-1]["source"], "evidence": annotation["unit"]})
+        return {"type": "CallTool", "tool_name": intent["acceptance_tool"], "arguments": args, "user_unit_assertions": assertions}
 
     app = create_app(settings=settings, unit_of_work_factory=factory,
         agent_store=SQLAlchemyAgentStore(sessions), actor_context=ActorContext("p4-actor"),
@@ -75,7 +70,10 @@ def main():
         # This server exists only in isolated acceptance databases. Ordinary
         # endpoints continue to use the new presentation DTO without diagnostics.
         run = app.state.agent_runtime.store.get(identity, "p4-actor")
-        return {"data": run.model_dump(mode="json", exclude={"actor_id", "context"})}
+        final = next((m for m in run.messages if m["message_id"] == run.final_message_id), None)
+        return {"data": {**run.model_dump(mode="json", exclude={"actor_id"}), "goal": run.goal,
+            "waiting": run.waiting.model_dump() if run.waiting else None, "context": run.context,
+            "answer_message": final}}
     if settings.enable_materials_ml_resource_context and settings.llm_adapter == "provider":
         from materialsagent.infrastructure.llm.agent_model import _count
         model = app.state.agent_runtime.model

@@ -66,7 +66,7 @@ class AppSettings(BaseSettings):
     agent_max_action_steps: int = Field(default=12, ge=1, le=100)
     agent_max_tool_executions: int = Field(default=4, ge=1, le=32)
     agent_max_active_seconds: float = Field(default=3600, gt=0, le=86400)
-    agent_max_llm_tokens: int = Field(default=32000, ge=1, le=2000000)
+    agent_max_llm_tokens: int = Field(default=64000, ge=1, le=2000000)
     agent_standard_timeout_seconds: float = Field(default=10, gt=0, le=3600)
     m5_dev_routes_enabled: bool = False
     enable_dev_fake_side_effect_tool: bool = False

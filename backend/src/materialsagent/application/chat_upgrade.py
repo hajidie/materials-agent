@@ -6,7 +6,7 @@ from materialsagent.infrastructure.db.asset import AssetRow
 from materialsagent.infrastructure.db.ml_resources import references, uploads
 
 
-def inventory(sessions, actor):
+def inventory(sessions, actor, *, all_conversations=False):
     result = []
     with sessions() as session:
         conversations = session.scalars(select(ConversationRow).where(ConversationRow.actor_id == actor)).all()
@@ -15,16 +15,16 @@ def inventory(sessions, actor):
             messages = session.scalars(select(MessageRow.structured_content).where(MessageRow.conversation_id == identity)).all()
             runs = session.scalars(select(AgentRunRow.document).where(AgentRunRow.conversation_id == identity)).all()
             refs = session.scalars(select(references.c.document).where(references.c.conversation_id == identity)).all()
-            incompatible = any(not message or message.get("contract") != "chat-v1" for message in messages)
-            incompatible |= any("user_messages" not in run or
+            incompatible = any(not message or message.get("contract") != "chat-v2" for message in messages)
+            incompatible |= any("user_message_ids" not in run or
                 run.get("resource_protocol_version") != "resource-ref-v1" for run in runs)
             incompatible |= bool(refs and not messages)
-            if not incompatible:
+            if not incompatible and not all_conversations:
                 continue
             blocked = []
             if conversation.deletion_fence_operation_id:
                 blocked.append("DELETION_UNRESOLVED")
-            if any(run["status"] in ("PENDING", "RUNNING", "WAITING_FOR_CONFIRMATION") or
+            if any((run.get("pending_execution") or {}).get("dispatched") or run["status"] in ("PENDING", "RUNNING", "WAITING_FOR_CONFIRMATION") or
                 any(e.get("status") == "OUTCOME_UNKNOWN" for e in run.get("executions", [])) for run in runs):
                 blocked.append("BUSY_OR_UNKNOWN_AGENT")
             if session.scalar(select(func.count()).select_from(TaskRow).where(TaskRow.conversation_id == identity,

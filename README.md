@@ -23,17 +23,18 @@
 
 ## 当前能力
 
-- 有界 `Decision → Action → Observation → Decision` 循环；每个 AgentRun 默认最多 12 步、4 次工具执行、3600 秒活跃时间和 32000 Token。
+- 有界 `Decision → Action → Observation → Decision` 循环；每个 AgentRun 默认最多 12 步、4 次工具执行、3600 秒活跃时间和 64000 Token。
 - 三类结构化动作：`CallTool`、`AskUser`、`Finish`；支持预测性能后继续单位换算。
-- 区分目标澄清和工具补参；用户补充信息后按等待版本恢复原 Run，保留累计预算。
+- 提问作为普通助手消息；回复按问题消息与等待版本恢复原 Run，同一个模型循环处理完整参数，保留累计预算。
 - Managed Tool 继续以 Task、InputRevision、ToolRun、ToolResult、Asset 保存独立来源。
-- FinalAnswer、assistant 消息和成功状态原子提交；网络断连不撤销已保存答案。
-- 失败 Tool Retry 与受限 Answer Regeneration 创建新 Run；回答再生成禁止执行工具。
+- 主模型 Finish 的完整答案、消息来源和成功状态原子提交；网络断连不撤销已保存答案。
+- 回复底部支持复制与重新生成；回答在原位置保留多个版本，再生成禁止执行工具。失败 Tool Retry 仍创建新 Run。
+- 输入框支持 Send/Stop 切换，Stop 取消模型请求与后续决策；已提交 GPU/ML 计算继续并保存回执。当前采用完整响应。
 - 确认绑定具体 Invocation 和参数版本；生产目录禁止 Side-effect Tool，开发测试工具仅用于验证确认机制。
 - 聊天界面展示消息、语义进度、最终回答与附件/结果卡片；开发诊断单独受开关控制。
 - ML 聊天可根据字段名推断单位，并明确标注推断依据；不会修改数据集登记信息。涉及数值换算等操作时须先确认未知单位。
 - Conversation 删除原子移除业务聚合，并通过持久化 cleanup 记录清理本项目生成对象及上传的 EBSD 图片；运行中的聚合拒绝删除。
-- Mock 或 DeepSeek/Qwen Provider；AgentRun 由请求宿主同步推进，不提供平台后台 Worker、队列或断点接管。
+- Mock 或 DeepSeek/Qwen Provider；AgentRun 由异步请求宿主推进，不提供平台后台 Worker、队列或断点接管。
   可选 ML Service 的训练 Worker 是独立领域进程，不接管 AgentRun。
 
 ### EBSD 单图预测
@@ -114,7 +115,7 @@ Runtime 环境，不得安装到 Backend 环境。
 ## 本地配置
 
 把 `.env.example` 复制为被 Git 忽略的根 `.env`，并为本机填写数据库和 MinIO 配置。
-使用 Provider 模式时，根据 `backend/config/llm.toml` 中三个角色实际选择的模型设置
+使用 Provider 模式时，根据 `backend/config/llm.toml` 中主模型角色选择的模型设置
 `DEEPSEEK_API_KEY` 和/或 `DASHSCOPE_API_KEY`。LLM 配置在 `.env` 中只保存 Secret；Provider、
 模型名、每个具体模型的上下文窗口、temperature、top-p、top-k、Reasoning 和各角色 token
 预算都在该 TOML 中配置，修改后重启
@@ -125,7 +126,7 @@ DeepSeek 开启思考后仍允许配置 `temperature`，该值会传入 API，�
 忽略 `top_p`（有效值固定为 `1.0`）。参见 [官方思考模式说明](https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/)。
 
 `backend/config/llm.toml` 包含受控模型目录、全局默认模型、模型能力声明，以及
-`agent_decision`、`tool_arg_resolution`、`final_answer` 三个角色的独立覆盖。
+`agent_decision` 主模型角色的参数覆盖；提问、工具选择和回答都在同一个循环完成。
 DeepSeek 固定走官方 endpoint；Qwen 固定走阿里云百炼国内 OpenAI-compatible endpoint。
 未知 Provider、模型引用、角色或参数会使 Backend 启动失败，不会自动切换或重试其他 Provider。
 
@@ -214,7 +215,8 @@ Invoke-WebRequest -UseBasicParsing http://127.0.0.1:3000/
 docker compose -f docker-compose.yml ps
 ```
 
-主要公共 API 位于 `/api/v1`，包括 health、conversations、attachments、agent-runs（详情、分页 trace、确认和重试）、
+主要公共 API 位于 `/api/v1`，包括 health、conversations、attachments、messages（提交、回答版本和重新生成）、
+agent-runs（推进、详情、分页 trace、中止、确认和重试）、
 tools、tool-results、assets，以及启用后可用的消息 Artifact/结果观察和 ML 资源代理。具体请求/响应结构以
 FastAPI 路由、Pydantic schema 和合同测试为准，
 不要在文档中复制一份容易漂移的完整协议。
@@ -286,7 +288,7 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 验收自然语言决策时，使用 `-Runtime Mock -Llm Provider` 启动，再打开 Frontend。这会调用配置的
 真实 LLM，但工具返回 Mock 结果；只能验证编排流程，不能验证材料模型的科学有效性。
 
-每个独立场景新建对话，展开卡片的“查看执行过程”，同时核对状态、动作顺序和实际工具调用次数。
+每个独立场景新建对话，通过受控的执行轨迹接口核对状态、动作顺序和实际工具调用次数。
 补参前可能直接 AskUser，也可能先 CallTool 校验再 AskUser；缺参时实际工具调用次数都应为零。
 
 | 场景 | 操作 | 应观察到的结果 |
@@ -294,11 +296,13 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 | 无工具回答 | 发送“你好” | Finish 后显示最终回答，0 次工具调用 |
 | 单工具 | 发送“650 MPa 转 GPa” | CallTool 后再次决策、Finish；结果为 0.65 GPa，1 次工具调用 |
 | 缺参暂停 | 发送“对 ZTA35G 进行虚拟实验：固溶温度 1000℃，固溶时间 2 小时。预测力学性能。” | 等待补充时效温度、时效时间；不重复询问可靠已知条件，不执行工具 |
-| 原 Run 恢复 | 在上一张卡片点击“补充信息”，输入“时效温度 730℃，时效时间 2 小时” | 原 Run 继续，保留累计步骤和预算；工具结果后再次决策并结束，1 次工具调用 |
+| 原 Run 恢复 | 直接在当前聊天输入框输入“时效温度 730℃，时效时间 2 小时” | 原 Run 继续，保留累计步骤和预算；工具结果后再次决策并结束，1 次工具调用 |
 | 连续编排 | 新对话发送“对 ZTA35G 进行虚拟实验：固溶温度 1000℃，固溶时间 2 小时，时效温度 730℃，时效时间 2 小时。先预测力学性能，再调用单位换算工具，把预测的屈服强度从 MPa 转为 GPa。” | ZTA35G → 单位换算 → Finish，2 次工具调用；换算输入来自本次预测结果 |
-| 回答再生成 | 对已有成功工具结果的终态 Run 点击“重新生成回答” | 新 Run 引用原成功结果，0 次工具调用；原 Run 和工具产物不变 |
+| 回答再生成 | 在已完成回答下点击重新生成图标，切换并复制旧、新版本 | 新 Run 冻结被点击版本的原任务上下文和可信结果，0 次工具调用；成功后在原位置新增版本；复制对应当前显示的正文 |
+| 模型生成中止 | 提交问题后，在模型尚未完成时点击输入框右侧圆形 Stop 按钮 | 取消当前 Provider 请求，不继续决策或调用工具；保留已保存内容，恢复发送按钮；生成中不能重复发送 |
+| 已派发计算中止 | 使用真实 Runtime，提交上述连续编排目标，待 ZTA35G 工具开始后点击 Stop | Agent 停止后续决策，已派发计算继续；迟到结果保存并追加一次通知，图片仍可查看；不会执行后续单位换算 |
 | EBSD 单图预测 | 上传合规图片后发送“请预测这张 Inconel 625 EBSD 图片对应的屈服强度” | 1 次 EBSD 调用；展示屈服强度、MPa、输入图片和实验性限制，不显示延伸率或热处理条件 |
-| EBSD 缺图恢复 | 新对话不上传图片，发送“请预测 Inconel 625 的 EBSD 图片对应的屈服强度”，等待后通过“补充信息”上传图片并提交 | 缺图时不推理；补图后原 Run 继续，刷新仍能追溯输入与结果 |
+| EBSD 缺图恢复 | 新对话不上传图片，发送“请预测 Inconel 625 的 EBSD 图片对应的屈服强度”，等待后在当前聊天输入框上传图片并提交 | 缺图时不推理；补图后原 Run 继续，刷新仍能追溯输入与结果 |
 
 EBSD 的 Mock Runtime 返回固定模拟值并标注 Mock；验证真实 CNN 时使用 `-Runtime Real -Llm Provider`
 并配置 `-EbsdModelRoot`。不要用模拟值判断模型准确性；真实 SEM 与 EBSD 共用执行锁，BUSY 时显式重试。
@@ -307,7 +311,7 @@ EBSD 的 Mock Runtime 返回固定模拟值并标注 Mock；验证真实 CNN 时
 新建同一个目标。测试中文输入法候选确认不会发送、Shift+Enter 换行，以及窄屏下补参和结果可操作。
 已经“已结束”的 Run 不能因修复代码而恢复；排除错误后创建新目标，或使用符合资格的显式重试。
 
-默认 Mock LLM 是固定规则：支持简单单位换算、ZTA35G 缺参询问、EBSD 资产引用调用和 JSON 参数增量，不支持任意中文
+默认 Mock LLM 是固定规则：支持简单单位换算、ZTA35G 缺参询问、EBSD 资产引用调用和完整 JSON 参数夹具，不支持任意中文
 提取或上述多工具自然语言编排。其输出只验证协议和界面。确认、拒绝、过期及可重试失败用受控测试
 工具验证，默认注册的三个工具不会触发确认。并发 CAS、事务、超时和 Token 预算边界以自动化测试为准。
 
@@ -336,15 +340,16 @@ EBSD 的 Mock Runtime 返回固定模拟值并标注 Mock；验证真实 CNN 时
 已实现合同和后续边界见 [项目上下文](docs/project-context.md#materials-ml-领域边界)。不要将 ML 依赖安装到 Backend 环境。
 
 启用平台 MCP 底座前，在 Backend Python 3.11 环境安装 `python -m pip install -e "./backend[mcp]"`，
-执行既有 Backend Alembic `upgrade head`（当前 head 包含 0022），并启动启用 MCP 的独立 ML Service/Worker。
+按下文升级要求执行 Backend Alembic `upgrade head`（当前 head 为 0023），并启动启用 MCP 的独立 ML Service/Worker。
 根 `.env` 设置 `ENABLE_DEV_MATERIALS_ML_TOOLS=true`，配置 `MATERIALS_ML_MCP_URL`、
 `MATERIALS_ML_BINDING_VERSION` 和不同的 `MATERIALS_ML_MCP_TOKEN` / `MATERIALS_ML_RESOURCE_TOKEN`。
 后两者分别对应 Service 的 MCP / Resource token；Backend 不配置 ML Worker 凭据。
 预测可能耗时 30 秒；需要完整同步等待时显式配置 `AGENT_STANDARD_TIMEOUT_SECONDS=60`，
 否则服从原有较短预算并进入受控取消/回执核查。production 不能启用此开关。
 `backend/config/llm.toml` 中决策角色使用 50000 上下文上限，覆盖完整工具目录与
-当前附件摘要在离线词表不可用、采用 UTF-8 字节保守估算时的首轮请求。补参和最终解释仍为 8K。
-请求仍受模型窗口、1024 安全余量、输出预留和 AgentRun 总 Token 预算（默认 32000）约束；裁剪后仍超限时
+当前附件摘要在离线词表不可用、采用 UTF-8 字节保守估算时的首轮请求。提问、完整参数 Proposal 和最终回答
+都由同一个 `agent_decision` 模型角色完成，不再调用独立补参或最终解释模型。
+请求仍受模型窗口、1024 安全余量、输出预留和 AgentRun 总 Token 预算（默认 64000）约束；裁剪后仍超限时
 拒绝调用并返回语义化说明，不自动扩大预算。
 
 训练成功回执只表示 TrainingRun 已提交；同步预测只正常返回终态。结果不确定时 Agent 立即停止，
@@ -377,7 +382,10 @@ python scripts/dev/upgrade-chat-data.py --apply --conversation <对话ID>
 ```
 
 使用独立 Backend Python 3.11；迁移历史保留，清理不触碰共享卷、模型包或凭据。
-预检集全部安全收敛后再执行 Backend Alembic `upgrade head`；新库或已兼容数据库可直接迁移。
+预检集全部安全收敛后再执行 Backend Alembic `upgrade head`；新库可直接迁移。
+0023 升级和降级都要求数据库中没有 AgentRun；即使旧数据已符合聊天附件合同，也必须先经明确授权删除历史 Agent 对话。
+需要清空全部当前本地用户对话时，使用脚本的 `--all-conversations` 模式先预检，再加 `--apply` 执行。
+降级仅恢复表结构，不恢复已经删除的历史消息或回答。
 
 P7 自动验收入口为 `services/materials_ml/scripts/acceptance-p7.ps1 -BackendPython <Backend Python 路径>`，
 `-RealLLM` 单独开启真实语言验收。真实浏览器验收另设 opt-in：构建前端后，设置

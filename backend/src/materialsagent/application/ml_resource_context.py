@@ -214,19 +214,9 @@ class ResourceContextResolver:
     def resolve(self, run, registration, merged, previous):
         values = dict(merged)
         issues, bindings = {}, {}
-        waiting_fields = set(run.waiting.fields if run.waiting else ())
         for spec in registration.resource_parameters:
             field = spec.execution_argument
-            old = previous.resource_bindings.get(field) if previous else None
             supplied = values.pop(field, None)
-            if old is not None and field not in waiting_fields and supplied is None:
-                try:
-                    self.verify(run, old)
-                    bindings[field] = old
-                    values[field] = old.execution_value
-                except (AgentFailure, ApplicationError):
-                    issues[field] = "Conflict"
-                continue
             if isinstance(supplied, dict) and supplied.get("_resource_unresolved") is True:
                 issues[field] = "Ambiguous"
                 continue

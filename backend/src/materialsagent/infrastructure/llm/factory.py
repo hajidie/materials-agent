@@ -55,6 +55,8 @@ def create_chat_model(
     *,
     deepseek_factory: Callable[..., object] | None = None,
     qwen_factory: Callable[..., object] | None = None,
+    http_client: object | None = None,
+    http_async_client: object | None = None,
 ) -> object:
     if config.provider == "deepseek":
         factory = deepseek_factory or ChatDeepSeek
@@ -62,4 +64,9 @@ def create_chat_model(
         factory = qwen_factory or ChatOpenAI
     else:  # pragma: no cover - ConfiguredRole is produced by strict parsing.
         raise ValueError("Unsupported LLM provider.")
-    return factory(**provider_client_kwargs(config))
+    kwargs = provider_client_kwargs(config)
+    if http_client is not None:
+        kwargs["http_client"] = http_client
+    if http_async_client is not None:
+        kwargs["http_async_client"] = http_async_client
+    return factory(**kwargs)

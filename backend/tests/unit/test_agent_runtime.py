@@ -1,272 +1,203 @@
 import pytest
-
+from backend.tests.agent_state import agent_run
 from materialsagent.application.agent_runtime import AgentRuntime
-from materialsagent.domain.models.agent import AgentRun, ArgumentDraft, Observation, RunBudget, identifier
+from materialsagent.domain.models.agent import ArgumentDraft, Observation, RunBudget, identifier
 from materialsagent.domain.ports.agent import AgentConflictError
 from materialsagent.infrastructure.llm.agent_model import MockAgentModel
 
+pytestmark = pytest.mark.anyio
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
 
 class Store:
-    def __init__(self, run):
-        self.run = run.model_copy(deep=True)
-        self.transactions = 0
-
-    def get(self, run_id, actor_id):
-        assert actor_id == self.run.actor_id
-        return self.run.model_copy(deep=True)
-
+    def __init__(self, run): self.run = run.model_copy(deep=True)
+    def get(self, run_id, actor_id): return self.run.model_copy(deep=True)
     def save(self, run):
-        if run.version != self.run.version:
-            raise AgentConflictError()
+        if run.version != self.run.version: raise AgentConflictError()
         run.validate_transition(self.run)
+        if run.pending_message:
+            value = run.pending_message
+            run.messages.append({"message_id": value["message_id"], "text": value["text"], "role": "ASSISTANT", "attachments": []})
+            run.pending_message = None
         run.version += 1
         self.run = run.model_copy(deep=True)
-
+    def receipt(self, run_id, actor_id, record, observation):
+        run = self.get(run_id, actor_id)
+        record.status, record.observation_id = observation.status, observation.observation_id
+        run.observations.append(observation)
+        run.executions.append(record.model_copy(deep=True))
+        run.pending_execution, run.draft = None, None
+        next(s for s in run.steps if s.step_id == record.action_id).status = "COMPLETED"
+        self.save(run)
+        return self.get(run_id, actor_id)
 
 class Tools:
     def __init__(self, store):
-        self.store = store
-        self.executed = []
-        self.resolved = []
+        self.store, self.executed, self.resolved = store, [], []
         self.require_confirmation = False
-
     def catalog(self):
         return [{"tool_name": name, "schema": {"properties": {"value": {"type": "number"}}}, "execution_profile": "STANDARD"} for name in ["predict", "convert"]]
-
     def resolve(self, run, name, arguments):
         self.resolved.append(arguments)
-        values = {**(run.draft.normalized if run.draft else {}), **arguments}
-        return ArgumentDraft(tool_name=name, version="1", schema_hash="a" * 64, arguments=values, normalized=values,
-            issues={} if isinstance(values.get("value"), (int, float)) else {"value": "Missing"}, resolver_authoritative=True)
-
+        return ArgumentDraft(tool_name=name, version="1", schema_hash="a"*64, arguments=arguments, normalized=arguments,
+            issues={} if isinstance(arguments.get("value"), (int,float)) else {"value":"Missing"}, resolver_authoritative=True)
     def prepare(self, run, record):
         record.invocation_run_id = identifier()
-        if self.require_confirmation:
-            record.status = "PENDING_CONFIRMATION"
+        if self.require_confirmation: record.status = "PENDING_CONFIRMATION"
         return record
-
     def execute(self, run, record, timeout):
-        assert self.store.transactions == 0
         assert self.store.run.pending_execution.dispatched
         self.executed.append(record)
         return Observation(step_id=record.action_id, kind="TOOL_RESULT", status="SUCCEEDED", tool_name=record.tool_name,
-            invocation_run_id=record.invocation_run_id, data={"value": record.arguments["value"] * 2})
-
-    def confirm(self, run, record, approved):
-        pass
-
-    def repair(self, run, record):
-        return None
-
+            invocation_run_id=record.invocation_run_id, data={"value":record.arguments["value"]*2})
+    def confirm(self, run, record, approved): pass
+    def repair(self, run, record): return None
 
 def setup(responder, **kwargs):
-    run = AgentRun(conversation_id="conversation", actor_id="actor", source_message_id="message", goal="test", **kwargs)
-    store = Store(run)
-    tools = Tools(store)
-    runtime = AgentRuntime(store, MockAgentModel(responder), tools)
-    return run, store, tools, runtime
+    run = agent_run(conversation_id="conversation", actor_id="actor", source_message_id="message", goal="test", **kwargs)
+    store = Store(run); tools = Tools(store)
+    return run, store, tools, AgentRuntime(store, MockAgentModel(responder), tools)
+
+def answer(run): return next(m["text"] for m in run.messages if m["message_id"] == run.final_message_id)
+
+def resume(store, text):
+    run = store.run
+    run.status = "PENDING"; run.version += 1
+    identity = identifier(); run.user_message_ids.append(identity)
+    run.messages.append({"message_id":identity,"text":text,"role":"USER","attachments":[]})
+
+async def test_multi_tool_observation_loop_publishes_without_finalizer():
+    roles=[]
+    def respond(role,payload):
+        roles.append(role)
+        results=payload["observations"]
+        if not results: return {"type":"CallTool","tool_name":"predict","arguments":{"value":2}}
+        if len(results)==1: return {"type":"CallTool","tool_name":"convert","arguments":{"value":4}}
+        return {"type":"Finish","answer":"8"}
+    run,store,tools,runtime=setup(respond)
+    result=await runtime.advance(run.agent_run_id,"actor")
+    assert result.status=="SUCCEEDED" and answer(result)=="8"
+    assert roles==["agent_decision"]*3 and len(tools.executed)==2
+    assert (await runtime.advance(run.agent_run_id,"actor")).final_message_id==result.final_message_id
+
+async def test_question_is_an_ordinary_message_and_resume_uses_main_model():
+    roles=[]
+    def respond(role,payload):
+        roles.append(role)
+        if payload["observations"]: return {"type":"Finish","answer":"完成"}
+        if payload["user_inputs"]: return {"type":"CallTool","tool_name":"predict","arguments":{"value":3}}
+        return {"type":"AskUser","question":"数值？"}
+    run,store,tools,runtime=setup(respond)
+    waiting=await runtime.advance(run.agent_run_id,"actor")
+    assert waiting.status=="WAITING_FOR_USER" and waiting.waiting.question=="数值？"
+    assert not tools.resolved
+    resume(store,"3")
+    result=await runtime.advance(run.agent_run_id,"actor")
+    assert result.status=="SUCCEEDED" and result.agent_run_id==waiting.agent_run_id
+    assert roles==["agent_decision"]*3 and result.llm_tokens>waiting.llm_tokens
+
+async def test_validation_issues_return_to_loop_before_any_execution():
+    def respond(role,payload):
+        if payload["draft"]: return {"type":"AskUser","question":"数值？"}
+        return {"type":"CallTool","tool_name":"predict","arguments":{}}
+    run,store,tools,runtime=setup(respond)
+    result=await runtime.advance(run.agent_run_id,"actor")
+    assert result.status=="WAITING_FOR_USER" and result.draft.issues=={"value":"Missing"}
+    assert len(result.calls)==2 and not tools.executed
+
+@pytest.mark.parametrize("proposal", [
+    {"type":"Finish"}, {"type":"Finish","answer":""},
+    {"type":"Finish","answer":"ok","needs_synthesis":True},
+    {"type":"AskUser","question":"?","reason":"INTENT_CLARIFICATION"},
+])
+async def test_retired_or_incomplete_proposals_are_rejected(proposal):
+    run,store,tools,runtime=setup(lambda *_:proposal)
+    assert (await runtime.advance(run.agent_run_id,"actor")).status=="TERMINATED"
+    assert not tools.executed
+
+async def test_duplicate_success_never_dispatches_again():
+    run,store,tools,runtime=setup(lambda *_:{"type":"CallTool","tool_name":"predict","arguments":{"value":1}})
+    result=await runtime.advance(run.agent_run_id,"actor")
+    assert result.error_code=="DUPLICATE_TOOL_CALL" and len(tools.executed)==1
+
+async def test_regeneration_has_empty_tools_and_an_execution_gate():
+    def respond(role,payload):
+        assert payload["tools"]==[]
+        return {"type":"CallTool","tool_name":"predict","arguments":{"value":1}}
+    run,store,tools,runtime=setup(respond,tool_execution_disabled=True)
+    result=await runtime.advance(run.agent_run_id,"actor")
+    assert result.error_code=="TOOL_EXECUTION_DISABLED" and not tools.resolved and not tools.executed
+
+async def test_step_limit_does_not_call_model_again():
+    run,store,tools,runtime=setup(lambda *_:{"type":"CallTool","tool_name":"predict","arguments":{"value":1}},budget=RunBudget(max_action_steps=1))
+    result=await runtime.advance(run.agent_run_id,"actor")
+    assert result.error_code=="AGENT_STEP_BUDGET_EXCEEDED" and len(result.calls)==1
+
+async def test_tool_time_is_budgeted_and_committed_observation_is_retained():
+    ticks=[0.0]
+    run,store,tools,runtime=setup(lambda *_:{"type":"CallTool","tool_name":"predict","arguments":{"value":1}},budget=RunBudget(max_active_seconds=3))
+    runtime.monotonic=lambda:ticks[0]
+    original=tools.execute
+    def slow(*args): ticks[0]+=4; return original(*args)
+    tools.execute=slow
+    result=await runtime.advance(run.agent_run_id,"actor")
+    assert result.error_code=="AGENT_ACTIVE_TIME_EXCEEDED" and result.observations[0].status=="SUCCEEDED"
+
+async def test_waiting_time_does_not_consume_active_budget():
+    run,store,tools,runtime=setup(lambda role,p:{"type":"Finish","answer":"done"} if p["user_inputs"] else {"type":"AskUser","question":"目标？"})
+    ticks=[0.0];runtime.monotonic=lambda:ticks[0]
+    await runtime.advance(run.agent_run_id,"actor")
+    ticks[0]=10000;resume(store,"说明即可")
+    result=await runtime.advance(run.agent_run_id,"actor")
+    assert result.status=="SUCCEEDED" and result.active_seconds==0
+
+async def test_untrusted_source_cannot_be_published():
+    run,store,tools,runtime=setup(lambda *_:{"type":"Finish","answer":"ok","sources":["not-a-result"]})
+    result=await runtime.advance(run.agent_run_id,"actor")
+    assert result.error_code=="FINAL_ANSWER_SOURCE_MISMATCH" and not result.final_message_id
 
 
-def test_persisted_action_drops_call_scoped_resource_handle_before_binding():
-    proposal = {"type": "CallTool", "tool_name": "predict", "arguments": {
-        "value": 2, "dataset_reference": {"resource_ref": "r1"}}}
-    run, store, tools, runtime = setup(lambda role, payload:
-        {"type": "Finish", "answer": "done"} if payload["observations"] else proposal)
-    tools.catalog = lambda: [{"tool_name": "predict", "schema": {"properties": {
-        "value": {"type": "number"}, "dataset_id": {"type": "string"}}},
-        "execution_profile": "STANDARD", "resource_parameters": [{
-            "model_argument": "dataset_reference", "execution_argument": "dataset_id",
-            "expected_resource_type": "dataset", "provider": "ml_resource", "required": True}]}]
-
-    class Resources:
-        def context(self, run):
-            return {"view": {"resources": [{"resource_ref": "r1", "resource_type": "dataset",
-                "name": "input.csv"}], "complete": True, "omitted_count": 0},
-                "mapping": {"r1": {"provider": "ml_resource", "resource_type": "dataset",
-                    "platform_resource_id": "private-reference"}}}
-
-    tools.resource_context = Resources()
-    resolve = tools.resolve
-    resolved_resources = []
-    def resolve_resource(run, name, arguments):
-        resolved_resources.append(arguments)
-        return resolve(run, name, {"value": arguments["value"]})
-    tools.resolve = resolve_resource
-
-    result = runtime.advance(run.agent_run_id, "actor")
-
-    assert result.status == "SUCCEEDED", result.error_code
-    persisted = store.get(run.agent_run_id, "actor")
-    assert persisted.steps[0].action.arguments == {"value": 2}
-    assert resolved_resources[0]["dataset_id"]["platform_resource_id"] == "private-reference"
-    assert "dataset_reference" not in resolved_resources[0]
-    assert proposal["arguments"] == {"value": 2, "dataset_reference": {"resource_ref": "r1"}}
-    assert len(tools.executed) == 1
-
-
-def test_multi_tool_observation_loop_and_final_commit():
-    calls = []
+async def test_malformed_proposal_returns_to_main_model_without_reexecuting_result():
+    seen = []
     def respond(role, payload):
-        calls.append(role)
+        seen.append(payload)
         if not payload["observations"]:
             return {"type": "CallTool", "tool_name": "predict", "arguments": {"value": 2}}
-        if len(payload["observations"]) == 1:
+        if not payload.get("proposal_error"):
+            return {"type": "json_object"}
+        return {"type": "Finish", "answer": "结果为4"}
+    run, store, tools, runtime = setup(respond)
+    result = await runtime.advance(run.agent_run_id, "actor")
+    assert result.status == "SUCCEEDED" and answer(result) == "结果为4"
+    assert len(tools.executed) == 1 and len(result.calls) == 3
+    assert [step.status for step in result.steps] == ["COMPLETED", "FAILED", "COMPLETED"]
+    assert result.llm_tokens == sum(call.usage.total_tokens for call in result.calls)
+    assert seen[-1]["proposal_error"] and len(seen[-1]["observations"]) == 1
+
+
+async def test_repeated_json_failure_is_bounded_and_metered():
+    from materialsagent.domain.ports.agent import AgentModelResponse
+    run, store, tools, runtime = setup(lambda *_: None)
+    class InvalidModel(MockAgentModel):
+        async def ainvoke(self, request):
+            response = await super().ainvoke(request)
+            return AgentModelResponse(None, response.usage, "LLM_INVALID_JSON")
+    runtime.model = InvalidModel(lambda *_: None)
+    result = await runtime.advance(run.agent_run_id, "actor")
+    assert result.error_code == "LLM_INVALID_JSON" and len(result.calls) == 2
+    assert not tools.executed and result.llm_tokens == sum(call.usage.total_tokens for call in result.calls)
+
+
+async def test_duplicate_proposal_uses_existing_observation_to_finish_without_dispatch():
+    def respond(role, payload):
+        if payload.get("proposal_error"):
             assert payload["observations"][0]["data"]["value"] == 4
-            return {"type": "CallTool", "tool_name": "convert", "arguments": {"value": 4}}
-        return {"type": "Finish", "answer": "8"}
+            return {"type": "Finish", "answer": "已算得4，无需重复计算"}
+        return {"type": "CallTool", "tool_name": "predict", "arguments": {"value": 2}}
     run, store, tools, runtime = setup(respond)
-    result = runtime.advance(run.agent_run_id, "actor")
-    assert result.status == "SUCCEEDED", result.error_code
-    assert result.final_answer.text == "8"
-    assert len(tools.executed) == 2
-    assert calls == ["agent_decision"] * 3
-    replay = runtime.advance(run.agent_run_id, "actor")
-    assert replay.final_answer == result.final_answer
-    assert len(tools.executed) == 2
-
-
-def test_proactive_ask_then_incremental_resume_without_initial_extraction():
-    roles = []
-    def respond(role, payload):
-        roles.append(role)
-        if role == "tool_arg_resolution":
-            return {"value": 3}
-        if any(o["kind"] == "TOOL_RESULT" for o in payload["observations"]):
-            return {"type": "Finish", "answer": "完成"}
-        if payload["draft"] and not payload["draft"]["issues"]:
-            return {"type": "CallTool", "tool_name": "predict", "arguments": {}}
-        return {"type": "AskUser", "reason": "TOOL_ARGUMENT_CLARIFICATION", "tool_name": "predict", "fields": ["value"], "question": "数值？"}
-    run, store, tools, runtime = setup(respond)
-    waiting = runtime.advance(run.agent_run_id, "actor")
-    assert waiting.status == "WAITING_FOR_USER", waiting.error_code
-    assert len(tools.executed) == 0
-    assert roles == ["agent_decision"]
-    result = runtime.advance(run.agent_run_id, "actor", waiting_version=waiting.waiting_version, user_input="3")
-    assert result.status == "SUCCEEDED", result.error_code
-    assert roles.count("tool_arg_resolution") == 1
-    assert result.agent_run_id == waiting.agent_run_id
-    assert result.llm_tokens > waiting.llm_tokens
-
-
-@pytest.mark.parametrize("field", ["invented", "value"])
-def test_invalid_or_known_proactive_field_rejected(field):
-    run, _, tools, runtime = setup(lambda *_: {"type": "AskUser", "reason": "TOOL_ARGUMENT_CLARIFICATION",
-        "tool_name": "predict", "fields": [field], "question": "?", "known_arguments": {"value": 1}})
-    result = runtime.advance(run.agent_run_id, "actor")
-    assert result.status == "TERMINATED"
-    assert not tools.executed
-
-
-@pytest.mark.parametrize("issue", ["Missing", "Invalid", "Conflict", "Ambiguous"])
-@pytest.mark.parametrize(("known", "asked", "allowed"), [
-    ({}, ["value"], True),
-    ({"unit": "MPa"}, ["value"], True),
-    ({"unit": "GPa"}, ["value"], False),
-    ({"value": 5}, ["value"], False),
-    ({"value": None}, ["value"], False),
-    ({"invented": "MPa"}, ["value"], False),
-    ({"unit": "MPa"}, ["unit"], False),
-])
-def test_resolver_clarification_accepts_only_unchanged_reliable_facts(issue, known, asked, allowed):
-    draft = ArgumentDraft(tool_name="predict", version="1", schema_hash="a" * 64,
-        arguments={"value": None, "unit": "MPa"}, normalized={"value": None, "unit": "MPa"},
-        issues={"value": issue}, resolver_authoritative=True)
-    run, _, tools, runtime = setup(lambda *_: {
-        "type": "AskUser", "reason": "TOOL_ARGUMENT_CLARIFICATION", "tool_name": "predict",
-        "fields": asked, "question": "请提供数值", "known_arguments": known,
-    }, draft=draft)
-    tools.catalog = lambda: [{"tool_name": "predict", "schema": {"properties": {
-        "value": {"type": "number"}, "unit": {"type": "string"},
-    }}}]
-    result = runtime.advance(run.agent_run_id, "actor")
-    assert result.status == ("WAITING_FOR_USER" if allowed else "TERMINATED")
-    assert result.error_code == (None if allowed else "CLARIFICATION_CONTRADICTS_RESOLVER")
-    assert result.draft == draft
-    assert not tools.resolved and not tools.executed
-    assert [call.role for call in result.calls] == ["agent_decision"]
-
-
-def test_duplicate_success_terminates_without_second_dispatch():
-    run, _, tools, runtime = setup(lambda *_: {"type": "CallTool", "tool_name": "predict", "arguments": {"value": 1}})
-    result = runtime.advance(run.agent_run_id, "actor")
-    assert result.error_code == "DUPLICATE_TOOL_CALL"
-    assert result.duplicate_of_invocation_run_id == result.observations[0].invocation_run_id
-    assert len(tools.executed) == 1
-    assert result.observations[0].status == "SUCCEEDED"
-
-
-def test_regeneration_cannot_enter_resolver_or_executor():
-    def respond(role, payload):
-        assert payload["tools"] == []
-        assert payload["tool_execution_disabled"]
-        return {"type": "CallTool", "tool_name": "predict", "arguments": {"value": 1}}
-    run, _, tools, runtime = setup(respond, tool_execution_disabled=True, retry_type="ANSWER_REGENERATION")
-    result = runtime.advance(run.agent_run_id, "actor")
-    assert result.error_code == "TOOL_EXECUTION_DISABLED"
-    assert tools.executed == tools.resolved == []
-
-
-def test_confirmation_is_business_pause_and_duplicate_confirm_does_not_execute():
-    def respond(role, payload):
-        return {"type": "Finish", "answer": "done"} if payload["observations"] else {"type": "CallTool", "tool_name": "predict", "arguments": {"value": 1}}
-    run, _, tools, runtime = setup(respond)
-    tools.require_confirmation = True
-    waiting = runtime.advance(run.agent_run_id, "actor")
-    assert waiting.status == "WAITING_FOR_CONFIRMATION"
-    assert not tools.executed
-    result = runtime.advance(run.agent_run_id, "actor", waiting_version=waiting.waiting_version, confirmation=True)
-    assert result.status == "SUCCEEDED", result.error_code
-    runtime.advance(run.agent_run_id, "actor", waiting_version=waiting.waiting_version, confirmation=True)
-    assert len(tools.executed) == 1
-
-
-def test_step_limit_does_not_call_provider_again():
-    def respond(role, payload):
-        return {"type": "CallTool", "tool_name": "predict", "arguments": {"value": len(payload["observations"])}}
-    run, _, tools, runtime = setup(respond, budget=RunBudget(max_action_steps=2))
-    result = runtime.advance(run.agent_run_id, "actor")
-    assert result.error_code == "AGENT_STEP_BUDGET_EXCEEDED"
-    assert len(result.calls) == len(tools.executed) == 2
-
-
-@pytest.mark.parametrize("outcome", ["reject", "expire", "changed"])
-def test_confirmation_rejection_expiry_and_changed_arguments_never_dispatch(outcome):
-    from datetime import timedelta
-    from materialsagent.domain.models.agent import now
-    run, store, tools, runtime = setup(lambda *_: {"type": "CallTool", "tool_name": "predict", "arguments": {"value": 1}})
-    tools.require_confirmation = True
-    waiting = runtime.advance(run.agent_run_id, "actor")
-    if outcome == "expire":
-        store.run.pending_execution.confirmation_expires_at = now() - timedelta(seconds=1)
-    elif outcome == "changed":
-        store.run.pending_execution.arguments["value"] = 2
-    result = runtime.advance(run.agent_run_id, "actor", waiting_version=waiting.waiting_version, confirmation=outcome != "reject")
-    assert result.error_code == {"reject": "CONFIRMATION_REJECTED", "expire": "CONFIRMATION_EXPIRED", "changed": "CONFIRMATION_INVALIDATED"}[outcome]
-    assert not tools.executed
-
-
-def test_tool_time_counts_towards_active_budget_without_losing_observation():
-    ticks = [0.0]
-    run, store, tools, runtime = setup(lambda *_: {"type": "CallTool", "tool_name": "predict", "arguments": {"value": 1}}, budget=RunBudget(max_active_seconds=3))
-    runtime.monotonic = lambda: ticks[0]
-    execute = tools.execute
-    def slow(*args):
-        assert args[-1] == 3
-        ticks[0] += 4
-        return execute(*args)
-    tools.execute = slow
-    result = runtime.advance(run.agent_run_id, "actor")
-    assert result.error_code == "AGENT_ACTIVE_TIME_EXCEEDED"
-    assert result.observations[0].status == "SUCCEEDED"
-    assert len(result.calls) == len(tools.executed) == 1
-
-
-def test_waiting_time_does_not_consume_active_budget():
-    ticks = [0.0]
-    run, store, tools, runtime = setup(lambda role, payload: {"type": "Finish", "answer": "done"} if payload["user_inputs"] else {"type": "AskUser", "reason": "INTENT_CLARIFICATION", "question": "目标？"}, budget=RunBudget(max_active_seconds=3))
-    runtime.monotonic = lambda: ticks[0]
-    waiting = runtime.advance(run.agent_run_id, "actor")
-    ticks[0] += 10000
-    result = runtime.advance(run.agent_run_id, "actor", waiting_version=waiting.waiting_version, user_input="说明即可")
-    assert result.status == "SUCCEEDED"
-    assert result.active_seconds == 0
+    result = await runtime.advance(run.agent_run_id, "actor")
+    assert result.status == "SUCCEEDED" and len(tools.executed) == 1
+    assert len(result.calls) == 3 and len(result.observations) == 1
+    assert result.llm_tokens == sum(call.usage.total_tokens for call in result.calls)

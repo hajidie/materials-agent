@@ -8,6 +8,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     String,
@@ -275,6 +276,15 @@ class MessageRow(Base):
         ),
         CheckConstraint("generation_source <> 'AGENT' OR role = 'ASSISTANT'", name="ck_message_agent_source_role"),
         UniqueConstraint("conversation_id", "event_key", name="uq_message_conversation_event"),
+        UniqueConstraint("conversation_id", "sequence", name="uq_message_conversation_sequence"),
+        UniqueConstraint("answer_root_message_id", "answer_version", name="uq_message_answer_version"),
+        ForeignKeyConstraint(["answer_root_message_id", "conversation_id"], ["message.message_id", "message.conversation_id"],
+                             name="fk_message_answer_root", ondelete="CASCADE", deferrable=True, initially="DEFERRED"),
+        CheckConstraint("sequence > 0", name="ck_message_sequence"),
+        CheckConstraint("phase IN ('user','question','answer','notification')", name="ck_message_phase"),
+        CheckConstraint("(answer_root_message_id IS NULL AND answer_version IS NULL) OR "
+                        "(phase = 'answer' AND role = 'ASSISTANT' AND answer_root_message_id IS NOT NULL AND answer_version > 0)",
+                        name="ck_message_answer_version"),
         UniqueConstraint(
             "message_id",
             "conversation_id",
@@ -290,6 +300,12 @@ class MessageRow(Base):
 
     message_id: Mapped[str] = mapped_column(Text, primary_key=True)
     event_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    phase: Mapped[str] = mapped_column(String(16), nullable=False, default="notification", server_default="notification")
+    agent_run_id: Mapped[str | None] = mapped_column(ForeignKey("agent_run.agent_run_id", name="fk_message_agent_run",
+        ondelete="CASCADE", use_alter=True, deferrable=True, initially="DEFERRED"), nullable=True)
+    answer_root_message_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    answer_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     conversation_id: Mapped[str] = mapped_column(
         ForeignKey(
             "conversation.conversation_id",
@@ -948,3 +964,21 @@ class SQLAlchemyTaskInputRevisionRepository:
         except SQLAlchemyError as error:
             _raise_safe_persistence_error(error)
         return [_revision_from_row(row) for row in rows]
+
+
+# Every writer (including asynchronous result observation) shares the conversation order.
+from sqlalchemy import event, func
+
+
+@event.listens_for(Session, "before_flush")
+def assign_message_sequences(session, flush_context, instances):
+    messages = [row for row in session.new if isinstance(row, MessageRow) and row.sequence is None]
+    for conversation in sorted({row.conversation_id for row in messages}):
+        session.scalar(select(ConversationRow).where(ConversationRow.conversation_id == conversation).with_for_update())
+        latest = session.scalar(select(func.max(MessageRow.sequence)).where(MessageRow.conversation_id == conversation)) or 0
+        for row in messages:
+            if row.conversation_id == conversation:
+                latest += 1
+                row.sequence = latest
+                if row.role == "USER":
+                    row.phase = "user"

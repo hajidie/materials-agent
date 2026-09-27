@@ -1518,3 +1518,22 @@ a {
     transition-delay: 0ms !important;
   }
 }
+
+
+.composer__stop { display: inline-grid; place-items: center; width: 36px; height: 36px; flex: 0 0 36px; border: 1px solid #d7d7d5; border-radius: 50%; background: #fff; color: #343432; cursor: pointer; }
+.composer__stop svg { width: 24px; height: 24px; fill: currentColor; }
+.composer__stop:hover { background: #efefed; }
+.composer__stop:disabled { opacity: .55; cursor: wait; }
+.composer__question { margin: 0 0 6px; font-size: 12px; color: #777773; }
+.message-footer, .message-actions, .message-versions { display: flex; align-items: center; gap: 3px; }
+.message-footer { margin-top: 8px; gap: 12px; }
+.message-action { position: relative; display: inline-grid; place-items: center; width: 30px; height: 30px; padding: 6px; border: 0; border-radius: 6px; background: transparent; color: #858581; cursor: pointer; }
+.message-action:hover, .message-action:focus-visible { background: #eeeeeb; color: #4c4c49; }
+.message-action:disabled { opacity: .4; cursor: default; }
+.message-action svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.message-action__tooltip { display: none; position: absolute; bottom: calc(100% + 5px); left: 50%; transform: translateX(-50%); white-space: nowrap; padding: 4px 7px; border-radius: 5px; background: #343432; color: #fff; font-size: 11px; pointer-events: none; }
+.message-action:hover .message-action__tooltip, .message-action:focus-visible .message-action__tooltip { display: block; }
+.message-actions__feedback, .message-versions { font-size: 12px; color: #858581; }
+.message-versions button { width: 26px; height: 28px; border: 0; border-radius: 5px; background: transparent; color: inherit; font-size: 20px; cursor: pointer; }
+.message-versions button:hover { background: #eeeeeb; }
+.message-versions button:disabled { opacity: .35; cursor: default; }
