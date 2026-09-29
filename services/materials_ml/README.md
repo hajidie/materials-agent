@@ -2,7 +2,7 @@
 
 独立的 Python 3.11 数值表格单目标回归包，当前仅实现 LR/RF。它不导入 Flask、FastAPI、MCP、Agent、
 数据库、MinIO 或旧 `index.py`。同安装包中的 `materials_ml_service` 提供独立 Resource API、Windows Worker、Prediction 和可选 MCP 入口；
-领域边界见 [项目上下文](../../docs/project-context.md#materials-ml-领域边界)。平台可显式启用可信资源上下文，
+领域边界见 [架构说明](../../docs/architecture.md#工具与资源边界)。平台可显式启用可信资源上下文，
 通过现有 Agent/MCP 提交训练；默认关闭。平台仅提供聊天内附件、结果卡片与 Viewer，不建设独立 ML 管理 UI。
 
 ## 安装与验证
