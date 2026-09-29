@@ -4,8 +4,27 @@ from collections.abc import Callable
 
 from langchain_deepseek import ChatDeepSeek
 from langchain_openai import ChatOpenAI
+from langchain_core.messages import AIMessage
 
 from materialsagent.infrastructure.llm.configuration import ConfiguredRole
+
+
+class ChatDeepSeekReasoning(ChatDeepSeek):
+    """Round-trip DeepSeek thinking fields during native tool-call continuation."""
+
+    def _get_request_payload(self, input_, *, stop=None, **kwargs):
+        messages = self._convert_input(input_).to_messages()
+        payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        encoded = payload.get("messages", ())
+        if len(messages) != len(encoded):
+            raise ValueError("DeepSeek message serialization changed unexpectedly.")
+        for source, target in zip(messages, encoded, strict=True):
+            if isinstance(source, AIMessage) and "reasoning_content" in source.additional_kwargs:
+                reasoning = source.additional_kwargs["reasoning_content"]
+                if not isinstance(reasoning, str) or target.get("role") != "assistant":
+                    raise ValueError("DeepSeek reasoning message is invalid.")
+                target["reasoning_content"] = reasoning
+        return payload
 
 
 def provider_client_kwargs(config: ConfiguredRole) -> dict[str, object]:
@@ -59,7 +78,7 @@ def create_chat_model(
     http_async_client: object | None = None,
 ) -> object:
     if config.provider == "deepseek":
-        factory = deepseek_factory or ChatDeepSeek
+        factory = deepseek_factory or ChatDeepSeekReasoning
     elif config.provider == "qwen":
         factory = qwen_factory or ChatOpenAI
     else:  # pragma: no cover - ConfiguredRole is produced by strict parsing.

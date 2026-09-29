@@ -32,7 +32,7 @@ def message(http, scope, text, key, waiting=None):
         print(json.dumps(http.get("/acceptance/p6-budget").json()))
     assert value["status"] != "TERMINATED", json.dumps({"error_code": value["error_code"], "draft": value["draft"],
         "budget": http.get("/acceptance/p6-budget").json() if os.environ.get("P6_REAL_LLM") == "1" else None,
-        "actions": [s["action"] for s in value["steps"]], "observation_errors": [o.get("error") for o in value["observations"]]})
+        "executions": [e["tool_name"] for e in value["executions"]], "observation_errors": [o.get("error") for o in value["observations"]]})
     return value
 
 
@@ -47,7 +47,7 @@ def language_cycle(backend, ml, csv_payload, table, tmp_path, algorithm):
         waiting = message(http, scope, f"请用刚才上传的数据训练 {algorithm} 单目标回归，特征 x、z，目标 strength_MPa。", "train")
         submitted = confirm(http, waiting)
         assert submitted["status"] == "SUCCEEDED", json.dumps({"waiting": submitted["waiting"], "draft": submitted["draft"],
-            "actions": [s["action"] for s in submitted["steps"]], "error": submitted["error_code"]})
+            "executions": [e["tool_name"] for e in submitted["executions"]], "error": submitted["error_code"]})
         training = result(submitted)
         assert training["status"] == "PENDING"
         refs = http.get(prefix + "/resources?limit=100").json()["data"]["items"]
@@ -64,7 +64,7 @@ def language_cycle(backend, ml, csv_payload, table, tmp_path, algorithm):
         upload(http, scope, incoming.to_csv(index=False).encode(), "incoming")
         waiting = message(http, scope, "请用刚才训练好的模型对第二个数据集执行预测。", "predict")
         assert waiting["status"] == "WAITING_FOR_CONFIRMATION", json.dumps({"waiting": waiting["waiting"], "draft": waiting["draft"],
-            "actions": [s["action"] for s in waiting["steps"]]})
+            "executions": [e["tool_name"] for e in waiting["executions"]]})
         completed = confirm(http, waiting)
         assert completed["status"] == "SUCCEEDED", {"error": completed["error_code"], "observations": [o.get("error") for o in completed["observations"]]}
         prediction = result(completed)
@@ -85,9 +85,11 @@ def language_cycle(backend, ml, csv_payload, table, tmp_path, algorithm):
         original_question = ambiguous["question_message_id"]
         chosen = message(http, scope, "第二个数据集", "choose", ambiguous)
         assert chosen["status"] == "SUCCEEDED", json.dumps({"waiting": chosen["waiting"], "draft": chosen["draft"],
-            "actions": [s["action"] for s in chosen["steps"]]})
+            "executions": [e["tool_name"] for e in chosen["executions"]]})
         assert result(chosen)["id"] != dataset["resource_id"]
-        assert chosen["steps"][len(ambiguous["steps"])-1]["message_id"] == original_question
+        assert chosen["agent_run_id"] == ambiguous["agent_run_id"]
+        messages = http.get(f"/api/v1/conversations/{scope}/messages").json()["data"]["items"]
+        assert sum(m["message_id"] == original_question and m["phase"] == "question" for m in messages) == 1
         assert "resource_snapshot" not in chosen
 
 
@@ -136,13 +138,13 @@ def test_opt_in_real_llm_pronouns_context_and_clarification(context_platform, cs
         second = upload(http, scope, csv_payload, "second")
         selected = message(http, scope, "帮我看看后传上来的那份表。", "context-ranked")
         assert selected["status"] == "SUCCEEDED", json.dumps({"waiting": selected["waiting"], "draft": selected["draft"],
-            "actions": [s["action"] for s in selected["steps"]]})
+            "executions": [e["tool_name"] for e in selected["executions"]]})
         assert result(selected)["id"] == second["resource_id"]
         ambiguous = message(http, scope, "我想分析一个数据集，不过还没决定用哪份，先问我再执行分析。", "ambiguous")
         assert ambiguous["status"] == "WAITING_FOR_USER"
         chosen = message(http, scope, "就用先上传的那份", "semantic-choice", ambiguous)
         assert chosen["status"] == "SUCCEEDED", json.dumps({"waiting": chosen["waiting"], "draft": chosen["draft"],
-            "actions": [s["action"] for s in chosen["steps"]]})
+            "executions": [e["tool_name"] for e in chosen["executions"]]})
         assert result(chosen)["id"] == first["resource_id"]
 
 

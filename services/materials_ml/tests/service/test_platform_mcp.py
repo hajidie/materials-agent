@@ -319,25 +319,34 @@ def test_unknown_training_safe_observation_historical_receipt_and_no_reexecution
             backend.settings["enable_materials_ml_resource_context"] = False
             backend.start()
             stopped = diagnostic_run(http, http.get(f"/api/v1/agent-runs/{waiting['agent_run_id']}").json()["data"])
-        assert stopped["status"] == "TERMINATED" and stopped["answer_message"] is None
-        assert len(stopped["calls"]) == len(waiting["calls"]), "Model continued after unknown"
         observation = next(o for o in stopped["observations"] if o["kind"] == "TOOL_RESULT")
-        assert observation["error"]["code"] == "MCP_OUTCOME_UNKNOWN"
-        assert observation["error"]["outcome"] == "UNKNOWN" and observation["error"]["retryable"] is False
         invocation = observation["invocation_run_id"]
         prefix = f"/api/v1/agent-runs/{waiting['agent_run_id']}/invocations/{invocation}"
-        if fault == "backend-disabled":
-            assert http.get(prefix + "/receipt").json()["data"]["status"] == "OUTCOME_UNKNOWN"
-            backend.stop(); backend.settings["enable_dev_materials_ml_tools"] = True; backend.start()
-        reconciled = http.post(prefix + "/reconcile").json()["data"]
-        assert reconciled["status"] == "OUTCOME_UNKNOWN"
-        assert reconciled["remote_receipt"]["lookup_status"] == "FOUND"
-        remote = reconciled["remote_receipt"]["resource"]
+        if stopped["status"] == "SUCCEEDED":
+            # SDK recovery may verify the original receipt and finish the Run.
+            assert observation["status"] == "SUCCEEDED" and stopped["answer_message"] is not None
+            assert len(stopped["executions"]) == 1
+            remote = result(stopped)
+            assert http.get(prefix + "/receipt").json()["data"]["status"] == "SUCCEEDED"
+        else:
+            assert stopped["status"] == "TERMINATED" and stopped["answer_message"] is None
+            assert len(stopped["calls"]) == len(waiting["calls"]), "Model continued after unknown"
+            assert observation["error"]["code"] == "MCP_OUTCOME_UNKNOWN"
+            assert observation["error"]["outcome"] == "UNKNOWN" and observation["error"]["retryable"] is False
+            if fault == "backend-disabled":
+                assert http.get(prefix + "/receipt").json()["data"]["status"] == "OUTCOME_UNKNOWN"
+                backend.stop(); backend.settings["enable_dev_materials_ml_tools"] = True; backend.start()
+            reconciled = http.post(prefix + "/reconcile").json()["data"]
+            assert reconciled["status"] == "OUTCOME_UNKNOWN"
+            assert reconciled["remote_receipt"]["lookup_status"] == "FOUND"
+            remote = reconciled["remote_receipt"]["resource"]
+            with ThreadPoolExecutor(4) as pool:
+                checks = list(pool.map(lambda _: http.post(prefix + "/reconcile"), range(4)))
+            assert all(r.status_code == 200 and r.json()["data"]["status"] == "OUTCOME_UNKNOWN"
+                       and r.json()["data"]["remote_receipt"]["resource"]["id"] == remote["id"] for r in checks)
         assert remote["status"] == "PENDING"
-        with ThreadPoolExecutor(4) as pool:
-            checks = list(pool.map(lambda _: http.post(prefix + "/reconcile"), range(4)))
-        assert all(r.status_code == 200 and r.json()["data"]["status"] == "OUTCOME_UNKNOWN"
-                   and r.json()["data"]["remote_receipt"]["resource"]["id"] == remote["id"] for r in checks)
+        if fault == "backend-disabled" and stopped["status"] == "SUCCEEDED":
+            backend.stop(); backend.settings["enable_dev_materials_ml_tools"] = True; backend.start()
         retry = http.post(f"/api/v1/agent-runs/{waiting['agent_run_id']}/retry", headers={"Idempotency-Key": "forbidden-retry"},
             json={"retry_type": "TOOL_RETRY", "invocation_run_id": invocation})
         assert retry.status_code >= 400

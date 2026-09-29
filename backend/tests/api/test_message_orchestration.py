@@ -20,10 +20,10 @@ def test_new_message_executes_tool_then_decides_and_persists_answer(api_harness)
             json={"mode": "NEW_RUN", "content_text": "1000 MPa 转 GPa"}, headers={"Idempotency-Key": "agent-api-convert"})
         assert response.status_code == 200, response.text
         run = stored_run(client, response.json()["data"]["agent_run"])
-        assert run["status"] == "SUCCEEDED", (run["error_code"], run["steps"], run["observations"], run["pending_execution"])
+        assert run["status"] == "SUCCEEDED", (run["error_code"], run["calls"], run["observations"], run["pending_execution"])
         assert len(run["executions"]) == 1
         assert run["observations"][0]["data"]["value"] == 1
-        assert len(run["steps"]) == 2
+        assert len(run["calls"]) == 2
         replay = post_message(client, f"/api/v1/conversations/{conversation_id}/messages",
             json={"mode": "NEW_RUN", "content_text": "1000 MPa 转 GPa"}, headers={"Idempotency-Key": "agent-api-convert"})
         assert stored_run(client, replay.json()["data"]["agent_run"])["final_answer"] == run["final_answer"]
@@ -40,7 +40,7 @@ def test_regeneration_reuses_observation_without_executor(api_harness):
         first = post_message(client, f"/api/v1/conversations/{conversation_id}/messages",
             json={"mode": "NEW_RUN", "content_text": "1000 MPa 转 GPa"}, headers={"Idempotency-Key": "agent-first"})
         run = stored_run(client, first.json()["data"]["agent_run"])
-        assert run["status"] == "SUCCEEDED", (run["error_code"], run["steps"], run["observations"], run["pending_execution"])
+        assert run["status"] == "SUCCEEDED", (run["error_code"], run["calls"], run["observations"], run["pending_execution"])
         regenerated = post_operation(client, f"/api/v1/messages/{run['final_message_id']}/regenerate", headers={"Idempotency-Key": "agent-regenerate"})
         assert regenerated.status_code == 200, regenerated.text
         result = stored_run(client, regenerated.json()["data"]["agent_run"])

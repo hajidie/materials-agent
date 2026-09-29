@@ -4,12 +4,12 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import or_, and_, CheckConstraint, DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, select, update
+from sqlalchemy import or_, and_, CheckConstraint, DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, delete, select, update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
 
-from materialsagent.domain.models.agent import AgentRun, RunBudget, TokenUsage, Observation, fingerprint, identifier, now
+from materialsagent.domain.models.agent import AgentRun, RunBudget, TokenUsage, Observation, fingerprint, identifier, now, tool_call_key
 from materialsagent.domain.ports.agent import AgentConflictError, AgentFailure
 from materialsagent.infrastructure.db.base import Base
 from materialsagent.infrastructure.db.conversation_task import ConversationRow, MessageRow
@@ -45,19 +45,10 @@ class AgentSubmissionRow(Base):
     payload_hash: Mapped[str] = mapped_column(String(64))
 
 
-class AgentStepRow(Base):
-    __tablename__ = "agent_step"
-    __table_args__ = (UniqueConstraint("agent_run_id", "number", name="uq_agent_step_number"),)
-    step_id: Mapped[str] = mapped_column(Text, primary_key=True)
-    agent_run_id: Mapped[str] = mapped_column(ForeignKey("agent_run.agent_run_id", ondelete="CASCADE"))
-    number: Mapped[int] = mapped_column(Integer)
-    document: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE)
-
-
 class AgentExecutionRow(Base):
     __tablename__ = "agent_execution"
-    action_id: Mapped[str] = mapped_column(ForeignKey("agent_step.step_id", ondelete="CASCADE"), primary_key=True)
-    agent_run_id: Mapped[str] = mapped_column(ForeignKey("agent_run.agent_run_id", ondelete="CASCADE"))
+    tool_call_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    agent_run_id: Mapped[str] = mapped_column(ForeignKey("agent_run.agent_run_id", ondelete="CASCADE"), primary_key=True)
     invocation_run_id: Mapped[str] = mapped_column(ForeignKey("invocation_run.invocation_run_id", ondelete="CASCADE"), unique=True)
     document: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE)
 
@@ -67,7 +58,7 @@ class AgentObservationRow(Base):
     __table_args__ = (UniqueConstraint("agent_run_id", "invocation_run_id", name="uq_agent_observation_invocation"),)
     observation_id: Mapped[str] = mapped_column(Text, primary_key=True)
     agent_run_id: Mapped[str] = mapped_column(ForeignKey("agent_run.agent_run_id", ondelete="CASCADE"))
-    step_id: Mapped[str] = mapped_column(ForeignKey("agent_step.step_id", ondelete="CASCADE"))
+    tool_call_id: Mapped[str] = mapped_column(Text)
     invocation_run_id: Mapped[str | None] = mapped_column(ForeignKey("invocation_run.invocation_run_id", ondelete="CASCADE"), nullable=True)
     document: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE)
 
@@ -76,17 +67,40 @@ class AgentModelCallRow(Base):
     __tablename__ = "agent_model_call"
     call_id: Mapped[str] = mapped_column(Text, primary_key=True)
     agent_run_id: Mapped[str] = mapped_column(ForeignKey("agent_run.agent_run_id", ondelete="CASCADE"))
-    step_id: Mapped[str] = mapped_column(ForeignKey("agent_step.step_id", ondelete="CASCADE"))
     document: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE)
 
 
-AGENT_TABLES = [AgentRunRow.__table__, AgentSubmissionRow.__table__, AgentStepRow.__table__,
-                AgentObservationRow.__table__, AgentModelCallRow.__table__, AgentExecutionRow.__table__]
+class AgentCheckpointCleanupRow(Base):
+    __tablename__ = "agent_checkpoint_cleanup"
+    agent_run_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+
+
+AGENT_TABLES = [AgentRunRow.__table__, AgentSubmissionRow.__table__,
+                AgentObservationRow.__table__, AgentModelCallRow.__table__, AgentExecutionRow.__table__,
+                AgentCheckpointCleanupRow.__table__]
 
 
 class SQLAlchemyAgentStore:
     def __init__(self, session_factory):
         self.sessions = session_factory
+
+    def checkpoint_cleanup_ids(self, *, limit: int = 100) -> list[str]:
+        with self.sessions() as session:
+            return list(session.scalars(select(AgentCheckpointCleanupRow.agent_run_id)
+                .order_by(AgentCheckpointCleanupRow.created_at).limit(limit)).all())
+
+    def complete_checkpoint_cleanup(self, run_id: str) -> None:
+        with self.sessions.begin() as session:
+            session.execute(delete(AgentCheckpointCleanupRow).where(
+                AgentCheckpointCleanupRow.agent_run_id == run_id))
+
+    def checkpoint_cleanup_failed(self, run_id: str) -> None:
+        with self.sessions.begin() as session:
+            session.execute(update(AgentCheckpointCleanupRow).where(
+                AgentCheckpointCleanupRow.agent_run_id == run_id).values(
+                    attempts=AgentCheckpointCleanupRow.attempts + 1))
 
     @staticmethod
     def _run(document):
@@ -258,7 +272,6 @@ class SQLAlchemyAgentStore:
             return self._hydrate(session, run), False
 
     def save(self, run: AgentRun) -> None:
-        run.last_completed_step = max((s.number for s in run.steps if s.status == "COMPLETED"), default=0)
         version = run.version
         with self.sessions.begin() as session:
             # Serialize deletion versus acquisition, only for this short commit.
@@ -284,6 +297,8 @@ class SQLAlchemyAgentStore:
             if count != 1:
                 raise AgentConflictError("AgentRun advance already claimed.")
             self._audit(session, run)
+            if run.terminal and session.get(AgentCheckpointCleanupRow, run.agent_run_id) is None:
+                session.add(AgentCheckpointCleanupRow(agent_run_id=run.agent_run_id, created_at=now(), attempts=0))
             if run.pending_message:
                 from materialsagent.application.chat_artifacts import run_artifacts
                 value = run.pending_message
@@ -297,99 +312,90 @@ class SQLAlchemyAgentStore:
                     agent_run_id=run.agent_run_id, actor_id=run.actor_id, task_id=None, request_id=run.submission_id or run.agent_run_id,
                     role="ASSISTANT", generation_source="AGENT", phase=value["phase"], content_text=value["text"],
                     answer_root_message_id=root, answer_version=answer_version,
-                    structured_content={"contract": "chat-v2", "sources": value["sources"], "step_id": value["step_id"],
+                    structured_content={"contract": "chat-v2", "sources": value["sources"],
                         "artifacts": run_artifacts(session, run, value["sources"]) if value["phase"] == "answer" else []}, created_at=now()))
             owner.updated_at = max(owner.updated_at, run.updated_at)
         run.version = version + 1
         run.pending_message = None
 
-    def recover_interrupted(self, process_id: str, *, repair=None) -> None:
+    def recover_interrupted(self, process_id: str, *, repair=None) -> list[tuple[str, str, str]]:
+        """Release stale claims and meter interrupted model calls before SDK replay."""
         with self.sessions() as session:
-            rows = session.scalars(select(AgentRunRow).where(or_(AgentRunRow.status.in_(["PENDING", "RUNNING"]), and_(AgentRunRow.status == "TERMINATED", AgentRunRow.document["error_code"].as_string() == "USER_STOPPED")))).all()
-            runs = [self._hydrate(session, self._run(row.document)) for row in rows]
-        for run in runs:
-            if run.process_id != process_id:
-                if run.error_code == "USER_STOPPED":
-                    record = run.pending_execution
-                    if repair is not None and record and record.dispatched:
-                        try:
-                            observation = repair(run, record)
-                            if observation is not None:
-                                self.receipt(run.agent_run_id, run.actor_id, record, observation)
-                        except (AgentFailure, AgentConflictError):
-                            pass  # Keep the receipt fence; never redispatch after restart.
-                    continue
-                if run.status == "RUNNING":
-                    run.active_seconds += max(0, (now() - run.updated_at).total_seconds())
+            rows = session.scalars(select(AgentRunRow).where(or_(
+                AgentRunRow.status.in_(["PENDING", "RUNNING", "WAITING_FOR_USER", "WAITING_FOR_CONFIRMATION"]),
+                and_(AgentRunRow.status == "TERMINATED",
+                     AgentRunRow.document["error_code"].as_string() == "USER_STOPPED"),
+            ))).all()
+            candidates = [(row.agent_run_id, row.actor_id, row.status) for row in rows]
+        result = []
+        for run_id, actor_id, status in candidates:
+            if status == "TERMINATED":
+                run = self.get(run_id, actor_id)
                 record = run.pending_execution
                 if repair is not None and record and record.dispatched:
                     try:
                         observation = repair(run, record)
                         if observation is not None:
-                            if observation.invocation_run_id != record.invocation_run_id:
-                                raise AgentFailure("OBSERVATION_SOURCE_MISMATCH")
-                            observation.step_id = record.action_id
-                            if not any(o.invocation_run_id == record.invocation_run_id for o in run.observations):
-                                run.observations.append(observation)
-                            record.status = observation.status
-                            record.task_id, record.tool_run_id = observation.task_id, observation.tool_run_id
-                            record.observation_id = observation.observation_id
-                            record.retryable = bool(observation.error and observation.error.get("retryable"))
-                            run.executions.append(record.model_copy(deep=True))
-                            run.pending_execution = None
-                            for step in run.steps:
-                                if step.step_id == record.action_id:
-                                    step.status = "COMPLETED"
-                    except Exception:
-                        run.error_code = "OBSERVATION_INCONSISTENT"
-                run.status, run.error_code = "TERMINATED", run.error_code or "PROCESS_INTERRUPTED"
-                for call in run.calls:
-                    if call.status == "RUNNING":
-                        call.status, call.error_code = "FAILED", "PROCESS_INTERRUPTED"
-                        call.usage = TokenUsage(input_tokens=call.input_reserved, output_tokens=call.output_limit,
-                            total_tokens=call.input_reserved + call.output_limit, source="estimated",
-                            estimator_version="cl100k-x2-or-utf8-framing-v1")
-                        run.llm_tokens += call.usage.total_tokens
-                for step in run.steps:
-                    if step.status == "RUNNING":
-                        step.status = "FAILED"
-                try:
-                    self.save(run)
-                except AgentConflictError:
-                    pass
+                            self.receipt(run_id, actor_id, record, observation)
+                    except (AgentFailure, AgentConflictError):
+                        pass
+                continue
+            if status == "RUNNING":
+                with self.sessions.begin() as session:
+                    row = session.scalar(select(AgentRunRow).where(
+                        AgentRunRow.agent_run_id == run_id,
+                        AgentRunRow.actor_id == actor_id).with_for_update())
+                    if row is None or row.status != "RUNNING":
+                        continue
+                    run = self._run(row.document)
+                    if run.process_id == process_id:
+                        continue
+                    # Downtime is not active execution time. The previous
+                    # process persisted its metered active time at each fence.
+                    for call in run.calls:
+                        if call.status == "RUNNING":
+                            call.status, call.error_code = "FAILED", "PROCESS_INTERRUPTED"
+                            call.usage = TokenUsage(input_tokens=call.input_reserved,
+                                output_tokens=call.output_limit,
+                                total_tokens=call.input_reserved + call.output_limit,
+                                source="estimated", estimator_version="cl100k-x2-or-utf8-framing-v1")
+                            run.llm_tokens += call.usage.total_tokens
+                    run.status, run.claim, run.process_id = "PENDING", None, None
+                    run.recovery_replay = True
+                    run.version += 1
+                    run.updated_at = now()
+                    self._audit(session, run)
+                    row.version, row.status, row.document = run.version, run.status, run.model_dump(mode="json")
+                result.append((run_id, actor_id, "PENDING"))
+            else:
+                result.append((run_id, actor_id, status))
+        return result
 
     def _audit(self, session, run):
-        for step in run.steps:
-            stored = session.get(AgentStepRow, step.step_id)
-            if stored:
-                stored.document = step.model_dump(mode="json")
-            else:
-                session.add(AgentStepRow(step_id=step.step_id, agent_run_id=run.agent_run_id, number=step.number, document=step.model_dump(mode="json")))
-        session.flush()
         for execution in run.executions + ([run.pending_execution] if run.pending_execution else []):
             if not execution.invocation_run_id:
                 continue
-            stored = session.get(AgentExecutionRow, execution.action_id)
+            stored = session.get(AgentExecutionRow, (execution.tool_call_id, run.agent_run_id))
             if stored:
                 if stored.invocation_run_id != execution.invocation_run_id:
-                    raise AgentConflictError("Action Invocation cannot change.")
+                    raise AgentConflictError("Tool-call Invocation cannot change.")
                 stored.document = execution.model_dump(mode="json")
             else:
-                session.add(AgentExecutionRow(action_id=execution.action_id, agent_run_id=run.agent_run_id,
+                session.add(AgentExecutionRow(tool_call_id=execution.tool_call_id, agent_run_id=run.agent_run_id,
                     invocation_run_id=execution.invocation_run_id, document=execution.model_dump(mode="json")))
         for observation in run.observations:
             if observation.source_agent_run_id:
                 continue  # Imported references remain owned by the original Run.
             if session.get(AgentObservationRow, observation.observation_id) is None:
                 session.add(AgentObservationRow(observation_id=observation.observation_id, agent_run_id=run.agent_run_id,
-                    step_id=observation.step_id, invocation_run_id=observation.invocation_run_id, document=observation.model_dump(mode="json")))
+                    tool_call_id=observation.tool_call_id, invocation_run_id=observation.invocation_run_id, document=observation.model_dump(mode="json")))
         for call in run.calls:
             stored = session.get(AgentModelCallRow, call.call_id)
             if stored:
                 stored.document = call.model_dump(mode="json")
             else:
                 session.add(AgentModelCallRow(call_id=call.call_id, agent_run_id=run.agent_run_id,
-                    step_id=call.step_id, document=call.model_dump(mode="json")))
+                    document=call.model_dump(mode="json")))
 
     def stop(self, run_id, actor_id, submission_id):
         run, stopped = self._stop(run_id, actor_id, submission_id)
@@ -402,7 +408,7 @@ class SQLAlchemyAgentStore:
             with self.sessions.begin() as session:
                 invocation = session.scalar(select(InvocationRunRow).where(
                     InvocationRunRow.actor_id == actor_id, InvocationRunRow.conversation_id == run.conversation_id,
-                    InvocationRunRow.idempotency_key == "agent-action:" + record.action_id).with_for_update())
+                    InvocationRunRow.idempotency_key == tool_call_key(run.agent_run_id, record.tool_call_id)).with_for_update())
                 if invocation and invocation.status == "PENDING":
                     current = _run_from_row(invocation)
                     failed = current.transition(InvocationStatus.FAILED, now=now(), completed_at=now(),
@@ -437,10 +443,9 @@ class SQLAlchemyAgentStore:
                         total_tokens=call.input_reserved + call.output_limit, source="estimated",
                         estimator_version="cl100k-x2-or-utf8-framing-v1")
                     run.llm_tokens += call.usage.total_tokens
-            for step in run.steps:
-                if step.status == "RUNNING" and not (run.pending_execution and run.pending_execution.dispatched):
-                    step.status = "FAILED"
             self._audit(session, run)
+            if session.get(AgentCheckpointCleanupRow, run.agent_run_id) is None:
+                session.add(AgentCheckpointCleanupRow(agent_run_id=run.agent_run_id, created_at=now(), attempts=0))
             run.version += 1
             row.version, row.status, row.document = run.version, run.status, run.model_dump(mode="json")
             return self._hydrate(session, run), True
@@ -458,13 +463,13 @@ class SQLAlchemyAgentStore:
             if any(o.invocation_run_id == record.invocation_run_id for o in run.observations):
                 return self._hydrate(session, run)
             if (not pending or not pending.dispatched or pending.invocation_run_id != record.invocation_run_id
-                    or pending.action_id != record.action_id or pending.execution_fingerprint != record.execution_fingerprint
+                    or pending.tool_call_id != record.tool_call_id or pending.execution_fingerprint != record.execution_fingerprint
                     or observation.invocation_run_id != record.invocation_run_id
                     or run.status not in ("RUNNING", "TERMINATED")):
                 raise AgentConflictError("Receipt does not own this dispatched execution.")
             if run.status == "TERMINATED" and run.error_code != "USER_STOPPED":
                 raise AgentConflictError("Only a stopped run accepts a late receipt.")
-            observation.step_id = record.action_id
+            observation.tool_call_id = record.tool_call_id
             record.status = observation.status
             record.task_id, record.tool_run_id = observation.task_id, observation.tool_run_id
             record.retryable = bool(observation.error and observation.error.get("retryable"))
@@ -472,9 +477,6 @@ class SQLAlchemyAgentStore:
             run.observations.append(observation)
             run.executions.append(record.model_copy(deep=True))
             run.pending_execution, run.draft, run.retry_execution = None, None, None
-            for step in run.steps:
-                if step.step_id == record.action_id:
-                    step.status = "COMPLETED"
             self._audit(session, run)
             run.version += 1
             run.updated_at = now()
@@ -494,7 +496,7 @@ class SQLAlchemyAgentStore:
 
     def fail_execution(self, run_id, actor_id, record):
         observation = Observation(
-            step_id=record.action_id, kind="TOOL_RESULT", status="FAILED", tool_name=record.tool_name,
+            tool_call_id=record.tool_call_id, kind="TOOL_RESULT", status="FAILED", tool_name=record.tool_name,
             invocation_run_id=record.invocation_run_id, error={"code": "TOOL_EXECUTION_FAILED", "retryable": False})
         return self.receipt(run_id, actor_id, record, observation)
 

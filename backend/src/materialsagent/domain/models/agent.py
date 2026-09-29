@@ -4,10 +4,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 def now() -> datetime:
@@ -26,12 +26,16 @@ def fingerprint(value: Any) -> str:
     return sha256(canonical(value).encode("utf-8")).hexdigest()
 
 
+def tool_call_key(agent_run_id: str, tool_call_id: str) -> str:
+    return "agent-tool-call:" + fingerprint([agent_run_id, tool_call_id])
+
+
 class Contract(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
 
 class RunBudget(Contract):
-    max_action_steps: int = Field(default=12, ge=1, le=100)
+    max_model_calls: int = Field(default=12, ge=1, le=100)
     max_tool_executions: int = Field(default=4, ge=1, le=32)
     max_active_seconds: float = Field(default=3600, gt=0, le=86400)
     max_llm_tokens: int = Field(default=64000, ge=1, le=2000000)
@@ -39,26 +43,8 @@ class RunBudget(Contract):
     managed_timeout_seconds: float = Field(default=1200, gt=0, le=86400)
 
 
-class CallTool(Contract):
-    type: Literal["CallTool"]
-    tool_name: str = Field(min_length=1, max_length=128)
-    arguments: dict[str, Any]
-    user_unit_assertions: list[dict[str, str]] = Field(default_factory=list, max_length=16)
-
-
-class AskUser(Contract):
-    type: Literal["AskUser"]
+class PendingQuestion(Contract):
     question: str = Field(min_length=1, max_length=2048)
-
-
-class Finish(Contract):
-    type: Literal["Finish"]
-    answer: str = Field(min_length=1, max_length=16384)
-    observation_ids: list[str] = Field(default_factory=list)
-
-
-AgentAction = Annotated[CallTool | AskUser | Finish, Field(discriminator="type")]
-ACTION_ADAPTER = TypeAdapter(AgentAction)
 
 
 class TokenUsage(Contract):
@@ -80,7 +66,6 @@ class TokenUsage(Contract):
 
 class ModelCall(Contract):
     call_id: str = Field(default_factory=identifier)
-    step_id: str
     role: Literal["agent_decision"]
     status: Literal["RUNNING", "SUCCEEDED", "FAILED"] = "RUNNING"
     prompt_digest: str
@@ -91,20 +76,10 @@ class ModelCall(Contract):
     created_at: datetime = Field(default_factory=now)
 
 
-class AgentStep(Contract):
-    step_id: str = Field(default_factory=identifier)
-    number: int = Field(ge=1)
-    status: Literal["RUNNING", "COMPLETED", "FAILED"] = "RUNNING"
-    action: AgentAction | None = None
-    action_type: Literal["CallTool", "AskUser", "Finish"] | None = None
-    message_id: str | None = None
-    created_at: datetime = Field(default_factory=now)
-
-
 class Observation(Contract):
     unit_annotations: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
     observation_id: str = Field(default_factory=identifier)
-    step_id: str
+    tool_call_id: str
     kind: Literal["TOOL_RESULT", "ARGUMENT_RESOLUTION"]
     status: str
     tool_name: str
@@ -168,7 +143,7 @@ class ArgumentDraft(Contract):
 class ExecutionRecord(Contract):
     unit_annotations: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
     resource_bindings: dict[str, ResourceBinding] = Field(default_factory=dict)
-    action_id: str
+    tool_call_id: str
     tool_name: str
     version: str
     schema_hash: str
@@ -185,6 +160,7 @@ class ExecutionRecord(Contract):
     observation_id: str | None = None
     task_id: str | None = None
     tool_run_id: str | None = None
+    created_at: datetime = Field(default_factory=now)
 
 
 class AgentRun(Contract):
@@ -211,7 +187,6 @@ class AgentRun(Contract):
     stop_requested_at: datetime | None = None
     draft: ArgumentDraft | None = None
     pending_execution: ExecutionRecord | None = None
-    steps: list[AgentStep] = Field(default_factory=list)
     observations: list[Observation] = Field(default_factory=list)
     executions: list[ExecutionRecord] = Field(default_factory=list)
     calls: list[ModelCall] = Field(default_factory=list)
@@ -223,7 +198,11 @@ class AgentRun(Contract):
     attachments: list[dict[str, Any]] = Field(default_factory=list, max_length=1)
     result_attachments: list[dict[str, Any]] = Field(default_factory=list, exclude=True)
     error_code: str | None = None
-    last_completed_step: int = 0
+    pending_tool_call_id: str | None = None
+    pending_resource_map: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    answered_questions: dict[str, str] = Field(default_factory=dict)
+    confirmation_response: dict[str, Any] | None = None
+    recovery_replay: bool = False
     duplicate_of_invocation_run_id: str | None = None
     source_agent_run_id: str | None = None
     retry_type: Literal["TOOL_RETRY", "ANSWER_REGENERATION"] | None = None
@@ -257,9 +236,9 @@ class AgentRun(Contract):
                 for i in self.context_message_ids if i in by_id]
 
     @property
-    def waiting(self) -> AskUser | None:
+    def waiting(self) -> PendingQuestion | None:
         message = next((m for m in self.messages if m["message_id"] == self.question_message_id), None)
-        return AskUser(type="AskUser", question=message["text"]) if message else None
+        return PendingQuestion(question=message["text"]) if message else None
 
     def validate_transition(self, previous: AgentRun) -> None:
         allowed = {

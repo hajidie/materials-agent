@@ -382,7 +382,11 @@ def create_app(
         gateway = RegistryAgentGateway(resolved_tool_registry, resolved_unit_of_work_factory,
             resolved_invocation_service, resolved_tool_workflow_service, resolved_tool_result_query_service)
         resolved_agent_runtime = AgentRuntime(resolved_agent_store, resolved_agent_model, gateway, **({"clock": clock} if clock else {}))
-    agent_budget = RunBudget(max_action_steps=resolved_settings.agent_max_action_steps,
+    from materialsagent.infrastructure.db.agent_checkpoint import AgentCheckpointStore
+    agent_checkpoints = (AgentCheckpointStore(resolved_settings)
+        if isinstance(resolved_agent_runtime, AgentRuntime)
+        and isinstance(resolved_agent_runtime.store, SQLAlchemyAgentStore) else None)
+    agent_budget = RunBudget(max_model_calls=resolved_settings.agent_max_model_calls,
         max_tool_executions=resolved_settings.agent_max_tool_executions,
         max_active_seconds=resolved_settings.agent_max_active_seconds, max_llm_tokens=resolved_settings.agent_max_llm_tokens,
         standard_timeout_seconds=resolved_settings.agent_standard_timeout_seconds,
@@ -424,11 +428,16 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         try:
+            if agent_checkpoints is not None:
+                saver = await agent_checkpoints.open()
+                resolved_agent_runtime.checkpointer = saver
+                resolved_agent_runtime.checkpoint_cleanup = agent_checkpoints
+                await resolved_agent_runtime.cleanup_checkpoints()
             if resolved_actor_context and callable(getattr(resolved_invocation_service, "recover_mcp", None)):
                 from starlette.concurrency import run_in_threadpool
                 await run_in_threadpool(resolved_invocation_service.recover_mcp, resolved_actor_context, cutoff=process_cutoff)
-            if resolved_agent_runtime is not None and hasattr(resolved_agent_runtime.store, "recover_interrupted"):
-                resolved_agent_runtime.store.recover_interrupted(resolved_agent_runtime.process_id, repair=resolved_agent_runtime.tools.repair)
+            if agent_checkpoints is not None:
+                await resolved_agent_runtime.recover()
             if (
                 resolved_conversation_cleanup_service is not None
                 and resolved_actor_context is not None
@@ -450,6 +459,8 @@ def create_app(
         finally:
             if resolved_agent_runtime is not None:
                 await resolved_agent_runtime.close()
+            if agent_checkpoints is not None:
+                await agent_checkpoints.close()
             if mcp_client is not None:
                 from starlette.concurrency import run_in_threadpool
                 await run_in_threadpool(mcp_client.close)

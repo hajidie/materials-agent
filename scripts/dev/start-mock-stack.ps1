@@ -1134,6 +1134,10 @@ function Invoke-AlembicReadiness {
         if ($LASTEXITCODE -ne 0) {
             throw 'Alembic upgrade head failed.'
         }
+        & $Python -m materialsagent.maintenance.setup_agent_checkpoints 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Agent checkpoint setup failed.'
+        }
 
         $currentOutput = @(& $Python -m alembic -c backend/alembic.ini current 2>&1)
         if ($LASTEXITCODE -ne 0) {
@@ -1774,7 +1778,7 @@ function Invoke-MockStackStart {
         -FilePath $python `
         -ArgumentList @(
             '-m'
-            'uvicorn'
+            'materialsagent.maintenance.serve'
             'materialsagent.main:create_app'
             '--factory'
             '--app-dir'

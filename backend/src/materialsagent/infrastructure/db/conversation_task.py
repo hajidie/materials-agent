@@ -15,6 +15,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     and_,
+    inspect,
     or_,
     select,
 )
@@ -617,6 +618,19 @@ class SQLAlchemyConversationRepository:
             row = self._session.scalar(statement)
             if row is None:
                 return False
+            from materialsagent.infrastructure.db.agent import AgentCheckpointCleanupRow, AgentRunRow
+            from materialsagent.domain.models.agent import now
+
+            run_ids = self._session.scalars(select(AgentRunRow.agent_run_id).where(
+                AgentRunRow.conversation_id == conversation_id,
+                AgentRunRow.actor_id == actor_id)).all()
+            # The controlled chat cleanup runs before migration 0024. Old Runs
+            # have no SDK checkpoints, and the cleanup outbox does not exist yet.
+            if run_ids and inspect(self._session.connection()).has_table("agent_checkpoint_cleanup"):
+                for run_id in run_ids:
+                    if self._session.get(AgentCheckpointCleanupRow, run_id) is None:
+                        self._session.add(AgentCheckpointCleanupRow(
+                            agent_run_id=run_id, created_at=now(), attempts=0))
             self._session.delete(row)
             self._session.flush()
             return True

@@ -90,7 +90,7 @@ def test_invalid_annotation_container_is_not_silently_ignored(values):
 def test_unit_question_reply_confirms_only_explicit_unit_delta_and_survives_next_decision():
     from materialsagent.application.agent_tools import ToolArgResolver
     from materialsagent.application.tools import build_tool_registry
-    from materialsagent.domain.models.agent import AgentRun, AskUser, now
+    from materialsagent.domain.models.agent import AgentRun, now
     resolver = ToolArgResolver(build_tool_registry(), lambda: pytest.fail("No database access needed"), now)
     tool = "materials_unit_conversion"
     run = agent_run(conversation_id="conversation", actor_id="actor", source_message_id="message",
@@ -115,7 +115,7 @@ def test_resource_unit_confirmation_survives_repeated_model_inference_for_same_b
     from materialsagent.application.agent_tools import ToolArgResolver
     from materialsagent.application.materials_ml_tools import build_ml_tools
     from materialsagent.application.tools import build_tool_registry
-    from materialsagent.domain.models.agent import AgentRun, AskUser, now
+    from materialsagent.domain.models.agent import AgentRun, now
 
     class ResourceContext:
         def __init__(self):

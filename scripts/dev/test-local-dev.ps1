@@ -385,6 +385,29 @@ Invoke-Test 'configured Backend interpreter passes the offline version preflight
     Assert-PythonVersion -Python $python -ExpectedMajorMinor '3.11'
 }
 
+Invoke-Test 'Conda stderr diagnostics do not fail a successful environment query' {
+    $python = Resolve-CondaEnvironmentPython -EnvironmentName 'materialsagent-backend'
+    $environmentPath = Split-Path -Parent $python
+    $json = @{ envs = @($environmentPath) } | ConvertTo-Json -Compress
+    $fakeConda = Join-Path ([IO.Path]::GetTempPath()) (
+        'materialsagent-noisy-conda-{0}.cmd' -f [Guid]::NewGuid().ToString('N')
+    )
+    $originalResolver = (Get-Command Resolve-CondaExecutable).ScriptBlock
+    [IO.File]::WriteAllText(
+        $fakeConda,
+        "@echo off`r`necho plugin warning 1>&2`r`necho $json`r`n"
+    )
+    try {
+        Set-Item Function:\Resolve-CondaExecutable -Value { return $fakeConda }
+        $resolved = Resolve-CondaEnvironmentPython -EnvironmentName 'materialsagent-backend'
+        Assert-Equal $resolved $python 'Conda environment Python'
+    }
+    finally {
+        Set-Item Function:\Resolve-CondaExecutable -Value $originalResolver
+        Remove-Item -LiteralPath $fakeConda -Force
+    }
+}
+
 Invoke-Test 'managed native arguments preserve spaces and quotes without a shell' {
     $python = Resolve-CondaEnvironmentPython `
         -EnvironmentName 'materialsagent-backend'

@@ -227,6 +227,17 @@ def test_explicit_mapping_does_not_read_env_file(
     assert settings.minio_access_key is None
 
 
+def test_explicit_mapping_does_not_read_process_environment(monkeypatch) -> None:
+    from materialsagent.infrastructure.config import load_settings
+
+    monkeypatch.setenv("POSTGRES_HOST", "127.0.0.1")
+    monkeypatch.setenv("POSTGRES_PASSWORD", "environment-secret")
+    settings = load_settings({})
+
+    assert settings.postgres_host is None
+    assert settings.postgres_password is None
+
+
 def test_runtime_configuration_is_loopback_only_and_secret_safe() -> None:
     from materialsagent.infrastructure.config import (
         load_settings,

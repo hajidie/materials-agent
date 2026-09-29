@@ -235,13 +235,30 @@ def trace(run_id: str, request: Request, actor: Annotated[ActorContext, Depends(
     if not getattr(request.app.state, "m5_dev_routes_enabled", False):
         raise HTTPException(404, detail="NOT_FOUND")
     run = runtime_for(request).store.get(run_id, actor.actor_id)
-    steps = run.steps[offset:offset + limit]
-    ids = {s.step_id for s in steps}
+    records = [
+        {"kind": "model_call", "created_at": call.created_at.isoformat(),
+         "record": {"call_id": call.call_id, "status": call.status,
+                    "usage": call.usage.model_dump(mode="json") if call.usage else None,
+                    "error_code": call.error_code}}
+        for call in run.calls
+    ] + [
+        {"kind": "tool_call", "created_at": execution.created_at.isoformat(),
+         "record": {"tool_call_id": execution.tool_call_id,
+                    "tool_name": execution.tool_name, "status": execution.status,
+                    "invocation_run_id": execution.invocation_run_id}}
+        for execution in [*run.executions, *([run.pending_execution] if run.pending_execution else [])]
+    ] + [
+        {"kind": "observation", "created_at": observation.created_at.isoformat(),
+         "record": {"observation_id": observation.observation_id,
+                    "tool_call_id": observation.tool_call_id,
+                    "tool_name": observation.tool_name, "status": observation.status,
+                    "invocation_run_id": observation.invocation_run_id}}
+        for observation in run.observations
+    ]
+    records.sort(key=lambda item: item["created_at"])
     return {"request_id": request.state.request_id, "data": {
-        "steps": [s.model_dump(mode="json") for s in steps],
-        "observations": [o.model_dump(mode="json") for o in run.observations if o.step_id in ids],
-        "model_calls": [c.model_dump(mode="json") for c in run.calls if c.step_id in ids],
-        "next_offset": offset + limit if offset + limit < len(run.steps) else None}}
+        "events": records[offset:offset + limit],
+        "next_offset": offset + limit if offset + limit < len(records) else None}}
 
 
 async def _confirmation(run_id, invocation_id, body, request, actor, approved):

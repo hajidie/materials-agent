@@ -157,40 +157,36 @@ def test_authority_read_has_absolute_deadline_and_closes_transport(monkeypatch):
 
 
 def test_provider_window_reduction_only_removes_public_resources():
-    import json
-    from backend.tests.unit.test_llm_provider_factory import _role
-    from materialsagent.infrastructure.llm.agent_model import AgentModelAdapter
-    adapter = AgentModelAdapter({"agent_decision": _role("deepseek", "agent_decision", prompt_limit_tokens=8192)})
+    from materialsagent.application.agent_runtime import trim_public_context
+    from materialsagent.application.context_framework import ContextFrame, PROFILES
     original = {"complete": True, "omitted_count": 0,
         "resources": [{"resource_ref": f"r{i + 1}", "resource_type": "dataset", "name": "材料" * 500,
                        "source": "registered"} for i in range(20)]}
-    request = adapter.prepare("agent_decision", {"goal": "请明确数据集", "resource_context": original}, 32000, 10)
-    sent = json.loads(request.messages[-1]["content"])["resource_context"]
+    frame = ContextFrame(PROFILES["agent_decision"], {"goal": "请明确数据集", "resource_context": original.copy()},
+        {}, set(), {f"r{i + 1}": {"platform_resource_id": str(i)} for i in range(20)}, {}, {})
+    trim_public_context(frame, [], 8192)
+    sent = frame.payload["resource_context"]
     assert not sent["complete"] and sent["omitted_count"] > 0 and len(sent["resources"]) < 20
     assert original["complete"] and len(original["resources"]) == 20
+    assert set(frame.resource_map) == {item["resource_ref"] for item in sent["resources"]}
 
 
 def test_decision_prompt_contains_resource_ref_protocol_not_events():
-    from backend.tests.unit.test_llm_provider_factory import _role
-    from materialsagent.infrastructure.llm.agent_model import AgentModelAdapter
-    adapter = AgentModelAdapter({"agent_decision": _role("deepseek", "agent_decision", prompt_limit_tokens=8192)})
-    request = adapter.prepare("agent_decision", {"user_input": "先上传的那份", "resource_context": {
-        "resources": [{"resource_ref": "r1", "resource_type": "dataset", "name": "训练集", "source": "uploaded"}],
-        "complete": True, "omitted_count": 0}}, 32000, 10)
-    instructions = request.messages[0]["content"]
+    from materialsagent.application.sdk_agent_loop import NATIVE_AGENT_INSTRUCTIONS
+    instructions = NATIVE_AGENT_INSTRUCTIONS
     assert "resource_ref" in instructions and "event_mapping" not in instructions
-    assert "Finish" in instructions and "CallTool" in instructions
+    assert "Finish" not in instructions and "CallTool" not in instructions
 
 
 def test_execution_facts_do_not_depend_on_resource_snapshots():
     from materialsagent.application.agent_runtime import AgentRuntime
     current = run()
-    current.executions = [ExecutionRecord(action_id="a", tool_name="materials_ml_analyze_tabular_dataset", version="1",
+    current.executions = [ExecutionRecord(tool_call_id="a", tool_name="materials_ml_analyze_tabular_dataset", version="1",
         schema_hash="hash", arguments={"dataset_id": "verified-id"}, execution_fingerprint="fp",
         status="SUCCEEDED", observation_id="result")]
     facts = AgentRuntime(None, None, SimpleNamespace(catalog=lambda: []))._context(current)["execution_facts"]
-    assert facts == [{"tool_name": "materials_ml_analyze_tabular_dataset", "arguments": {"dataset_id": "verified-id"},
-                      "status": "SUCCEEDED", "observation_id": "result"}]
+    assert facts == [{"tool_name": "materials_ml_analyze_tabular_dataset", "status": "SUCCEEDED",
+                      "observation_id": "result"}]
 
 
 def test_explicit_reconcile_rejects_retained_found_after_failed_latest_lookup():
@@ -201,7 +197,7 @@ def test_explicit_reconcile_rejects_retained_found_after_failed_latest_lookup():
     calls = SimpleNamespace(get=lambda *args: SimpleNamespace(run=invocation), _current_registration=lambda *args: None)
     registrar = MLResourceResultRegistrar(None, calls)
     current = run()
-    record = ExecutionRecord(action_id="a", tool_name="materials_ml_train_tabular_regression", version="1", schema_hash="x",
+    record = ExecutionRecord(tool_call_id="a", tool_name="materials_ml_train_tabular_regression", version="1", schema_hash="x",
         arguments={"dataset_id": "data"}, execution_fingerprint="x", invocation_run_id="invocation")
     assert registrar.adopt(current, record, reconcile_operation="explicit") is None
     assert registrar.adopt(current, record) is None

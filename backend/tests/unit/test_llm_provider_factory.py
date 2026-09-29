@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from pydantic import SecretStr
 
 from materialsagent.infrastructure.llm.configuration import ConfiguredRole
@@ -72,6 +73,25 @@ def test_deepseek_factory_receives_only_controlled_parameters() -> None:
     ]
 
 
+def test_deepseek_thinking_tool_continuation_replays_reasoning_content() -> None:
+    from materialsagent.infrastructure.llm.factory import ChatDeepSeekReasoning
+
+    model = ChatDeepSeekReasoning(
+        model="deepseek-reasoner", api_key="test-key", base_url="https://api.deepseek.com",
+    )
+    payload = model._get_request_payload([
+        HumanMessage(content="Convert a value"),
+        AIMessage(content="", additional_kwargs={"reasoning_content": "private reasoning"},
+                  tool_calls=[{"name": "convert", "args": {"value": 1}, "id": "call-1"}]),
+        ToolMessage(content="converted", tool_call_id="call-1"),
+    ])
+
+    assert payload["messages"][1]["reasoning_content"] == "private reasoning"
+    assert payload["messages"][1]["tool_calls"][0]["id"] == "call-1"
+    assert payload["messages"][2]["tool_call_id"] == "call-1"
+    assert "reasoning_content" not in payload["messages"][0]
+
+
 def test_qwen_reasoning_extensions_and_streaming_are_controlled() -> None:
     from materialsagent.infrastructure.llm.factory import create_chat_model
 
@@ -107,6 +127,22 @@ def test_qwen_reasoning_extensions_and_streaming_are_controlled() -> None:
         "top_k": 20,
         "thinking_budget": 4096,
     }
+
+
+def test_qwen_native_tool_continuation_request_payload() -> None:
+    from materialsagent.infrastructure.llm.factory import create_chat_model
+
+    model = create_chat_model(_role("qwen", "agent_decision", response_format=None))
+    payload = model._get_request_payload([
+        HumanMessage(content="Convert a value"),
+        AIMessage(content="", tool_calls=[{"name": "convert", "args": {"value": 1}, "id": "call-1"}]),
+        ToolMessage(content="converted", tool_call_id="call-1"),
+    ], parallel_tool_calls=False)
+
+    assert payload["parallel_tool_calls"] is False
+    assert payload["messages"][1]["tool_calls"][0]["id"] == "call-1"
+    assert payload["messages"][2]["tool_call_id"] == "call-1"
+    assert "response_format" not in payload
 
 
 def test_calls_create_independent_model_instances() -> None:

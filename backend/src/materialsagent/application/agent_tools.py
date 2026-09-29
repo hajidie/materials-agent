@@ -14,7 +14,7 @@ from materialsagent.application.result_service import ResultPersistenceError
 from materialsagent.domain.ports.unit_of_work import PersistenceError
 from materialsagent.application.execution_deadline import tool_deadline, execution_owner
 from materialsagent.application.tool_proposals import ResolvedToolInvocationProposal
-from materialsagent.domain.models.agent import AgentRun, ArgumentDraft, ExecutionRecord, Observation, identifier, now, fingerprint
+from materialsagent.domain.models.agent import AgentRun, ArgumentDraft, ExecutionRecord, Observation, identifier, now, fingerprint, tool_call_key
 from materialsagent.domain.models.task import Task
 from materialsagent.domain.models.task_input_revision import TaskInputRevision
 from materialsagent.domain.models.tool_invocation import ProposalOrigin, ToolInvocationProposal, InvocationStatus
@@ -582,29 +582,30 @@ class RegistryAgentGateway:
         if registration.schema_hash != record.schema_hash or registration.version != record.version:
             raise AgentFailure("TOOL_SCHEMA_DRIFT")
         actor = ActorContext(actor_id=run.actor_id, user_id=None)
+        idempotency_key = tool_call_key(run.agent_run_id, record.tool_call_id)
         if registration.execution_profile is ToolExecutionProfile.MANAGED:
             if self.workflow is None or run.draft is None:
                 raise AgentFailure("RUNTIME_UNAVAILABLE")
             if run.retry_execution:
                 reserved = self.workflow.execution.reserve_retry_attempt(actor, task_id=run.draft.task_id,
-                    request_id=run.agent_run_id, idempotency_key="agent-action:" + record.action_id,
+                    request_id=run.agent_run_id, idempotency_key=idempotency_key,
                     request_digest=record.execution_fingerprint)
                 public = self.invocations.execute_managed_retry(actor, task_id=run.draft.task_id,
                     tool_run_id=reserved.tool_run.tool_run_id, source_message_id=run.source_message_id,
                     retry_of_invocation_run_id=record.retry_of_invocation_run_id,
-                    request_id=run.agent_run_id, idempotency_key="agent-action:" + record.action_id,
+                    request_id=run.agent_run_id, idempotency_key=idempotency_key,
                     workflow_service=self.workflow, defer_execution=True)
             else:
                 public, _ = self.invocations.execute_managed(actor, registration=registration,
                     task_id=run.draft.task_id, source_message_id=run.source_message_id,
                     task_input_revision_id=run.draft.revision_id, proposed_arguments=record.arguments,
-                    request_id=run.agent_run_id, idempotency_key="agent-action:" + record.action_id,
+                    request_id=run.agent_run_id, idempotency_key=idempotency_key,
                     workflow_service=self.workflow, defer_execution=True)
         else:
             proposal = ToolInvocationProposal(conversation_id=run.conversation_id, source_message_id=run.source_message_id,
                 model_tool_name=record.tool_name, proposed_arguments=record.arguments, origin=ProposalOrigin.STRUCTURED)
             public = self.invocations.create_from_proposal(actor, ResolvedToolInvocationProposal(proposal, registration),
-                request_id=run.agent_run_id, idempotency_key="agent-action:" + record.action_id, defer_execution=True)
+                request_id=run.agent_run_id, idempotency_key=idempotency_key, defer_execution=True)
         if record.retry_of_invocation_run_id and registration.execution_profile is not ToolExecutionProfile.MANAGED:
             with self.uow_factory() as uow:
                 current = uow.invocation_runs.get_owned(public.run.invocation_run_id, run.actor_id)
@@ -666,7 +667,7 @@ class RegistryAgentGateway:
 
     def repair(self, run, record):
         def tool_observation(**values):
-            return Observation(observation_id=fingerprint([run.agent_run_id, record.action_id, record.invocation_run_id]),
+            return Observation(observation_id=fingerprint([run.agent_run_id, record.tool_call_id, record.invocation_run_id]),
                 unit_annotations=record.unit_annotations, **values)
         actor = ActorContext(actor_id=run.actor_id, user_id=None)
         with self.uow_factory() as uow:
@@ -676,10 +677,10 @@ class RegistryAgentGateway:
             if invocation.execution_profile is not ToolExecutionProfile.MANAGED:
                 result = uow.invocation_results.get(invocation.invocation_result_id) if invocation.invocation_result_id else None
                 if result:
-                    return tool_observation(step_id=record.action_id, kind="TOOL_RESULT", status="SUCCEEDED", tool_name=record.tool_name,
+                    return tool_observation(tool_call_id=record.tool_call_id, kind="TOOL_RESULT", status="SUCCEEDED", tool_name=record.tool_name,
                         invocation_run_id=invocation.invocation_run_id, data=plain(result.data), presentation=plain(result.presentation))
                 if invocation.status in {InvocationStatus.FAILED, InvocationStatus.OUTCOME_UNKNOWN}:
-                    return tool_observation(step_id=record.action_id, kind="TOOL_RESULT", status="FAILED", tool_name=record.tool_name,
+                    return tool_observation(tool_call_id=record.tool_call_id, kind="TOOL_RESULT", status="FAILED", tool_name=record.tool_name,
                         invocation_run_id=invocation.invocation_run_id, error={"code": invocation.error_code,
                         "retryable": invocation.status is InvocationStatus.FAILED and invocation.executor_id != "mcp",
                         **({"outcome": "UNKNOWN", "message": invocation.safe_error_message}
@@ -689,7 +690,7 @@ class RegistryAgentGateway:
             result = uow.tool_results.get_owned(task.selected_result_id, run.actor_id) if task and task.selected_result_id else None
             if not result:
                 if invocation.status is InvocationStatus.FAILED:
-                    return tool_observation(step_id=record.action_id, kind="TOOL_RESULT", status="FAILED", tool_name=record.tool_name,
+                    return tool_observation(tool_call_id=record.tool_call_id, kind="TOOL_RESULT", status="FAILED", tool_name=record.tool_name,
                         invocation_run_id=invocation.invocation_run_id, task_id=invocation.task_id,
                         tool_run_id=task.selected_tool_run_id if task else None,
                         error={"code": invocation.error_code, "retryable": bool(task and
@@ -719,7 +720,7 @@ class RegistryAgentGateway:
         summary["created_at"] = result.created_at.isoformat()
         presenter = self.registry.resolve(record.tool_name).binding.presenter
         presentation = plain(presenter(summary)) if presenter else {}
-        return tool_observation(step_id=record.action_id, kind="TOOL_RESULT", status=result.status, tool_name=record.tool_name,
+        return tool_observation(tool_call_id=record.tool_call_id, kind="TOOL_RESULT", status=result.status, tool_name=record.tool_name,
             invocation_run_id=invocation.invocation_run_id, task_id=result.task_id, tool_run_id=result.tool_run_id,
             result_id=result.result_id, data=plain(result.data), artifacts=artifacts, result_summary=summary, presentation=presentation,
             warnings=plain(result.warnings), error=plain(result.error))

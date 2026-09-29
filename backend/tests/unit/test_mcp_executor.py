@@ -175,7 +175,7 @@ def test_unknown_has_safe_observation_and_reconcile_does_not_change_history():
     assert unknown.status is InvocationStatus.OUTCOME_UNKNOWN and unknown.invocation_result_id is None
     gateway = RegistryAgentGateway(registry, lambda: _Uow(store), service, None, None)
     observation = gateway.repair(SimpleNamespace(actor_id=ACTOR.actor_id, conversation_id="conversation_1", agent_run_id="agent"),
-        SimpleNamespace(invocation_run_id=run.invocation_run_id, action_id="step", tool_name=run.tool_id, unit_annotations=[]))
+        SimpleNamespace(invocation_run_id=run.invocation_run_id, tool_call_id="step", tool_name=run.tool_id, unit_annotations=[]))
     assert observation.status == "FAILED"
     assert observation.error["retryable"] is False and observation.error["outcome"] == "UNKNOWN"
     assert "不能判断资源已创建或未创建" in observation.error["message"]

@@ -8,7 +8,9 @@ import sys
 from materialsagent.application.tool_registry import ToolRegistry
 from materialsagent.application.tools import build_tool_registry
 from materialsagent.application.zta35g_tool import build_zta35g_tool_definition
-from materialsagent.domain.models.agent import CallTool
+from materialsagent.application.native_tool_protocol import sdk_tools
+from materialsagent.application.agent_tools import plain
+from jsonschema import Draft202012Validator
 from backend.tests.support.heterogeneous_tools import (
     build_ml_training_test_definition,
 )
@@ -51,25 +53,17 @@ def test_two_definition_registry_keeps_unrelated_contracts_and_hashes() -> None:
 
 
 def test_generic_candidate_validation_accepts_ml_training_fields() -> None:
-    candidate = CallTool(
-        type="CallTool",
-        tool_name="ml_training_test",
-        arguments={
+    definition = build_ml_training_test_definition()
+    tool = sdk_tools([{"tool_name": definition.tool_id, "description": "ML training",
+                      "schema": plain(definition.proposal_schema), "resource_parameters": []}], ask_user=False)[0]
+    arguments = {
             "dataset": "dataset_fixture_1",
             "task_type": "regression",
             "split_ratio": 0.8,
             "target_column": "yield_strength",
             "shuffle": True,
-        },
-    )
-
-    assert candidate.arguments == {
-        "dataset": "dataset_fixture_1",
-        "task_type": "regression",
-        "split_ratio": 0.8,
-        "target_column": "yield_strength",
-        "shuffle": True,
     }
+    Draft202012Validator(tool.args_schema).validate(arguments)
 
 
 def test_production_composition_registers_managed_and_safe_standard_tools() -> None:

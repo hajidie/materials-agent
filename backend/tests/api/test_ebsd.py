@@ -151,27 +151,23 @@ def test_invalid_upload_key_and_size_are_rejected(ebsd):
 def test_ebsd_provider_boundary_contains_text_and_references_only(ebsd):
     import base64
     import json
-    from backend.tests.unit.test_llm_provider_factory import _role
-    from materialsagent.infrastructure.llm.agent_model import AgentModelAdapter
     client, conversation, storage, runtime = ebsd
     captured = []
-    def factory(config):
-        class Model:
-            def bind(self, **kwargs): return self
-            async def ainvoke(self, messages):
+    class CapturingMock(MockAgentModel):
+        def native_model(self, **kwargs):
+            model = super().native_model(**kwargs)
+            original = model._generate
+            def capture(messages, *args, **options):
                 captured.extend(messages)
-                payload = json.loads(messages[-1]["content"])
-                value = MockAgentModel._respond(config.role, payload)
-                return SimpleNamespace(content=json.dumps(value) if not isinstance(value, str) else value,
-                    usage_metadata={"input_tokens": 100, "output_tokens": 100, "total_tokens": 200})
-        return Model()
-    client.app.state.agent_runtime.model = AgentModelAdapter({role: _role("deepseek", role)
-        for role in ("agent_decision",)}, factory=factory)
+                return original(messages, *args, **options)
+            object.__setattr__(model, "_generate", capture)
+            return model
+    client.app.state.agent_runtime.model = CapturingMock()
     asset = upload(client, conversation).json()["data"]["attachment"]["attachment_id"]
     result = stored_run(client, submit(client, conversation, asset).json()["data"]["agent_run"])
     assert result["status"] == "SUCCEEDED", result
-    assert captured and all(type(message["content"]) is str for message in captured)
-    wire = json.dumps(captured)
+    assert captured and all(type(message.content) is str for message in captured)
+    wire = json.dumps([message.model_dump(mode="json") for message in captured])
     assert asset not in wire
     for forbidden in (base64.b64encode(image_bytes()).decode(), "data:image/", "image_url", "object_key", "storage_namespace"):
         assert forbidden not in wire

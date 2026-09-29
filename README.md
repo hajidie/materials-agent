@@ -23,18 +23,18 @@
 
 ## 当前能力
 
-- 有界 `Decision → Action → Observation → Decision` 循环；每个 AgentRun 默认最多 12 步、4 次工具执行、3600 秒活跃时间和 64000 Token。
-- 三类结构化动作：`CallTool`、`AskUser`、`Finish`；支持预测性能后继续单位换算。
+- LangChain `create_agent` 负责原生工具调用与模型续轮，LangGraph checkpoint 保存暂停游标；每个 AgentRun 默认最多 12 次模型调用、4 次工具执行、3600 秒活跃时间和 64000 Token。
+- 模型无工具调用时，完整助手消息直接成为最终回答；缺少条件时通过 `ask_user` 工具暂停，支持预测性能后继续单位换算。
 - 提问作为普通助手消息；回复按问题消息与等待版本恢复原 Run，同一个模型循环处理完整参数，保留累计预算。
 - Managed Tool 继续以 Task、InputRevision、ToolRun、ToolResult、Asset 保存独立来源。
-- 主模型 Finish 的完整答案、消息来源和成功状态原子提交；网络断连不撤销已保存答案。
+- 主模型的完整答案、本 Run 已验证结果的来源和成功状态原子提交；网络断连不撤销已保存答案。
 - 回复底部支持复制与重新生成；回答在原位置保留多个版本，再生成禁止执行工具。失败 Tool Retry 仍创建新 Run。
 - 输入框支持 Send/Stop 切换，Stop 取消模型请求与后续决策；已提交 GPU/ML 计算继续并保存回执。当前采用完整响应。
 - 确认绑定具体 Invocation 和参数版本；生产目录禁止 Side-effect Tool，开发测试工具仅用于验证确认机制。
 - 聊天界面展示消息、语义进度、最终回答与附件/结果卡片；开发诊断单独受开关控制。
 - ML 聊天可根据字段名推断单位，并明确标注推断依据；不会修改数据集登记信息。涉及数值换算等操作时须先确认未知单位。
 - Conversation 删除原子移除业务聚合，并通过持久化 cleanup 记录清理本项目生成对象及上传的 EBSD 图片；运行中的聚合拒绝删除。
-- Mock 或 DeepSeek/Qwen Provider；AgentRun 由异步请求宿主推进，不提供平台后台 Worker、队列或断点接管。
+- Mock 或 DeepSeek/Qwen Provider；AgentRun 由异步请求宿主推进，启动时用业务记录与 SDK checkpoint 收敛中断点，不提供平台后台 Worker 或队列。
   可选 ML Service 的训练 Worker 是独立领域进程，不接管 AgentRun。
 
 ### EBSD 单图预测
@@ -142,6 +142,7 @@ timesteps=1000
 Runtime 子进程，不写入状态文件。入口根据根 `.env`（进程环境可覆盖）中的三个 ML 功能开关
 确定托管进程集合；ML 配置加载器核验两侧凭据后，仅在内存中把 Worker token 注入 Worker。
 凭据不会进入命令参数、状态文件或启动输出，入口也不会修改配置文件。
+本地入口先运行 Alembic，再执行 LangGraph PostgreSQL checkpoint `setup()`；Backend 启动时校验这些表并恢复未完成的 Run。
 
 ## 启动
 
@@ -288,16 +289,16 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 验收自然语言决策时，使用 `-Runtime Mock -Llm Provider` 启动，再打开 Frontend。这会调用配置的
 真实 LLM，但工具返回 Mock 结果；只能验证编排流程，不能验证材料模型的科学有效性。
 
-每个独立场景新建对话，通过受控的执行轨迹接口核对状态、动作顺序和实际工具调用次数。
-补参前可能直接 AskUser，也可能先 CallTool 校验再 AskUser；缺参时实际工具调用次数都应为零。
+每个独立场景新建对话，通过受控的执行轨迹接口核对模型调用、工具调用和实际工具执行次数。
+补参前可能直接调用 `ask_user`，也可能先进行工具参数校验再提问；缺参时实际工具执行次数都应为零。
 
 | 场景 | 操作 | 应观察到的结果 |
 |---|---|---|
-| 无工具回答 | 发送“你好” | Finish 后显示最终回答，0 次工具调用 |
-| 单工具 | 发送“650 MPa 转 GPa” | CallTool 后再次决策、Finish；结果为 0.65 GPa，1 次工具调用 |
+| 无工具回答 | 发送“你好” | 普通助手消息显示为最终回答，0 次工具调用 |
+| 单工具 | 发送“650 MPa 转 GPa” | 原生工具调用后再次续轮并回答；结果为 0.65 GPa，1 次工具调用 |
 | 缺参暂停 | 发送“对 ZTA35G 进行虚拟实验：固溶温度 1000℃，固溶时间 2 小时。预测力学性能。” | 等待补充时效温度、时效时间；不重复询问可靠已知条件，不执行工具 |
-| 原 Run 恢复 | 直接在当前聊天输入框输入“时效温度 730℃，时效时间 2 小时” | 原 Run 继续，保留累计步骤和预算；工具结果后再次决策并结束，1 次工具调用 |
-| 连续编排 | 新对话发送“对 ZTA35G 进行虚拟实验：固溶温度 1000℃，固溶时间 2 小时，时效温度 730℃，时效时间 2 小时。先预测力学性能，再调用单位换算工具，把预测的屈服强度从 MPa 转为 GPa。” | ZTA35G → 单位换算 → Finish，2 次工具调用；换算输入来自本次预测结果 |
+| 原 Run 恢复 | 直接在当前聊天输入框输入“时效温度 730℃，时效时间 2 小时” | 原 Run 继续，保留累计模型调用与预算；工具结果后再次续轮并结束，1 次工具调用 |
+| 连续编排 | 新对话发送“对 ZTA35G 进行虚拟实验：固溶温度 1000℃，固溶时间 2 小时，时效温度 730℃，时效时间 2 小时。先预测力学性能，再调用单位换算工具，把预测的屈服强度从 MPa 转为 GPa。” | ZTA35G → 单位换算 → 最终回答，2 次工具调用；换算输入来自本次预测结果 |
 | 回答再生成 | 在已完成回答下点击重新生成图标，切换并复制旧、新版本 | 新 Run 冻结被点击版本的原任务上下文和可信结果，0 次工具调用；成功后在原位置新增版本；复制对应当前显示的正文 |
 | 模型生成中止 | 提交问题后，在模型尚未完成时点击输入框右侧圆形 Stop 按钮 | 取消当前 Provider 请求，不继续决策或调用工具；保留已保存内容，恢复发送按钮；生成中不能重复发送 |
 | 已派发计算中止 | 使用真实 Runtime，提交上述连续编排目标，待 ZTA35G 工具开始后点击 Stop | Agent 停止后续决策，已派发计算继续；迟到结果保存并追加一次通知，图片仍可查看；不会执行后续单位换算 |
@@ -340,7 +341,7 @@ EBSD 的 Mock Runtime 返回固定模拟值并标注 Mock；验证真实 CNN 时
 已实现合同和后续边界见 [项目上下文](docs/project-context.md#materials-ml-领域边界)。不要将 ML 依赖安装到 Backend 环境。
 
 启用平台 MCP 底座前，在 Backend Python 3.11 环境安装 `python -m pip install -e "./backend[mcp]"`，
-按下文升级要求执行 Backend Alembic `upgrade head`（当前 head 为 0023），并启动启用 MCP 的独立 ML Service/Worker。
+按下文升级要求执行 Backend Alembic `upgrade head`（当前工作树 head 为 0024），并启动启用 MCP 的独立 ML Service/Worker。
 根 `.env` 设置 `ENABLE_DEV_MATERIALS_ML_TOOLS=true`，配置 `MATERIALS_ML_MCP_URL`、
 `MATERIALS_ML_BINDING_VERSION` 和不同的 `MATERIALS_ML_MCP_TOKEN` / `MATERIALS_ML_RESOURCE_TOKEN`。
 后两者分别对应 Service 的 MCP / Resource token；Backend 不配置 ML Worker 凭据。
@@ -383,7 +384,7 @@ python scripts/dev/upgrade-chat-data.py --apply --conversation <对话ID>
 
 使用独立 Backend Python 3.11；迁移历史保留，清理不触碰共享卷、模型包或凭据。
 预检集全部安全收敛后再执行 Backend Alembic `upgrade head`；新库可直接迁移。
-0023 升级和降级都要求数据库中没有 AgentRun；即使旧数据已符合聊天附件合同，也必须先经明确授权删除历史 Agent 对话。
+0023 和 0024 升级、降级都要求数据库中没有 AgentRun；即使旧数据已符合聊天附件合同，也必须先经明确授权删除历史 Agent 对话。
 需要清空全部当前本地用户对话时，使用脚本的 `--all-conversations` 模式先预检，再加 `--apply` 执行。
 降级仅恢复表结构，不恢复已经删除的历史消息或回答。
 

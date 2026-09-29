@@ -73,7 +73,7 @@ def test_stale_run_owner_cannot_commit_tool_result(api_harness):
         runtime.store.recover_interrupted("replacement")
         one.status="TERMINATED"
         with pytest.raises(AgentConflictError):runtime.store.save(one)
-        assert runtime.store.get(run.agent_run_id,"agent-test").error_code == "PROCESS_INTERRUPTED"
+        assert runtime.store.get(run.agent_run_id,"agent-test").status == "PENDING"
 
 def test_standard_tool_argument_wait_resumes_in_main_loop_with_full_proposal(api_harness):
     roles=[]
@@ -200,7 +200,7 @@ def test_managed_proactive_wait_resumes_and_does_not_duplicate_ready_revision(ap
     runtime = _Runtime()
     with api_harness.create_client("managed-resume", agent_model=MockAgentModel(), tool_registry=build_tool_registry(runtime), storage_service=_MemoryStorage()) as client:
         waiting = stored_run(client, post(client, conversation.conversation_id, content_text="预测 ZTA35G 性能").json()["data"]["agent_run"])
-        assert waiting["status"] == "WAITING_FOR_USER" and waiting["steps"][0]["action_type"] == "AskUser"
+        assert waiting["status"] == "WAITING_FOR_USER" and len(waiting["calls"]) == 1
         assert waiting["tool_executions"] == 0
         result = stored_run(client, post(client, conversation.conversation_id, "managed-answer", mode="RESUME_RUN", content_text=json.dumps(ARGUMENTS), agent_run_id=waiting["agent_run_id"], waiting_version=waiting["waiting_version"]).json()["data"]["agent_run"])
         assert result["status"] == "SUCCEEDED", (result["error_code"], result["observations"])
@@ -226,7 +226,7 @@ def test_managed_question_reuses_main_loop_and_requires_complete_arguments(api_h
     with api_harness.create_client(actor,settings=api_harness.settings.model_copy(update={"agent_max_llm_tokens":64000}),agent_model=MockAgentModel(respond),tool_registry=build_tool_registry(tool),storage_service=_MemoryStorage()) as client:
         waiting=stored_run(client,post(client,conversation.conversation_id,content_text="固溶 1000℃ 2 小时").json()["data"]["agent_run"])
         assert waiting["status"]=="WAITING_FOR_USER" and tool.calls==0
-        assert [s["action_type"] for s in waiting["steps"]]==["CallTool","AskUser"]
+        assert len(waiting["calls"]) == 2 and waiting["pending_tool_call_id"]
         with api_harness.engine.connect() as connection:
             assert connection.scalar(select(func.count()).select_from(TaskInputRevisionRow))==0
         resumed=stored_run(client,post(client,conversation.conversation_id,"supply-aging",mode="RESUME_RUN",content_text="时效温度 730℃，时效时间 2 小时",agent_run_id=waiting["agent_run_id"],waiting_version=waiting["waiting_version"]).json()["data"]["agent_run"])
@@ -254,7 +254,20 @@ def test_restart_repairs_committed_result_without_redispatch_or_model(api_harnes
         assert runtime.store.get(run.agent_run_id, "agent-test").status == "RUNNING"
         runtime.store.recover_interrupted("replacement", repair=gateway.repair)
         recovered = runtime.store.get(run.agent_run_id, "agent-test")
-        assert recovered.status == "TERMINATED" and recovered.error_code == "PROCESS_INTERRUPTED"
+        assert recovered.status == "PENDING"
+        monkeypatch.setattr(gateway, "execute", lambda *_: pytest.fail("redispatched"))
+        async def resume_with_fresh_checkpoint():
+            from materialsagent.infrastructure.db.agent_checkpoint import AgentCheckpointStore
+            checkpoints = AgentCheckpointStore(api_harness.settings)
+            runtime.checkpointer = await checkpoints.open()
+            runtime.checkpoint_cleanup = checkpoints
+            try:
+                await runtime.advance(run.agent_run_id, "agent-test")
+            finally:
+                await checkpoints.close()
+        asyncio.run(resume_with_fresh_checkpoint())
+        recovered = runtime.store.get(run.agent_run_id, "agent-test")
+        assert recovered.status == "SUCCEEDED", (recovered.error_code, recovered.pending_execution, recovered.calls)
         assert recovered.observations[0].data["value"] == 1
         assert recovered.executions[0].status == "SUCCEEDED" and calls == [1]
         runtime.store.recover_interrupted("replacement", repair=gateway.repair)
@@ -302,7 +315,7 @@ def test_restart_between_managed_result_and_invocation_repairs_both(api_harness,
     api_harness.persist_actor("managed-gap")
     conversation = api_harness.persist_conversation("managed-gap")
     tool, storage = _Runtime(), _MemoryStorage()
-    with api_harness.create_client("managed-gap", agent_model=MockAgentModel(lambda *_: {"type":"CallTool", "tool_name":"zta35g_sem_virtual_lab", "arguments":ARGUMENTS}), tool_registry=build_tool_registry(tool), storage_service=storage) as client:
+    with api_harness.create_client("managed-gap", agent_model=MockAgentModel(lambda _role, payload: {"type":"Finish", "answer":"实验完成"} if payload["observations"] else {"type":"CallTool", "tool_name":"zta35g_sem_virtual_lab", "arguments":ARGUMENTS}), tool_registry=build_tool_registry(tool), storage_service=storage) as client:
         runtime = client.app.state.agent_runtime
         original = runtime.tools.workflow.execute
         def process_exit(*args, **kwargs):
@@ -315,8 +328,19 @@ def test_restart_between_managed_result_and_invocation_repairs_both(api_harness,
         with api_harness.engine.connect() as connection:
             assert connection.scalar(select(InvocationRunRow.status)) == "RUNNING"
         runtime.store.recover_interrupted("replacement", repair=runtime.tools.repair)
+        monkeypatch.setattr(runtime.tools.workflow, "execute", lambda *_args, **_kwargs: pytest.fail("redispatched"))
+        async def resume_with_fresh_checkpoint():
+            from materialsagent.infrastructure.db.agent_checkpoint import AgentCheckpointStore
+            checkpoints = AgentCheckpointStore(api_harness.settings)
+            runtime.checkpointer = await checkpoints.open()
+            runtime.checkpoint_cleanup = checkpoints
+            try:
+                await runtime.advance(run.agent_run_id, "managed-gap")
+            finally:
+                await checkpoints.close()
+        asyncio.run(resume_with_fresh_checkpoint())
         recovered = runtime.store.get(run.agent_run_id, "managed-gap")
-        assert recovered.observations[0].status == "SUCCEEDED" and recovered.status == "TERMINATED"
+        assert recovered.observations[0].status == "SUCCEEDED" and recovered.status == "SUCCEEDED", (recovered.error_code, recovered.calls)
         assert tool.calls == 1 and storage.objects == before
         with api_harness.engine.connect() as connection:
             assert connection.scalar(select(InvocationRunRow.status)) == "SUCCEEDED"

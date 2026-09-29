@@ -325,8 +325,18 @@ function Resolve-CondaEnvironmentPython {
 
     $conda = Resolve-CondaExecutable
     try {
-        $raw = @(& $conda env list --json 2>$null)
-        if ($LASTEXITCODE -ne 0) {
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            # Windows PowerShell 5.1 promotes native stderr to an error when Stop is set.
+            # Conda plugins may write diagnostics there even when the JSON query succeeds.
+            $ErrorActionPreference = 'Continue'
+            $raw = @(& $conda env list --json 2>$null)
+            $queryExitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+        if ($queryExitCode -ne 0) {
             throw 'query failed'
         }
         $environmentList = (($raw | ForEach-Object { [string]$_ }) -join [Environment]::NewLine) |
@@ -496,7 +506,7 @@ function New-LaunchProfile {
         backend_python = $BackendPython
         backend_arguments = @(
             '-m',
-            'uvicorn',
+            'materialsagent.maintenance.serve',
             'materialsagent.main:create_app',
             '--factory',
             '--app-dir',
@@ -1517,6 +1527,17 @@ function Invoke-DatabaseAndBucketPreparation {
         -StderrPath (Join-Path $runPath 'alembic.stderr.log')
     if ($alembicExit -ne 0) {
         throw 'LOCAL_DEV_ALEMBIC_FAILED'
+    }
+
+    $checkpointExit = Invoke-QuietProcess `
+        -FilePath $Profile.backend_python `
+        -Arguments @('-m', 'materialsagent.maintenance.setup_agent_checkpoints') `
+        -WorkingDirectory $RepoRoot `
+        -Environment $Profile.backend_environment `
+        -StdoutPath (Join-Path $runPath 'checkpoints.stdout.log') `
+        -StderrPath (Join-Path $runPath 'checkpoints.stderr.log')
+    if ($checkpointExit -ne 0) {
+        throw 'LOCAL_DEV_AGENT_CHECKPOINT_SETUP_FAILED'
     }
 
     $bootstrapCode = @'

@@ -73,13 +73,14 @@
   变更时必须同步合同、实现和测试，不得仅开放为环境变量。
 - 不混合不同 ToolRun 的图片、性能结果或解释来源。Backend 不自动重试 Runtime execute；
   显式失败重试创建新 AgentRun、Invocation、ToolRun、attempt 和 seed，重新授权。
-  Answer Regeneration 走受限 AgentRun，必须向 DecisionEngine 注入空工具集合，并在执行边界禁止 Tool。
+  Answer Regeneration 走受限 AgentRun，必须向 SDK Agent 注入空工具集合，并在执行边界禁止 Tool。
 - 外部 LLM、Runtime 和 MinIO 调用不得置于数据库长事务中；通过 version、claim 和短事务 CAS
   取得推进权，已派发动作不得因 lease、轮询或 HTTP 断开而重新派发。
 - ToolResult 与 Observation 分段落库时，必须通过确定性一致性门禁后才能继续决策。
 - Agent Runtime 是业务执行的唯一入口；新 Tool 或 Executor 必须接入统一 Registry 与执行边界，
-  生产 Catalog 禁止 Side-effect Tool。不得恢复旧 Router、固定 Explanation、旧补参或独立的
-  Native Tool Calling 执行路径。
+  生产 Catalog 禁止 Side-effect Tool。LangChain/LangGraph 承担模型与工具续轮、暂停恢复，业务执行
+  仍由统一 Registry/Gateway 承担。模型无工具调用时，经验证的助手消息即为最终回答；不得另设
+  CallTool/Finish JSON 动作协议，或恢复旧 Router、固定 Explanation、旧补参及并行 Tool 执行路径。
 
 更完整的机制说明在 `docs/project-context.md`；以上条目保留在规则层，是因为 Agent 在修改相关
 代码前必须直接看到这些边界。
@@ -101,8 +102,8 @@ Prediction、资源与删除机制的现役合同以 `README.md` 和 `docs/proje
 ### LLM-first：语义推理交给模型，确定性代码守住边界
 
 - 用户自然语言理解、意图与参数语义、上下文指代、歧义识别、工具选择及是否调用工具，**MUST**
-  优先由 LLM 基于受控上下文形成结构化 Proposal。Tool catalog 和执行策略可以限制合法选择，
-  但确定性代码 **MUST NOT** 暗中替模型完成语义选择。
+  优先由 LLM 基于受控上下文决定；工具请求使用 Provider 原生 Tool Calling。
+  Tool catalog 和执行策略可以限定合法选择，确定性代码 **MUST NOT** 暗中替模型完成语义选择。
 - **MUST NOT** 用关键词/同义词列表、正则、固定句式、字符串包含判断或针对单一输入的 `if/else`
   代替语义理解。出现大量 `if xxx in text` 或为某个措辞补分支时，**MUST** 先重新判断该能力是否属于 LLM。
   只有明确、稳定、确定性的业务规则才应硬编码。
@@ -137,8 +138,11 @@ Prediction、资源与删除机制的现役合同以 `README.md` 和 `docs/proje
 - 新增或修改模型调用时 **MUST** 检查 context leakage、无关历史污染、Tool 内部信息泄露、系统状态泄露、
   重复与过时事实；“数据已经存在”不是将其加入 prompt 的理由。
 
-### 在正确层解决通用问题
+### 成熟能力优先，在正确层解决通用问题
 
+- 架构设计 **MUST** 先核对需求、当前合同、Codex/Claude Code 等成熟实践及适用 SDK（如 LangChain/LangGraph）。
+  Provider 原生能力或 SDK 在当前约束下能满足需求时 **MUST** 复用；仅在验证具体缺口后自定义，
+  并说明证据、业务边界和维护成本。SDK 不替代本项目的授权、幂等、事务与结果来源校验。
 - 实现前 **MUST** 判断问题属于 LLM semantic reasoning、Context Policy/Profile、Agent Runtime、Tool contract、
   deterministic backend logic、frontend interaction 还是 persistence，并在真正拥有该责任的层修复。
 - **MUST NOT** 因为当前正在修改某个文件就把问题塞入该层。例如，用户理解错误不等于要加后端字符串规则，
@@ -184,8 +188,9 @@ Prediction、资源与删除机制的现役合同以 `README.md` 和 `docs/proje
   `npm --prefix frontend run typecheck`，涉及构建配置、依赖或打包行为再运行 build。高风险或最终验收时运行
   `npm --prefix frontend test -- --run`、`npm --prefix frontend run typecheck` 和
   `npm --prefix frontend run build`。
-- `scripts/dev/**` 运行对应离线测试；只有本地栈或范围检查行为受影响时，才分别运行
-  `& .\scripts\dev\test-local-dev.ps1` 或 `& .\scripts\dev\test-check-scope.ps1`。
+- 本机验证 **MUST** 使用 Windows PowerShell 5.1（`powershell.exe`）执行；`pwsh` 仅可补测，不能替代。
+  `scripts/dev/**` 运行对应离线测试；本地栈或范围检查行为受影响时，分别运行
+  `& .\scripts\dev\test-local-dev.ps1` 或 `& .\scripts\dev\test-check-scope.ps1`。原生命令预检应覆盖成功退出但有 stderr 的情况。
 - Materials ML Engine、存储引用、Service 或 Worker 改动必须在独立 ML Python 3.11 环境验证相关范围。
   涉及跨服务闭环或最终验收时运行 `services/materials_ml/scripts/acceptance.ps1`，使用独立临时 PostgreSQL/MinIO
   资源且不得清空共享卷；没有真实 Prediction/MCP Client/故障恢复证据不得宣称相应闭环已验收。

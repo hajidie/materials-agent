@@ -63,7 +63,7 @@ class AppSettings(BaseSettings):
     zta35g_runtime_url: str | None = None
     zta35g_runtime_token: SecretStr | None = None
     zta35g_runtime_timeout_seconds: float = Field(default=1200.0, gt=0, le=86400)
-    agent_max_action_steps: int = Field(default=12, ge=1, le=100)
+    agent_max_model_calls: int = Field(default=12, ge=1, le=100)
     agent_max_tool_executions: int = Field(default=4, ge=1, le=32)
     agent_max_active_seconds: float = Field(default=3600, gt=0, le=86400)
     agent_max_llm_tokens: int = Field(default=64000, ge=1, le=2000000)
@@ -148,7 +148,7 @@ ENVIRONMENT_FIELDS = {
     "ZTA35G_RUNTIME_URL": "zta35g_runtime_url",
     "ZTA35G_RUNTIME_TOKEN": "zta35g_runtime_token",
     "ZTA35G_RUNTIME_TIMEOUT_SECONDS": "zta35g_runtime_timeout_seconds",
-    "AGENT_MAX_ACTION_STEPS": "agent_max_action_steps",
+    "AGENT_MAX_MODEL_CALLS": "agent_max_model_calls",
     "AGENT_MAX_TOOL_EXECUTIONS": "agent_max_tool_executions",
     "AGENT_MAX_ACTIVE_SECONDS": "agent_max_active_seconds",
     "AGENT_MAX_LLM_TOKENS": "agent_max_llm_tokens",
@@ -175,7 +175,9 @@ def load_settings(environ: Mapping[str, str] | None = None) -> AppSettings:
             for environment_name, field_name in ENVIRONMENT_FIELDS.items()
             if environment_name in environ
         }
-        return AppSettings(_env_file=None, **values)
+        # Explicit mappings are isolated from the caller's process environment.
+        # BaseSettings still reads os.environ when only _env_file is disabled.
+        return AppSettings(_env_file=None, _env_prefix="__MATERIALSAGENT_EXPLICIT__", **values)
     except ValidationError:
         raise ConfigurationError("Invalid application configuration.") from None
 

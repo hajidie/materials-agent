@@ -1,5 +1,6 @@
 """Acceptance-only Backend process. Configuration arrives on stdin, never in argv/logs."""
 from pathlib import Path
+import asyncio
 import json
 import sys
 
@@ -26,6 +27,18 @@ def main():
     config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
     config.attributes["settings"] = settings
     command.upgrade(config, "head")
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    from materialsagent.infrastructure.db.agent_checkpoint import AgentCheckpointStore
+
+    async def setup_checkpoints():
+        checkpoints = AgentCheckpointStore(settings)
+        try:
+            await checkpoints.open(setup=True)
+        finally:
+            await checkpoints.close()
+
+    asyncio.run(setup_checkpoints())
     engine = create_engine_from_settings(settings)
     sessions = create_session_factory(engine)
     factory = lambda: SQLAlchemyUnitOfWork(sessions)
@@ -75,7 +88,6 @@ def main():
             "waiting": run.waiting.model_dump() if run.waiting else None, "context": run.context,
             "answer_message": final}}
     if settings.enable_materials_ml_resource_context and settings.llm_adapter == "provider":
-        from materialsagent.infrastructure.llm.agent_model import _count
         model = app.state.agent_runtime.model
         # Explicit integration profile, equivalent to the documented llm.toml role
         # setting. Production defaults and the normal budget gate stay unchanged.
@@ -86,19 +98,7 @@ def main():
             role = model.configurations["agent_decision"]
             assert limit <= role.context_window_tokens
             model.configurations = {**model.configurations, "agent_decision": replace(role, prompt_limit_tokens=limit)}
-        original_prepare = model.prepare
-        budget_diagnostic = {}
-        def measured_prepare(role, payload, *args):
-            # Metadata only: do not expose prompts, user text or dataset contents.
-            budget_diagnostic.update(role=role, execution_count=len(payload.get("execution_facts", [])),
-                observation_statuses=[o.get("status") for o in payload.get("observations", [])],
-                tool_names=[t["tool_name"] for t in payload.get("tools", [])])
-            try:
-                return original_prepare(role, payload, *args)
-            except Exception:
-                budget_diagnostic.update(role=role, sections={k: _count(v) for k, v in payload.items()})
-                raise
-        model.prepare = measured_prepare
+        budget_diagnostic = {"prompt_limit_tokens": model.configurations["agent_decision"].prompt_limit_tokens}
         @app.get("/acceptance/p6-budget")
         def diagnostic_budget():
             return budget_diagnostic
@@ -166,7 +166,8 @@ def main():
         from fastapi.staticfiles import StaticFiles
         app.mount("/", StaticFiles(directory=Path(__file__).resolve().parents[3] / "frontend/dist", html=True), name="acceptance-frontend")
     try:
-        uvicorn.run(app, host="127.0.0.1", port=setup["port"], access_log=False, log_level="critical")
+        uvicorn.run(app, host="127.0.0.1", port=setup["port"], access_log=False, log_level="critical",
+            loop="materialsagent.maintenance.serve:selector_loop_factory" if sys.platform == "win32" else "auto")
     finally:
         engine.dispose()
 

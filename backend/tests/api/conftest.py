@@ -4,8 +4,10 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+import asyncio
 import re
 import secrets
+import sys
 from typing import Any
 from uuid import uuid4
 
@@ -197,6 +199,9 @@ def api_postgres_settings() -> AppSettings:
 def api_harness(
     api_postgres_settings: AppSettings,
 ) -> Iterator[APITestHarness]:
+    previous_policy = asyncio.get_event_loop_policy() if sys.platform == "win32" else None
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     database_name = f"materialsagent_test_{secrets.token_hex(8)}"
     assert TEST_DATABASE_PATTERN.fullmatch(database_name)
     admin_engine = _admin_engine(api_postgres_settings, "postgres")
@@ -211,6 +216,15 @@ def api_harness(
             }
         )
         command.upgrade(_alembic_config(database_settings), "head")
+        from materialsagent.infrastructure.db.agent_checkpoint import AgentCheckpointStore
+        async def setup_checkpoints():
+            checkpoints = AgentCheckpointStore(database_settings)
+            try:
+                await checkpoints.open(setup=True)
+            finally:
+                await checkpoints.close()
+
+        asyncio.run(setup_checkpoints())
         database_engine = create_engine_from_settings(database_settings)
         yield APITestHarness(database_settings, database_engine)
     finally:
@@ -230,3 +244,5 @@ def api_harness(
                 f'DROP DATABASE IF EXISTS "{database_name}"'
             )
         admin_engine.dispose()
+        if previous_policy is not None:
+            asyncio.set_event_loop_policy(previous_policy)

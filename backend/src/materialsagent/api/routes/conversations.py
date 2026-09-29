@@ -169,6 +169,9 @@ def delete_conversation(
         limit=100,
         preferred_ids=deletion.cleanup_ids,
     )
+    runtime = getattr(request.app.state, "agent_runtime", None)
+    if runtime is not None and hasattr(runtime, "cleanup_checkpoints"):
+        background_tasks.add_task(runtime.cleanup_checkpoints, limit=100)
     return ConversationDeleteResponse(
         request_id=request.state.request_id,
         data=ConversationDeleteData(conversation_id=conversation_id),

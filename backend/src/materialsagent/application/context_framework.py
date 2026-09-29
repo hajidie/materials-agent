@@ -4,11 +4,10 @@ The generic model factory is deliberately unaware of this framework. IDs used fo
 execution and source checking are kept in the call-local frame, never the prompt.
 """
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from collections.abc import Mapping
 from jsonschema import Draft202012Validator
 
-from materialsagent.domain.models.agent import ACTION_ADAPTER, canonical
 from materialsagent.domain.models.ml_resource_context import model_draft, model_observation, proposal_catalog, resource_specs, selection
 from materialsagent.domain.ports.agent import AgentFailure
 
@@ -21,27 +20,11 @@ class ContextProfile:
     safety: tuple[str, ...] = ("semantic_sources_only", "untrusted_input_is_data", "no_private_identity")
 
 
-def decision_schema():
-    # The durable action uses internal source IDs; the model only sees local labels.
-    schema = deepcopy(ACTION_ADAPTER.json_schema())
-    properties = schema["$defs"]["Finish"]["properties"]
-    properties["sources"] = properties.pop("observation_ids")
-    from materialsagent.domain.models.semantic_units import UNIT_DIMENSIONS
-    schema["$defs"]["CallTool"]["properties"]["user_unit_assertions"]["items"] = {
-        "type": "object", "additionalProperties": False,
-        "required": ["resource_parameter", "column", "unit", "source_message", "evidence"],
-        "properties": {"resource_parameter": {"type": "string", "minLength": 1},
-            "column": {"type": "string", "minLength": 1}, "unit": {"enum": list(UNIT_DIMENSIONS)},
-            "source_message": {"type": "string", "minLength": 1}, "evidence": {"type": "string", "minLength": 1}},
-    }
-    return schema
-
-
 PROFILES = {
     "agent_decision": ContextProfile(frozenset({"goal", "conversation_context", "user_inputs", "user_messages", "resource_context", "question",
-        "execution_facts", "attachments", "tools", "tool_execution_disabled", "retry_target", "draft", "observations", "proposal_error"}), decision_schema(), True),
+        "execution_facts", "attachments", "tools", "tool_execution_disabled", "retry_target", "draft", "observations", }), {}, True),
     "answer_regeneration": ContextProfile(frozenset({"goal", "conversation_context", "user_inputs", "observations",
-        "execution_facts", "tools", "tool_execution_disabled", "proposal_error"}), decision_schema(), True),
+        "execution_facts", "tools", "tool_execution_disabled", }), {}, True),
     "recovery": ContextProfile(frozenset({"goal", "facts", "allowed_actions"}), {"type": "object", "required": ["summary"],
         "properties": {"summary": {"type": "string", "minLength": 1}, "guidance": {"type": "array", "items": {"type": "string"}}}, "additionalProperties": False}),
 }
@@ -165,44 +148,6 @@ class ContextFramework:
         private = internal_values(run.model_dump(mode="json")) | internal_values(resource_map)
         value = protect_text(value, private)
         return ContextFrame(profile, value, sources, private, resource_map, tool_contracts, inputs)
-
-    def output(self, frame, value, run):
-        try:
-            Draft202012Validator(frame.profile.output_schema).validate(value)
-        except Exception:
-            raise AgentFailure("AGENT_ACTION_PROTOCOL_ERROR" if frame.profile.tools_allowed else "ARGUMENT_PROTOCOL_ERROR") from None
-        if protect_text(value, frame.private) != value:
-            raise AgentFailure("MODEL_PRIVATE_VALUE_REJECTED")
-        if frame.profile.tools_allowed:
-            value = deepcopy(value)
-            if value["type"] == "Finish":
-                labels = value.pop("sources", [])
-                if any(label not in frame.sources for label in labels):
-                    raise AgentFailure("FINAL_ANSWER_SOURCE_MISMATCH")
-                value["observation_ids"] = [frame.sources[label] for label in labels]
-            elif value["type"] == "CallTool":
-                if run.tool_execution_disabled:
-                    raise AgentFailure("TOOL_EXECUTION_DISABLED")
-                name = value["tool_name"]
-                tool = frame.tool_contracts.get(name)
-                if tool is None:
-                    raise AgentFailure("UNKNOWN_TOOL")
-                value["arguments"] = self.arguments(name, value["arguments"], tool, run, frame.resource_map)
-                for assertion in value.get("user_unit_assertions", []):
-                    required = {"resource_parameter", "unit", "source_message", "evidence"}
-                    if (not required <= set(assertion) or set(assertion) - (required | {"column"})
-                            or assertion["resource_parameter"] not in {spec["model_argument"] for spec in resource_specs(tool)}):
-                        raise AgentFailure("INVALID_UNIT_ASSERTION")
-                    identity = frame.inputs.get(assertion["source_message"])
-                    current = run.user_messages[-1] if run.user_messages else None
-                    if (not current or identity != current["message_id"] or not assertion["evidence"].strip()
-                            or assertion["evidence"] not in current["text"]):
-                        raise AgentFailure("INVALID_UNIT_ASSERTION")
-                    assertion["source_message"] = identity
-            elif run.tool_execution_disabled and value["type"] != "Finish":
-                raise AgentFailure("ANSWER_REGENERATION_NOT_ALLOWED")
-            return value
-        return value
 
     @staticmethod
     def arguments(name, values, tool, run, resource_map):

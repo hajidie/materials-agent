@@ -6,6 +6,40 @@ from sqlalchemy import select, func
 from materialsagent.infrastructure.db.agent import AgentRunRow
 from materialsagent.infrastructure.db.conversation_task import MessageRow
 from materialsagent.infrastructure.llm.agent_model import MockAgentModel
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.messages import AIMessage
+
+
+class _AsyncWaitingProvider(BaseChatModel):
+    entered: Event
+    cancelled: Event
+
+    @property
+    def _llm_type(self):
+        return "waiting-test-provider"
+
+    def bind_tools(self, _tools, **_kwargs):
+        return self
+
+    def _generate(self, *_args, **_kwargs):
+        raise AssertionError("Synchronous provider path used")
+
+    async def _agenerate(self, *_args, **_kwargs):
+        self.entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            self.cancelled.set()
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content="unreachable"))])
+
+
+class _WaitingModel:
+    def __init__(self, entered, cancelled):
+        self.entered, self.cancelled = entered, cancelled
+
+    def native_model(self, **_kwargs):
+        return _AsyncWaitingProvider(entered=self.entered, cancelled=self.cancelled)
 
 
 def client_for(harness, model=None):
@@ -91,14 +125,7 @@ def test_knowledge_answer_regeneration_is_versioned_without_tools_or_fake_user(a
 
 def test_stop_cancels_the_actual_model_await_and_preserves_user_message(api_harness):
     entered, cancelled = Event(), Event()
-    class WaitingModel(MockAgentModel):
-        async def ainvoke(self, request):
-            entered.set()
-            try:
-                await asyncio.Event().wait()
-            finally:
-                cancelled.set()
-    client, conversation = client_for(api_harness, WaitingModel())
+    client, conversation = client_for(api_harness, _WaitingModel(entered, cancelled))
     with client:
         submitted = accept(client, conversation, "解释材料")
         with ThreadPoolExecutor(1) as pool:
@@ -253,18 +280,12 @@ def test_stop_after_model_reservation_prevents_provider_dispatch(api_harness,mon
 
 
 def test_stopped_regeneration_does_not_publish_an_empty_answer_version(api_harness):
-    import json
     entered,cancelled=Event(),Event()
-    class WaitingModel(MockAgentModel):
-        async def ainvoke(self,request):
-            entered.set()
-            try:await asyncio.Event().wait()
-            finally:cancelled.set()
     client,conversation=client_for(api_harness,MockAgentModel(lambda *_:{"type":"Finish","answer":"原回答"}))
     with client:
         original=advance(client,accept(client,conversation,"解释固溶"))
         snapshot=messages(client,conversation)
-        client.app.state.agent_runtime.model=WaitingModel()
+        client.app.state.agent_runtime.model=_WaitingModel(entered,cancelled)
         submitted=client.post(f"/api/v1/messages/{original['final_message_id']}/regenerate",json={},headers={"Idempotency-Key":"stopped-version"}).json()["data"]
         with ThreadPoolExecutor(1) as pool:
             future=pool.submit(advance,client,submitted)
@@ -317,7 +338,7 @@ def test_duplicate_managed_proposal_allocates_no_second_task_or_invocation(api_h
     api_harness.persist_actor("managed-duplicate")
     conversation = api_harness.persist_conversation("managed-duplicate").conversation_id
     def respond(role, payload):
-        if payload.get("proposal_error"):
+        if payload.get("observations"):
             return {"type": "Finish", "answer": "实验已完成，结果图片可查看。", "sources": ["结果 1"]}
         return {"type": "CallTool", "tool_name": "zta35g_sem_virtual_lab", "arguments": ARGUMENTS}
     with api_harness.create_client("managed-duplicate", agent_model=MockAgentModel(respond),

@@ -6,6 +6,7 @@ from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import asyncio
 import pytest
 from sqlalchemy import inspect, text
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
@@ -30,7 +31,7 @@ IMMEDIATE_PREVIOUS_REVISION = "0006_asset"
 M8_REVISION = "0008_idempotency_record"
 M9_REVISION = "0009_timeline_query_indexes"
 M10_REVISION = "0010_registry_routing_state"
-EXPECTED_REVISION = "0023_agent_chat_messages"
+EXPECTED_REVISION = "0024_sdk_agent_loop"
 ALEMBIC_INI = Path(__file__).resolve().parents[3] / "alembic.ini"
 NEW_TASK_TIME_CHECKS = {
     "ck_task_started_at_not_before_created_at",
@@ -56,7 +57,7 @@ M8_TABLES = M7_TABLES | {
     "idempotency_record",
     "conversation_object_cleanup",
 }
-HEAD_TABLES = (M8_TABLES - {"llm_call", "natural_language_explanation"}) | {"ml_scope_binding", "ml_resource_ref", "ml_resource_operation", "conversation_deletion", "invocation_run", "invocation_result", "agent_run", "agent_submission", "agent_step", "agent_observation", "agent_execution", "agent_model_call"}
+HEAD_TABLES = (M8_TABLES - {"llm_call", "natural_language_explanation"}) | {"ml_scope_binding", "ml_resource_ref", "ml_resource_operation", "conversation_deletion", "invocation_run", "invocation_result", "agent_run", "agent_submission", "agent_observation", "agent_execution", "agent_model_call", "agent_checkpoint_cleanup"}
 
 
 def _make_alembic_config(settings: AppSettings) -> Config:
@@ -1175,7 +1176,8 @@ def test_database_url_uses_structured_components_and_hides_password() -> None:
 
 
 def test_incomplete_database_configuration_raises_safe_error() -> None:
-    settings = AppSettings(postgres_password="not-printed")
+    from materialsagent.infrastructure.config import load_settings
+    settings = load_settings({"POSTGRES_PASSWORD": "not-printed"})
 
     try:
         build_postgres_url(settings)
@@ -2502,3 +2504,54 @@ def test_chat_migration_refuses_to_drop_existing_agent_history(temporary_databas
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT count(*) FROM agent_run"))==1
     finally:engine.dispose()
+
+
+def test_sdk_migration_refuses_existing_agent_runs(temporary_database):
+    config = _make_alembic_config(temporary_database)
+    command.upgrade(config, "0023_agent_chat_messages")
+    engine = create_engine_from_settings(temporary_database)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("INSERT INTO actor(actor_id,actor_origin,created_at) VALUES ('sdk-actor','LOCAL_ANONYMOUS',now())"))
+            connection.execute(text("INSERT INTO conversation(conversation_id,actor_id,created_at,updated_at) VALUES ('sdk-conversation','sdk-actor',now(),now())"))
+            connection.execute(text("INSERT INTO message(message_id,conversation_id,actor_id,request_id,role,generation_source,content_text,sequence,phase,created_at) VALUES ('sdk-message','sdk-conversation','sdk-actor','sdk-request','USER','USER','old goal',1,'user',now())"))
+            connection.execute(text("INSERT INTO agent_run(agent_run_id,conversation_id,actor_id,source_message_id,status,version,document,created_at) VALUES ('sdk-run','sdk-conversation','sdk-actor','sdk-message','WAITING_FOR_USER',0,'{}',now())"))
+        with pytest.raises(RuntimeError, match="scoped cleanup"):
+            command.upgrade(config, "head")
+        assert _current_revision(temporary_database) == "0023_agent_chat_messages"
+        assert "agent_step" in inspect(engine).get_table_names()
+        from sqlalchemy.orm import Session
+        from materialsagent.infrastructure.db.conversation_task import SQLAlchemyConversationRepository
+        with Session(engine) as session:
+            assert SQLAlchemyConversationRepository(session).delete("sdk-conversation", "sdk-actor")
+            session.commit()
+        with engine.connect() as connection:
+            assert connection.scalar(text("SELECT count(*) FROM agent_run")) == 0
+        command.upgrade(config, "head")
+        assert _current_revision(temporary_database) == "0024_sdk_agent_loop"
+    finally:
+        engine.dispose()
+
+
+def test_sdk_checkpoint_tables_do_not_fail_alembic_check(temporary_database):
+    from materialsagent.infrastructure.db.agent_checkpoint import AgentCheckpointStore
+
+    config = _make_alembic_config(temporary_database)
+    command.upgrade(config, "head")
+
+    async def setup_checkpoints():
+        checkpoints = AgentCheckpointStore(temporary_database)
+        try:
+            await checkpoints.open(setup=True)
+        finally:
+            await checkpoints.close()
+
+    with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
+        runner.run(setup_checkpoints())
+    engine = create_engine_from_settings(temporary_database)
+    try:
+        assert {"checkpoint_migrations", "checkpoints", "checkpoint_blobs", "checkpoint_writes"} <= set(
+            inspect(engine).get_table_names())
+        command.check(config)
+    finally:
+        engine.dispose()
