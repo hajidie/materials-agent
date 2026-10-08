@@ -28,6 +28,8 @@ Backend 的 `api/` 与 `integration/` 测试可能使用真实 PostgreSQL；存�
 
 统一脚本 `scripts/acceptance/run-agent-acceptance.ps1` 依次执行 Backend、Mock Runtime、前端及本地脚本检查，要求 Backend Python 3.11 和已就绪的数据库、对象存储；其中的“离线”只表示不调用真实 Provider/GPU。独立 ML 的 Service/Worker/MCP 验收入口和配置见 [ML 服务说明](../services/materials_ml/README.md)。
 
+ML 自动验收需与浏览器 ML 验收、常驻 Worker 串行运行；单实例锁和环境准备见 [ML 验收说明](../services/materials_ml/README.md#独立服务真实验收)。受争用影响的失败需在串行环境复验，不能直接计为通过。
+
 ## 按风险选择验证
 
 | 改动 | 至少检查 |

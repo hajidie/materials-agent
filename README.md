@@ -4,10 +4,11 @@
 
 ## 当前能力与边界
 
-- 聊天界面支持对话、附件、补充条件、停止、结果查看和回答重新生成。模型通过原生工具调用连续处理任务；缺少必要条件时在原对话提问。
+- 聊天界面支持对话、附件、补充条件、停止、结果查看和回答重新生成。模型通过原生工具调用连续处理任务；缺少必要条件时在原对话提问。回答与研究过程通过 SSE 流式展示，保存的过程可在历史对话中展开查看。
 - 默认工具包括单位换算、ZTA35G SEM 虚拟实验和 EBSD 屈服强度预测。真实推理依赖外部权重与独立 Runtime；Mock 模式只验证协议和交互，不能证明预测准确性。
 - 可选 Materials ML Service 提供 CSV 资源、LR/RF 训练、预测及 MCP 接入；相关功能默认关闭，安装与运行见 [ML 服务说明](services/materials_ml/README.md)。
-- 项目面向单用户本地运行，没有登录、多租户或生产部署配置。当前聊天响应为完整 HTTP 响应，没有逐字流式输出。
+- 消息受理后由 Backend 独立执行，刷新或断网不取消任务；后端重启后显示中断，由用户点击继续并核查原工具回执。Markdown 随流展示，公式在所属消息接收完成后排版。
+- 项目面向单用户本地运行，没有登录、多租户或生产部署配置。任务托管和 SSE 广播依赖单个 Backend 进程，不支持直接使用多个独立 Uvicorn worker。
 
 ## 仓库导航
 
@@ -19,7 +20,7 @@
 | `services/materials_ml/`、`packages/materials_storage/` | 独立 ML 服务与对象存储引用合同 |
 | `scripts/dev/`、`scripts/acceptance/` | 本地启动与验收脚本 |
 
-业务流程和关键边界见 [架构说明](docs/architecture.md)；按改动选择检查项见 [验证指南](docs/testing.md)。
+业务流程和关键边界见 [架构说明](docs/architecture.md)；流式协议见 [流式展示设计](docs/design/streaming-research-process.md)，已有验收及其限制见 [验收记录](docs/acceptance/streaming-research-process.md)；按改动选择检查项见 [验证指南](docs/testing.md)。
 
 ## 本地启动
 
@@ -32,7 +33,7 @@ npm --prefix frontend ci
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ```
 
-在忽略的根 `.env` 中填写 PostgreSQL、MinIO 等本机配置；根据本机情况替换示例值。Compose 镜像需已在本机，启动脚本不会自动拉取镜像或安装依赖。默认使用 Mock LLM 和 Mock Runtime：
+在忽略的根 `.env` 中填写 PostgreSQL、MinIO 等本机配置；根据本机情况替换示例值。Compose 镜像需已在本机，启动脚本不会自动拉取镜像或安装依赖。`Start` 会升级所配置的 Backend 数据库迁移、初始化 SDK checkpoint 表并检查对象存储桶。默认使用 Mock LLM 和 Mock Runtime：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev/local-dev.ps1 -Action Start

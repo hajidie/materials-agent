@@ -275,6 +275,8 @@ with httpx.Client(base_url="http://127.0.0.1:8200", headers=headers, timeout=30,
 角色、bucket、IAM 身份和合成数据，结束时仅清理这些精确身份；不清空共享卷、不启动平台/LLM/GPU。
 它会在临时端口启动真正的 HTTP Service 和 Worker 进程并结束它们，不表示 ML 常驻服务已经启动。
 
+自动验收、浏览器 ML 验收与常驻 Worker 应串行运行；它们共用本机 Worker 单实例锁，重叠可能产生 `WORKER_ALREADY_RUNNING` / `ML_WORKER_STOPPED`。测试数据库和端口隔离不能隔离这个锁。
+
 验收包含迁移/唯一约束、认证与跨 scope 拒绝、严格幂等、上传结果未知/数据库发布失败/迟到清理、
 LR/RF 下载预测往返、启动门禁/Job 关联失败、取消/Worker 强制退出/Service 重启、旧 claim、
 丢失领取/启动/完成回包、部分产物与成功发布事务回滚。另覆盖 Prediction 原子发布、单位/输入上限、进程超时/取消/TCP 断连/Service 强制退出、
@@ -361,7 +363,7 @@ Resource 认证下增加两个只读 POST 接口，均位于 `/api/v1/scopes/{sc
 
 ### 受控资源身份与 scope 关闭
 
-先使用本 Service 的迁移入口升级至 0003。Backend 需要自身 0018，不能连接 ML 数据库执行迁移。
+先使用本 Service 的迁移入口升级至 `0003_scopes`。Backend 使用自己的 Alembic 迁移链升级到当前 head，资源能力始于 `0018_ml_resources`；两侧分别在各自环境和数据库中执行迁移。
 Resource API 新增只读 `resource-identities/{resource_type}/{resource_id}`，返回身份合同版本、远端摘要及固定文件描述；
 可变状态不进入身份摘要，身份相同不等于资源当前可用。
 
@@ -379,3 +381,7 @@ P5 完整验收：`services/materials_ml/scripts/acceptance-p5.ps1 -BackendPytho
 
 P6 基础验收入口为 `services/materials_ml/scripts/acceptance-p6.ps1 -BackendPython <独立 Backend Python>`；
 追加 `-RealLLM` 运行独立真实 Provider 语言闭环。默认测试不依赖外部 Provider；未通过真实语言验收不能宣称完整 P6 通过。
+
+聊天内 ML 交互的 P7 自动验收入口为 `services/materials_ml/scripts/acceptance-p7.ps1 -BackendPython <独立 Backend Python>`，
+先运行前端 Vitest、typecheck 和 build，再调用 P6；可追加 `-RealLLM`。真实浏览器用例 `tests/service/test_platform_resource_browser.py`
+仍需单独运行，自动检查通过不能代替浏览器验收。
