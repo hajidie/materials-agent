@@ -161,7 +161,7 @@ class ResourceTransaction:
         from .agent import AgentRunRow
         from .asset import AssetRow
         from .tool_invocation import InvocationRunRow
-        for table, condition in ((AgentRunRow, AgentRunRow.status.in_(("PENDING", "RUNNING"))),
+        for table, condition in ((AgentRunRow, AgentRunRow.status.in_(("PENDING", "RUNNING", "INTERRUPTED"))),
                 (AssetRow, (AssetRow.source_type == "UPLOADED") & (AssetRow.current_status == "PENDING")),
                 (InvocationRunRow, InvocationRunRow.status.in_(("PENDING", "RUNNING")))):
             if self.session.scalar(select(table).where(table.conversation_id == self.conversation, condition).limit(1)):

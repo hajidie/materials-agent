@@ -20,6 +20,7 @@ from .context_framework import ContextFramework, internal_values, protect_text
 from .native_tool_protocol import decode_tool_arguments, validate_model_message
 from .sdk_agent_loop import NATIVE_AGENT_INSTRUCTIONS, SdkAgentLoop
 from .unit_resolution import project_units
+from .agent_process import AgentProcess, PublicText
 
 
 def trim_public_context(frame, messages, maximum: int) -> int:
@@ -63,8 +64,90 @@ class AgentRuntime:
         self.model_tasks: dict[tuple[str, str | None], asyncio.Task] = {}
         self.stop_events: dict[tuple[str, str | None], asyncio.Event] = {}
         self.receipt_tasks: set[asyncio.Task] = set()
+        self.running_tasks: dict[tuple[str, str | None], asyncio.Task] = {}
+        self.scheduled_again: set[str] = set()
+        self.process = AgentProcess(store)
+
+    def schedule(self, run: AgentRun) -> None:
+        """Accepted work is owned by the application, never an HTTP subscriber."""
+        if run.status != "PENDING" or (run.accepted_submission_id and run.accepted_submission_id != run.submission_id):
+            return
+        key = (run.agent_run_id, run.submission_id)
+        if any(k[0] == run.agent_run_id and not task.done() for k, task in self.running_tasks.items()):
+            self.scheduled_again.add(run.agent_run_id)
+            return
+        async def work():
+            try:
+                current = run
+                while True:
+                    self.scheduled_again.discard(run.agent_run_id)
+                    if current.status == "PENDING":
+                        await self.advance(current.agent_run_id, current.actor_id, submission_id=current.submission_id)
+                    # A confirmation/reply may have been accepted during closeout.
+                    current = await asyncio.to_thread(self.store.get, run.agent_run_id, run.actor_id)
+                    if current.status != "PENDING" and run.agent_run_id not in self.scheduled_again:
+                        break
+                    if run.agent_run_id in self.scheduled_again:
+                        current = await asyncio.to_thread(self.store.get, run.agent_run_id, run.actor_id)
+            except (Exception, asyncio.CancelledError):
+                # Includes failures before advance has claimed the run.
+                current = await asyncio.to_thread(self.store.get, run.agent_run_id, run.actor_id)
+                if current.status in {"PENDING", "RUNNING"} and current.submission_id == run.submission_id:
+                    current.status, current.error_code = "INTERRUPTED", "PROCESS_INTERRUPTED"
+                    try:
+                        await asyncio.to_thread(self.store.save, current)
+                        await self.process.finish(current.agent_run_id, current.actor_id, current.status)
+                    except AgentConflictError:
+                        pass
+                raise
+            finally:
+                self.scheduled_again.discard(run.agent_run_id)
+                self.process.changed(run.agent_run_id)
+                self.process.evict()
+        task = asyncio.create_task(work(), name=f"agent:{run.agent_run_id}")
+        self.running_tasks[key] = task
+        def done(finished):
+            if self.running_tasks.get(key) is finished:
+                self.running_tasks.pop(key, None)
+            if not finished.cancelled():
+                error = finished.exception()
+                if error is not None:
+                    import logging
+                    logging.getLogger(__name__).error("agent_background_failed", exc_info=error)
+        task.add_done_callback(done)
+
+    async def resume(self, run_id: str, actor_id: str, submission_id: str, version: int):
+        requested_version = version
+        run = await asyncio.to_thread(self.store.get, run_id, actor_id)
+        if run.submission_id != submission_id:
+            raise AgentConflictError("Submission is stale.")
+        if run.resumed_version == version:
+            self.schedule(run)
+            return run
+        if run.status != "INTERRUPTED" or run.version != version:
+            raise AgentConflictError("Recovery version is stale.")
+        checkpoint = await self.checkpointer.aget_tuple({"configurable": {"thread_id": run_id}})
+        if checkpoint is None and (run.calls or run.pending_tool_call_id):
+            raise AgentFailure("CHECKPOINT_MISSING")
+        record = run.pending_execution
+        if record is not None and record.dispatched:
+            found = next((o for o in run.observations if o.invocation_run_id == record.invocation_run_id), None)
+            if found is None:
+                found = await asyncio.to_thread(self.tools.repair, run, record)
+                if found is None:
+                    raise AgentFailure("TOOL_OUTCOME_UNKNOWN")
+                run = await asyncio.to_thread(self.store.receipt, run_id, actor_id, record, found)
+                version = run.version
+        run = await asyncio.to_thread(self.store.resume, run_id, actor_id, submission_id, version, requested_version=requested_version)
+        self.schedule(run)
+        return run
 
     async def close(self) -> None:
+        jobs = list(self.running_tasks.values())
+        for task in jobs:
+            task.cancel()
+        if jobs:
+            await asyncio.gather(*jobs, return_exceptions=True)
         for task in list(self.model_tasks.values()):
             task.cancel()
         if self.model_tasks:
@@ -90,18 +173,22 @@ class AgentRuntime:
         for run_id, actor_id, status in candidates:
             checkpoint = await self.checkpointer.aget_tuple({"configurable": {"thread_id": run_id}})
             run = await asyncio.to_thread(self.store.get, run_id, actor_id)
+            if run.terminal:
+                await self.process.tools(run)
+                await self.process.finish(run_id, actor_id, run.status, final_message_id=run.final_message_id)
+                continue
             if checkpoint is None and (run.calls or run.pending_execution):
                 run.status = "TERMINATED"
                 run.error_code = "CHECKPOINT_MISSING"
                 await asyncio.to_thread(self.store.save, run)
+                await self.process.finish(run_id, actor_id, run.status)
                 continue
             if status in {"WAITING_FOR_USER", "WAITING_FOR_CONFIRMATION"}:
-                interrupted = bool(checkpoint and any(
-                    channel == "__interrupt__" for _, channel, _ in checkpoint.pending_writes))
-                if not interrupted:
-                    await self.advance(run_id, actor_id, reconcile_waiting=True)
+                await self.process.tools(run)
+                await self.process.finish(run_id, actor_id, status)
                 continue
-            await self.advance(run_id, actor_id)
+            await self.process.tools(run)
+            await self.process.finish(run_id, actor_id, run.status)
 
     async def stop(self, run_id: str, actor_id: str, submission_id: str):
         run, stopped = await asyncio.to_thread(self.store.stop, run_id, actor_id, submission_id)
@@ -116,6 +203,7 @@ class AgentRuntime:
                 await task
             except (asyncio.CancelledError, Exception):
                 pass  # The persisted stop owns the result.
+        await self.process.finish(run_id, actor_id, run.status, final_message_id=run.final_message_id)
         return run, stopped
 
     async def advance(self, run_id: str, actor_id: str, *, submission_id: str | None = None,
@@ -126,7 +214,7 @@ class AgentRuntime:
         run = await asyncio.to_thread(self.store.get, run_id, actor_id)
         if submission_id is not None and run.submission_id != submission_id:
             raise AgentConflictError("Submission is stale.")
-        if run.terminal or run.status == "RUNNING" or (run.status == "WAITING_FOR_USER" and not reconcile_waiting):
+        if run.terminal or run.status in {"RUNNING", "INTERRUPTED"} or (run.status == "WAITING_FOR_USER" and not reconcile_waiting):
             return run
         if run.status == "WAITING_FOR_CONFIRMATION" and not reconcile_waiting and (
             waiting_version != run.waiting_version or confirmation is None
@@ -173,6 +261,40 @@ class AgentRuntime:
         request_limit = 0
         request_estimate = 0
         resources = getattr(self.tools, "resource_context", None)
+        streams: dict[str, dict] = {}
+
+        async def tool_progress(source=None):
+            await self.process.tools(source or run)
+
+        async def publish_text(call_id, kind, *, status="streaming", purpose="process", text=None):
+            state = streams[call_id]
+            guard = state[kind]
+            await self.process.upsert(run_id, actor_id, {
+                "segment_id": f"{call_id}:{kind}", "kind": kind, "purpose": purpose,
+                "status": status, "text": guard.text if text is None else text,
+            }, flush=status != "streaming")
+
+        async def on_delta(call_id, message):
+            state = streams.get(call_id)
+            if state is None or state["closed"] or stopped_event.is_set():
+                return
+            reasoning = message.additional_kwargs.get("reasoning_content", "")
+            text = message.content if isinstance(message.content, str) else "".join(
+                b.get("text", "") for b in message.content if isinstance(b, dict) and b.get("type") == "text")
+            for kind, value in (("reasoning", reasoning), ("text", text)):
+                if not isinstance(value, str) or not value:
+                    continue
+                if len(state[kind].text) + len(state[kind].pending) + len(value) > 65536:
+                    raise AgentFailure("MODEL_PROCESS_TOO_LARGE")
+                if state[kind].push(value):
+                    await publish_text(call_id, kind, purpose="pending" if kind == "text" else "process")
+            for chunk in message.tool_call_chunks:
+                name = chunk.get("name")
+                if name and name != "ask_user" and name in {t["tool_name"] for t in self.tools.catalog()}:
+                    await self.process.upsert(run_id, actor_id, {
+                        "segment_id": f"{call_id}:preparing", "kind": "activity", "purpose": "process",
+                        "status": "streaming", "text": "", "tool_name": name, "tool_status": "PREPARING",
+                    })
 
         async def persist() -> None:
             nonlocal last
@@ -181,6 +303,8 @@ class AgentRuntime:
             last = instant
             run.updated_at = now()
             await asyncio.to_thread(self.store.save, run)
+            await tool_progress()
+            self.process.changed(run_id)
 
         def remaining_time() -> float:
             return run.budget.max_active_seconds - run.active_seconds - max(0, self.monotonic() - last)
@@ -222,9 +346,12 @@ class AgentRuntime:
                 [frame.payload, [message.model_dump(mode="json") for message in messages]]),
                 output_limit=request_limit, input_reserved=request_estimate)
             run.calls.append(current_call)
+            private = set(frame.private) | internal_values(run.model_dump(mode="json"))
+            streams[current_call.call_id] = {"reasoning": PublicText(private), "text": PublicText(private), "closed": False}
             await persist()  # Reserve before the external model call.
             check_budget()
-            return self.model.native_model(timeout=remaining_time(), output_limit=request_limit)
+            selected = self.model.native_model(timeout=remaining_time(), output_limit=request_limit, streaming=True)
+            return selected.model_copy(update={"metadata": {**(selected.metadata or {}), "agent_call_id": current_call.call_id}})
 
         async def model_failure():
             if current_call is None or current_call.status != "RUNNING":
@@ -242,6 +369,25 @@ class AgentRuntime:
         async def on_model(message: AIMessage, _messages, frame):
             if current_call is None:
                 raise AgentFailure("LLM_CALL_SOURCE_MISMATCH")
+            state = streams[current_call.call_id]
+            state["closed"] = True
+            finish_reason = message.response_metadata.get("finish_reason") or message.response_metadata.get("stop_reason")
+            content_status = "interrupted" if finish_reason in {"length", "max_tokens", "content_filter"} else "complete"
+            for kind, raw in (("reasoning", message.additional_kwargs.get("reasoning_content", "")),
+                              ("text", message.content)):
+                if not isinstance(raw, str):
+                    continue
+                safe = protect_text(raw, state[kind].private)
+                if safe or state[kind].text:
+                    await publish_text(current_call.call_id, kind, status=content_status, text=safe,
+                        purpose="pending" if kind == "text" and not message.tool_calls else "process")
+            if message.tool_calls:
+                name = message.tool_calls[0]["name"]
+                if name != "ask_user" and name in {t["tool_name"] for t in self.tools.catalog()}:
+                    await self.process.upsert(run_id, actor_id, {
+                        "segment_id": f"{current_call.call_id}:preparing", "kind": "activity", "purpose": "process",
+                        "status": "complete", "text": "", "tool_name": name, "tool_status": "PREPARED",
+                    }, flush=True)
             from materialsagent.domain.ports.agent import PreparedAgentCall
             from materialsagent.infrastructure.llm.agent_model import normalize_usage
             request = PreparedAgentCall("agent_decision", [], request_limit, request_estimate, remaining_time())
@@ -308,10 +454,14 @@ class AgentRuntime:
                 except Exception:
                     observation = await asyncio.to_thread(self.tools.repair, run, record)
                     if observation is None:
-                        return await asyncio.to_thread(self.store.fail_execution, run_id, actor_id, record)
+                        updated = await asyncio.to_thread(self.store.fail_execution, run_id, actor_id, record)
+                        await self.process.tools(updated)
+                        return updated
                 if observation.invocation_run_id != record.invocation_run_id:
                     raise AgentFailure("OBSERVATION_SOURCE_MISMATCH")
-                return await asyncio.to_thread(self.store.receipt, run_id, actor_id, record, observation)
+                updated = await asyncio.to_thread(self.store.receipt, run_id, actor_id, record, observation)
+                await self.process.tools(updated)
+                return updated
 
             task = asyncio.create_task(complete())
             self.receipt_tasks.add(task)
@@ -464,7 +614,7 @@ class AgentRuntime:
             async with httpx.AsyncClient() as async_http:
                 with httpx.Client() as sync_http:
                     initial_model = self.model.native_model(
-                        timeout=remaining_time(), http_client=sync_http, http_async_client=async_http)
+                        timeout=remaining_time(), http_client=sync_http, http_async_client=async_http, streaming=True)
                     graph = SdkAgentLoop(checkpointer=self.checkpointer)
                     def model_task_changed(task: asyncio.Task | None) -> None:
                         if task is None:
@@ -477,7 +627,7 @@ class AgentRuntime:
                         catalog=[] if run.tool_execution_disabled else self.tools.catalog(),
                         context=context, before_model=before_model, on_model=on_model,
                         on_model_failure=model_failure, model_task_changed=model_task_changed,
-                        on_tool=on_tool, resume=resume,
+                        on_tool=on_tool, on_delta=on_delta, resume=resume,
                         resumed=resumed_question or resumed_confirmation,
                         replay=replay_checkpoint,
                         tools_allowed=not run.tool_execution_disabled,
@@ -519,6 +669,12 @@ class AgentRuntime:
             current = await asyncio.to_thread(self.store.get, run_id, actor_id)
             if current.error_code == "USER_STOPPED":
                 return current
+            if current.status == "RUNNING":
+                current.status, current.error_code = "INTERRUPTED", "PROCESS_INTERRUPTED"
+                try:
+                    await asyncio.to_thread(self.store.save, current)
+                except AgentConflictError:
+                    pass  # Concurrent receipt/stop owns the newer version.
             raise
         except AgentConflictError:
             return await asyncio.to_thread(self.store.get, run_id, actor_id)
@@ -535,6 +691,15 @@ class AgentRuntime:
                 return await asyncio.to_thread(self.store.get, run_id, actor_id)
         finally:
             self.stop_events.pop(key, None)
+            for call_id, state in streams.items():
+                if not state["closed"]:
+                    for kind in ("reasoning", "text"):
+                        text = state[kind].finish(incomplete=True)
+                        if text:
+                            await publish_text(call_id, kind, status="interrupted", text=text)
+            actual = await asyncio.to_thread(self.store.get, run_id, actor_id)
+            await tool_progress(actual)
+            await self.process.finish(run_id, actor_id, actual.status, final_message_id=actual.final_message_id)
         if run.terminal and self.checkpoint_cleanup is not None:
             try:
                 await self.checkpoint_cleanup.delete(run_id)

@@ -23,7 +23,7 @@ export interface AgentRun {
   source_answer_message_id: string | null;
   answer_root_message_id: string | null;
   goal: string;
-  status: "PENDING" | "RUNNING" | "WAITING_FOR_USER" | "WAITING_FOR_CONFIRMATION" | "SUCCEEDED" | "TERMINATED";
+  status: "PENDING" | "RUNNING" | "WAITING_FOR_USER" | "WAITING_FOR_CONFIRMATION" | "INTERRUPTED" | "SUCCEEDED" | "TERMINATED";
   version: number;
   waiting_version: number;
   waiting: { question: string } | null;
@@ -94,4 +94,23 @@ export interface AcceptedSubmission {
   agent_run: AgentRun;
   submission_id: string;
   idempotency_replayed: boolean;
+}
+
+export interface ProcessSegment {
+  segment_id: string;
+  sequence: number;
+  revision: number;
+  kind: "reasoning" | "text" | "tool" | "activity";
+  purpose: "pending" | "process" | "answer";
+  status: "streaming" | "complete" | "interrupted";
+  text: string;
+  tool_name?: string;
+  tool_status?: string;
+  presentation?: Presentation | null;
+}
+export interface ProcessSnapshot {
+  epoch: string;
+  revision: number;
+  segments: ProcessSegment[];
+  run: AgentRun;
 }

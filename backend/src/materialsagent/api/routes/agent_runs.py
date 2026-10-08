@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator, create_model
 
 from materialsagent.api.dependencies import get_actor_context
@@ -81,6 +83,10 @@ class TurnRequest(BaseModel):
     submission_id: str = Field(min_length=1)
 
 
+class ResumeRequest(TurnRequest):
+    version: int = Field(ge=0)
+
+
 class Confirmation(BaseModel):
     model_config = ConfigDict(extra="forbid")
     waiting_version: int = Field(ge=1)
@@ -136,6 +142,7 @@ def public(run: AgentRun):
             } for o in run.observations if o.kind == "TOOL_RESULT"],
         outcome_unknown=run.error_code == "MCP_OUTCOME_UNKNOWN" or any(e.status == "OUTCOME_UNKNOWN" for e in run.executions),
         error_message={
+            "PROCESS_INTERRUPTED": "服务重启后任务已暂停。可恢复处理，已保存的过程仍保留。",
             "USER_STOPPED": "已停止生成，已保存的内容仍保留。",
             "CONTEXT_BUDGET_EXCEEDED": "本次请求所需的上下文超出处理上限，未能继续。已上传的附件和已保存的结果仍保留。",
             "LLM_TOKEN_BUDGET_EXCEEDED": "本次处理已达到推理额度上限，未能继续。已上传的附件和已保存的结果仍保留。",
@@ -159,7 +166,7 @@ def accepted(run, replayed, request):
 
 
 @router.post("/api/v1/conversations/{conversation_id}/messages", response_model=SubmissionResponse, status_code=202)
-def submit(conversation_id: str, body: Submission, request: Request,
+async def submit(conversation_id: str, body: Submission, request: Request,
            actor: Annotated[ActorContext, Depends(get_actor_context)],
            idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None):
     runtime = runtime_for(request)
@@ -171,18 +178,71 @@ def submit(conversation_id: str, body: Submission, request: Request,
             if not message or message.actor_id != actor.actor_id or message.conversation_id != conversation_id or message.phase != "question":
                 raise AgentFailure("MESSAGE_NOT_FOUND")
             target = message.agent_run_id
-    run, replayed = runtime.store.submit(conversation_id, actor.actor_id, body.content_text, key_value(idempotency_key),
+    run, replayed = await asyncio.to_thread(runtime.store.submit, conversation_id, actor.actor_id, body.content_text, key_value(idempotency_key),
         run_id=target, waiting_version=body.reply_to.waiting_version if body.reply_to else None,
         question_message_id=body.reply_to.question_message_id if body.reply_to else None,
         budget=request.app.state.agent_budget, attachments=[a.model_dump() for a in body.attachments])
-    return accepted(run, replayed, request)
+    response = accepted(run, replayed, request)
+    runtime.schedule(run)
+    return response
 
 
-@router.post("/api/v1/agent-runs/{run_id}/advance", response_model=RunResponse)
-async def advance(run_id: str, body: TurnRequest, request: Request,
+@router.post("/api/v1/agent-runs/{run_id}/resume", response_model=RunResponse, status_code=202)
+async def resume(run_id: str, body: ResumeRequest, request: Request,
                   actor: Annotated[ActorContext, Depends(get_actor_context)]):
-    run = await runtime_for(request).advance(run_id, actor.actor_id, submission_id=body.submission_id)
+    run = await runtime_for(request).resume(run_id, actor.actor_id, body.submission_id, body.version)
     return {"request_id": request.state.request_id, "data": public(run)}
+
+
+@router.get("/api/v1/agent-runs/{run_id}/process")
+async def process_snapshot(run_id: str, request: Request, actor: Annotated[ActorContext, Depends(get_actor_context)]):
+    snapshot = await runtime_for(request).process.snapshot(run_id, actor.actor_id)
+    snapshot["run"] = public(snapshot["run"])
+    return {"data": snapshot}
+
+
+@router.get("/api/v1/agent-runs/{run_id}/events")
+async def events(run_id: str, request: Request, actor: Annotated[ActorContext, Depends(get_actor_context)]):
+    runtime = runtime_for(request)
+    # Authenticate before starting the response, including cached channels.
+    await asyncio.to_thread(runtime.store.get, run_id, actor.actor_id)
+    channel = await runtime.process.channel(run_id, actor.actor_id)
+
+    async def stream():
+        queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+        channel.listeners.add(queue)  # Subscribe before the initial snapshot.
+        first = True
+        revisions: dict[str, int] = {}
+        last_version = -1
+        serial = 0
+        try:
+            while True:
+                if await request.is_disconnected():
+                    return
+                snapshot = await runtime.process.snapshot(run_id, actor.actor_id)
+                run = snapshot.pop("run")
+                changed = [s for s in snapshot["segments"] if s["revision"] > revisions.get(s["segment_id"], -1)]
+                if first or changed or run.version > last_version:
+                    value = {**snapshot, "segments": snapshot["segments"] if first else changed, "run": public(run)}
+                    serial += 1
+                    event = "snapshot" if first else "process.updated"
+                    yield f"id: {channel.epoch}:{serial}\nevent: {event}\ndata: {json.dumps(value, ensure_ascii=False)}\n\n"
+                    revisions.update({s["segment_id"]: s["revision"] for s in snapshot["segments"]})
+                    last_version, first = run.version, False
+                active = any(k[0] == run_id and not task.done() for k, task in runtime.running_tasks.items())
+                if run.status not in {"PENDING", "RUNNING"} and not active:
+                    yield "event: settled\ndata: {}\n\n"
+                    return
+                try:
+                    await asyncio.wait_for(queue.get(), timeout=10)
+                    await asyncio.sleep(0.04)  # Coalesce deltas; never hold the producer.
+                except TimeoutError:
+                    yield ": heartbeat\n\n"
+        finally:
+            channel.listeners.discard(queue)
+            runtime.process.evict()
+    return StreamingResponse(stream(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"})
 
 
 @router.post("/api/v1/agent-runs/{run_id}/stop")
@@ -206,14 +266,16 @@ def versions(message_id: str, request: Request, actor: Annotated[ActorContext, D
 
 
 @router.post("/api/v1/messages/{message_id}/regenerate", response_model=SubmissionResponse, status_code=202)
-def regenerate(message_id: str, request: Request, actor: Annotated[ActorContext, Depends(get_actor_context)],
+async def regenerate(message_id: str, request: Request, actor: Annotated[ActorContext, Depends(get_actor_context)],
                idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None):
     runtime = runtime_for(request)
     source = runtime.store.answer_run(message_id, actor.actor_id)
-    run, replayed = runtime.store.submit(source.conversation_id, actor.actor_id, source.goal, key_value(idempotency_key),
+    run, replayed = await asyncio.to_thread(runtime.store.submit, source.conversation_id, actor.actor_id, source.goal, key_value(idempotency_key),
         budget=request.app.state.agent_budget, retry_source=source, retry_type="ANSWER_REGENERATION",
         source_answer_message_id=message_id)
-    return accepted(run, replayed, request)
+    response = accepted(run, replayed, request)
+    runtime.schedule(run)
+    return response
 
 
 @router.get("/api/v1/agent-runs/{run_id}", response_model=RunResponse)
@@ -271,7 +333,9 @@ async def _confirmation(run_id, invocation_id, body, request, actor, approved):
         if recorded and approved:
             return {"request_id": request.state.request_id, "data": public(run)}
         raise AgentConflictError("Confirmation target changed.")
-    run = await runtime.advance(run_id, actor.actor_id, waiting_version=body.waiting_version, confirmation=approved)
+    run = await asyncio.to_thread(runtime.store.accept_confirmation, run_id, actor.actor_id,
+        body.waiting_version, body.confirmation_version, approved)
+    runtime.schedule(run)
     return {"request_id": request.state.request_id, "data": public(run)}
 
 
@@ -342,7 +406,7 @@ def reconcile_resources(run_id: str, request: Request, actor: Annotated[ActorCon
 
 
 @router.post("/api/v1/agent-runs/{run_id}/retry", response_model=SubmissionResponse, status_code=202)
-def retry(run_id: str, body: RetryRequest, request: Request,
+async def retry(run_id: str, body: RetryRequest, request: Request,
           actor: Annotated[ActorContext, Depends(get_actor_context)],
           idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None):
     runtime = runtime_for(request)
@@ -352,7 +416,9 @@ def retry(run_id: str, body: RetryRequest, request: Request,
     execution = next((e for e in source.executions if e.invocation_run_id == body.invocation_run_id), None)
     if execution is None or execution.status != "FAILED" or not execution.retryable:
         raise AgentFailure("TOOL_RETRY_NOT_ALLOWED")
-    run, replayed = runtime.store.submit(source.conversation_id, actor.actor_id, source.goal, key_value(idempotency_key),
+    run, replayed = await asyncio.to_thread(runtime.store.submit, source.conversation_id, actor.actor_id, source.goal, key_value(idempotency_key),
         budget=request.app.state.agent_budget, retry_source=source, retry_type=body.retry_type,
         retry_invocation_id=body.invocation_run_id)
-    return accepted(run, replayed, request)
+    response = accepted(run, replayed, request)
+    runtime.schedule(run)
+    return response

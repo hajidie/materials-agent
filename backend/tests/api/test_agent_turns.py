@@ -1,6 +1,7 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
+from backend.tests.agent_state import wait_run
 
 from sqlalchemy import select, func
 from materialsagent.infrastructure.db.agent import AgentRunRow
@@ -56,10 +57,7 @@ def accept(client, conversation, text="1000 MPa 转 GPa", key="first", **body):
 
 
 def advance(client, submitted):
-    response = client.post(f"/api/v1/agent-runs/{submitted['agent_run']['agent_run_id']}/advance",
-                          json={"submission_id": submitted["submission_id"]})
-    assert response.status_code == 200, response.text
-    return response.json()["data"]
+    return wait_run(client, submitted['agent_run']['agent_run_id']).json()["data"]
 
 
 def messages(client, conversation):
@@ -141,9 +139,10 @@ def test_stop_cancels_the_actual_model_await_and_preserves_user_message(api_harn
         assert len(messages(client, conversation)) == 1
 
 
-def test_stop_before_advance_prevents_any_model_or_tool_call(api_harness):
+def test_stop_before_background_claim_prevents_any_model_or_tool_call(api_harness, monkeypatch):
     client, conversation = client_for(api_harness, MockAgentModel(lambda *_: (_ for _ in ()).throw(AssertionError("model called"))))
     with client:
+        monkeypatch.setattr(client.app.state.agent_runtime, "schedule", lambda run: None)
         submitted = accept(client, conversation)
         response = client.post(f"/api/v1/agent-runs/{submitted['agent_run']['agent_run_id']}/stop",
             json={"submission_id": submitted["submission_id"]})
@@ -190,8 +189,9 @@ def test_replayed_older_acceptance_cannot_stop_new_reply(api_harness):
         assert replay["submission_id"]==original["submission_id"]!=reply["submission_id"]
         url=f"/api/v1/agent-runs/{waiting['agent_run_id']}"
         assert client.post(url+"/stop",json={"submission_id":replay["submission_id"]}).status_code==409
-        assert client.post(url+"/advance",json={"submission_id":replay["submission_id"]}).status_code==409
-        assert client.get(url).json()["data"]["status"]=="PENDING"
+        assert client.post(url+"/resume",json={"submission_id":replay["submission_id"],"version":0}).status_code==409
+        current = wait_run(client, waiting['agent_run_id']).json()["data"]
+        assert current["status"] == "WAITING_FOR_USER" and not current["stopped"]
 
 
 def test_old_message_modes_and_blank_finish_do_not_publish(api_harness):

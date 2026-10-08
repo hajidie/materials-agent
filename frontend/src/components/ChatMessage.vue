@@ -4,7 +4,10 @@ import { agentRequest, type ChatMessage } from "../api/agent";
 import type { Attachment } from "../api/artifacts";
 import MessageAttachment from "./MessageAttachment.vue";
 import MessageActionBar from "./MessageActionBar.vue";
-const props = defineProps<{ message: ChatMessage; conversationId: string; disabled: boolean }>();
+import AssistantMarkdown from "./AssistantMarkdown.vue";
+import ResearchProcess from "./ResearchProcess.vue";
+import type { ProcessSnapshot } from "../api/agent";
+const props = defineProps<{ message: ChatMessage; conversationId: string; disabled: boolean; process?: ProcessSnapshot | undefined; showProcess?: boolean }>();
 defineEmits<{ regenerate: [message: ChatMessage]; artifact: [value: { message: string; attachment: Attachment }] }>();
 const selected = ref<ChatMessage | null>(null), loading = ref(false), error = ref("");
 const versions = ref<ChatMessage[]>([]);
@@ -30,7 +33,9 @@ async function switchVersion(delta: number) {
 </script>
 <template>
   <article :class="message.role === 'USER' ? 'chat-user' : 'chat-assistant'" :aria-label="message.role === 'USER' ? '你的消息' : '助手回复'">
-    <p class="agent-answer">{{ displayed.text }}</p>
+    <ResearchProcess v-if="showProcess && displayed.role === 'ASSISTANT' && displayed.agent_run_id" :run-id="displayed.agent_run_id" :snapshot="process" />
+    <AssistantMarkdown v-if="displayed.role === 'ASSISTANT'" :text="displayed.text" />
+    <p v-else class="agent-answer">{{ displayed.text }}</p>
     <div class="message-attachments">
       <MessageAttachment v-for="attachment in [...displayed.attachments, ...displayed.artifacts]" :key="attachment.attachment_id"
         :conversation-id="conversationId" :message-id="displayed.message_id" :attachment="attachment"

@@ -24,7 +24,7 @@ def inventory(sessions, actor, *, all_conversations=False):
             blocked = []
             if conversation.deletion_fence_operation_id:
                 blocked.append("DELETION_UNRESOLVED")
-            if any((run.get("pending_execution") or {}).get("dispatched") or run["status"] in ("PENDING", "RUNNING", "WAITING_FOR_CONFIRMATION") or
+            if any((run.get("pending_execution") or {}).get("dispatched") or run["status"] in ("PENDING", "RUNNING", "INTERRUPTED", "WAITING_FOR_CONFIRMATION") or
                 any(e.get("status") == "OUTCOME_UNKNOWN" for e in run.get("executions", [])) for run in runs):
                 blocked.append("BUSY_OR_UNKNOWN_AGENT")
             if session.scalar(select(func.count()).select_from(TaskRow).where(TaskRow.conversation_id == identity,

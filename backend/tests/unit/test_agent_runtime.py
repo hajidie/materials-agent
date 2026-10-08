@@ -25,6 +25,13 @@ class Store:
     def __init__(self, run):
         self.run = run.model_copy(deep=True)
         self.cleanup = set()
+        self.process = {"revision": 0, "segments": []}
+
+    def load_process(self, _run_id, _actor_id):
+        return copy.deepcopy(self.process)
+
+    def save_process(self, _run_id, _actor_id, document):
+        self.process = copy.deepcopy(document)
 
     def get(self, _run_id, _actor_id):
         return self.run.model_copy(deep=True)

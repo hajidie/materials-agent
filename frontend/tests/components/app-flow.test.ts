@@ -23,6 +23,7 @@ beforeEach(()=>{
   runs=[];history=[];gate=null;fail=false;writes.length=0;
   vi.stubGlobal('fetch',vi.fn(async(input:RequestInfo|URL,init?:RequestInit)=>{
     const url=String(input);
+    if(url.endsWith('/process'))return response({epoch:'test',revision:0,segments:[],run:runs[0]??run()});
     if(url.endsWith('/ui-state'))return response({fence:{operation_id:null}});
     if(url.endsWith('/result-messages'))return response({items:[]});
     if(url.endsWith('/results/reconcile'))return response({messages:[],pending:false});
@@ -31,17 +32,13 @@ beforeEach(()=>{
       if(fail)throw new TypeError('network');
       if(url.endsWith('/conversations'))return response(conversation);
       if(url.endsWith('/messages')||url.endsWith('/regenerate')){
-        runs=[run({status:'PENDING',final_message_id:null})];
+        runs=[run({status:gate?'RUNNING':'SUCCEEDED',final_message_id:gate?null:'answer'})];
         if(url.endsWith('/messages'))history.push(message({message_id:'user',role:'USER',phase:'user',text:String(body.content_text),sequence:1,answer_root_message_id:null,answer_version:null,version_count:0}));
+        if(!gate)history.push(message());
         return response({agent_run:runs[0],submission_id:'submission',idempotency_replayed:false},202);
       }
       if(url.endsWith('/stop')){runs=[run({status:'TERMINATED',stopped:true,final_message_id:null,error_message:'已停止生成'})];return response({agent_run:runs[0],outcome:'stopped'});}
-      if(url.endsWith('/advance')){
-        runs=[run({status:'RUNNING',final_message_id:null})];
-        if(gate)await Promise.race([gate,new Promise((_,reject)=>init.signal?.addEventListener('abort',()=>reject(new DOMException('aborted','AbortError'))))]);
-        if(runs[0]?.stopped)return response(runs[0]);
-        runs=[run()];history.push(message());return response(runs[0]);
-      }
+
     }
     if(url.includes('/agent-runs'))return response({items:runs,next_cursor:null});
     if(url.endsWith('/messages'))return response({items:history,next_cursor:null});
@@ -54,11 +51,12 @@ it('loads canonical messages without generation',async()=>{
   expect(w.text()).toContain('已完成研究');expect(writes).toHaveLength(0);
   expect(w.find('[aria-label="重新生成回答"]').exists()).toBe(true);
 });
-it('accepts then advances and clears the acknowledged draft',async()=>{
+it('accepts background work without advance and clears the acknowledged draft',async()=>{
   const w=await show();expect(w.get('main').classes()).toContain('app-main--empty');
   await w.get('textarea').setValue('1000 MPa 转 GPa');await w.get('form').trigger('submit');await flushPromises();
   expect(writes[0]?.body).toEqual({content_text:'1000 MPa 转 GPa',attachments:[]});
-  expect(writes[1]?.body).toEqual({submission_id:'submission'});
+  expect(writes).toHaveLength(1);
+  expect(writes.some(x=>x.url.endsWith('/advance'))).toBe(false);
   expect(w.text()).toContain('已完成研究');expect((w.get('textarea').element as HTMLTextAreaElement).value).toBe('');
 });
 it('automatically binds the ordinary reply to the current question',async()=>{
@@ -107,27 +105,6 @@ it('requires the pending tool confirmation before accepting another message',asy
   expect(w.get('[aria-label="发送"]').attributes('disabled')).toBeDefined();
   expect(w.findAll('button').find(b=>b.text()==='确认执行')!.attributes('disabled')).toBeUndefined();
   await w.get('form').trigger('submit');expect(writes).toHaveLength(0);
-});
-
-it('an old response after Stop cannot reset the next generation',async()=>{
-  const originalFetch=globalThis.fetch;
-  let oldResponse:(value:Response)=>void=()=>{};
-  let first=true;
-  vi.stubGlobal('fetch',vi.fn(async(input:RequestInfo|URL,init?:RequestInit)=>{
-    if(String(input).endsWith('/advance')&&first){
-      first=false;runs=[run({status:'RUNNING',final_message_id:null})];
-      return await new Promise<Response>(resolve=>{oldResponse=resolve;});
-    }
-    return originalFetch(input,init);
-  }));
-  const w=await show();await w.get('textarea').setValue('第一问');await w.get('form').trigger('submit');await flushPromises();
-  await w.get('[aria-label="中止生成"]').trigger('click');await flushPromises();
-  let finish=()=>{};gate=new Promise<void>(resolve=>{finish=resolve;});
-  await w.get('textarea').setValue('第二问');await w.get('form').trigger('submit');await flushPromises();
-  oldResponse(response(run({status:'TERMINATED',stopped:true,final_message_id:null})));await flushPromises();
-  expect(w.find('[aria-label="中止生成"]').exists()).toBe(true);
-  await w.get('form').trigger('submit');expect(writes.filter(x=>x.url.endsWith('/messages'))).toHaveLength(2);
-  finish();await flushPromises();
 });
 
 it('places regeneration progress beside its original answer',async()=>{

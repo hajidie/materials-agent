@@ -169,7 +169,7 @@ class AgentRun(Contract):
     conversation_id: str
     actor_id: str
     source_message_id: str
-    status: Literal["PENDING", "RUNNING", "WAITING_FOR_USER", "WAITING_FOR_CONFIRMATION", "SUCCEEDED", "TERMINATED"] = "PENDING"
+    status: Literal["PENDING", "RUNNING", "WAITING_FOR_USER", "WAITING_FOR_CONFIRMATION", "INTERRUPTED", "SUCCEEDED", "TERMINATED"] = "PENDING"
     version: int = 0
     claim: str | None = None
     process_id: str | None = None
@@ -203,6 +203,7 @@ class AgentRun(Contract):
     answered_questions: dict[str, str] = Field(default_factory=dict)
     confirmation_response: dict[str, Any] | None = None
     recovery_replay: bool = False
+    resumed_version: int | None = None
     duplicate_of_invocation_run_id: str | None = None
     source_agent_run_id: str | None = None
     retry_type: Literal["TOOL_RETRY", "ANSWER_REGENERATION"] | None = None
@@ -242,10 +243,11 @@ class AgentRun(Contract):
 
     def validate_transition(self, previous: AgentRun) -> None:
         allowed = {
-            "PENDING": {"RUNNING", "TERMINATED"},
-            "RUNNING": {"RUNNING", "WAITING_FOR_USER", "WAITING_FOR_CONFIRMATION", "SUCCEEDED", "TERMINATED"},
+            "PENDING": {"RUNNING", "INTERRUPTED", "TERMINATED"},
+            "RUNNING": {"RUNNING", "WAITING_FOR_USER", "WAITING_FOR_CONFIRMATION", "INTERRUPTED", "SUCCEEDED", "TERMINATED"},
+            "INTERRUPTED": {"PENDING", "INTERRUPTED", "TERMINATED"},
             "WAITING_FOR_USER": {"PENDING", "RUNNING", "TERMINATED"},
-            "WAITING_FOR_CONFIRMATION": {"RUNNING", "TERMINATED"},
+            "WAITING_FOR_CONFIRMATION": {"PENDING", "RUNNING", "TERMINATED"},
         }
         if self.status not in allowed.get(previous.status, set()):
             raise ValueError("AgentRun transition is invalid.")

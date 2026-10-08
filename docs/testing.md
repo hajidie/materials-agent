@@ -48,3 +48,9 @@ Backend 的 `api/` 与 `integration/` 测试可能使用真实 PostgreSQL；存�
 - 浏览器验收检查真实点击、键盘、焦点和窄屏布局；jsdom 断言不能替代它。科学准确性还需要独立数据与评估。
 
 测试命名沿用现有约定：Python 为 `test_*.py`，前端为 `*.test.ts`。
+
+## 研究过程流式展示
+
+相关测试：`backend/tests/unit/test_agent_process.py` 验证分片、脱敏、晚到消息归并与调度交接；`backend/tests/api/test_agent_process_stream.py` 验证 SSE、所有权、历史、显式恢复、回执与删除；`test_agent_sdk_recovery.py` 保留 SDK 崩溃窗口重放验证。
+
+前端 `assistant-markdown.test.ts` 覆盖完成态原文、数学延迟渲染和不安全输入；`process-streams.test.ts` 覆盖重连归并、旧连接隔离与折叠选择。实际验证及未覆盖边界见 [流式功能验收](acceptance/streaming-research-process.md)。

@@ -31,7 +31,35 @@ IMMEDIATE_PREVIOUS_REVISION = "0006_asset"
 M8_REVISION = "0008_idempotency_record"
 M9_REVISION = "0009_timeline_query_indexes"
 M10_REVISION = "0010_registry_routing_state"
-EXPECTED_REVISION = "0024_sdk_agent_loop"
+EXPECTED_REVISION = "0025_agent_process_stream"
+
+
+def test_process_migration_preserves_existing_runs_and_guards_downgrade(temporary_database):
+    config = _make_alembic_config(temporary_database)
+    command.upgrade(config, "0024_sdk_agent_loop")
+    engine = create_engine_from_settings(temporary_database)
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("INSERT INTO actor(actor_id,actor_origin,created_at) VALUES ('process-actor','LOCAL_ANONYMOUS',now())"))
+            connection.execute(text("INSERT INTO conversation(conversation_id,actor_id,created_at,updated_at) VALUES ('process-conversation','process-actor',now(),now())"))
+            connection.execute(text("INSERT INTO message(message_id,conversation_id,actor_id,request_id,role,generation_source,content_text,sequence,phase,created_at) VALUES ('process-message','process-conversation','process-actor','process-request','USER','USER','preserve goal',1,'user',now())"))
+            connection.execute(text("INSERT INTO agent_run(agent_run_id,conversation_id,actor_id,source_message_id,status,version,document,created_at) VALUES ('process-run','process-conversation','process-actor','process-message','PENDING',0,'{}',now())"))
+        command.upgrade(config, "head")
+        with engine.begin() as connection:
+            assert connection.scalar(text("SELECT content_text FROM message")) == "preserve goal"
+            assert connection.scalar(text("SELECT count(*) FROM agent_run")) == 1
+            connection.execute(text("UPDATE agent_run SET status='INTERRUPTED'"))
+        with pytest.raises(RuntimeError, match="Resolve interrupted runs"):
+            command.downgrade(config, "0024_sdk_agent_loop")
+        assert "agent_process" in inspect(engine).get_table_names()
+        with engine.begin() as connection:
+            connection.execute(text("UPDATE agent_run SET status='PENDING'"))
+        command.downgrade(config, "0024_sdk_agent_loop")
+        assert "agent_process" not in inspect(engine).get_table_names()
+    finally:
+        engine.dispose()
+
+
 ALEMBIC_INI = Path(__file__).resolve().parents[3] / "alembic.ini"
 NEW_TASK_TIME_CHECKS = {
     "ck_task_started_at_not_before_created_at",
@@ -57,7 +85,7 @@ M8_TABLES = M7_TABLES | {
     "idempotency_record",
     "conversation_object_cleanup",
 }
-HEAD_TABLES = (M8_TABLES - {"llm_call", "natural_language_explanation"}) | {"ml_scope_binding", "ml_resource_ref", "ml_resource_operation", "conversation_deletion", "invocation_run", "invocation_result", "agent_run", "agent_submission", "agent_observation", "agent_execution", "agent_model_call", "agent_checkpoint_cleanup"}
+HEAD_TABLES = (M8_TABLES - {"llm_call", "natural_language_explanation"}) | {"ml_scope_binding", "ml_resource_ref", "ml_resource_operation", "conversation_deletion", "invocation_run", "invocation_result", "agent_run", "agent_submission", "agent_observation", "agent_execution", "agent_model_call", "agent_checkpoint_cleanup", "agent_process"}
 
 
 def _make_alembic_config(settings: AppSettings) -> Config:
@@ -2528,7 +2556,7 @@ def test_sdk_migration_refuses_existing_agent_runs(temporary_database):
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT count(*) FROM agent_run")) == 0
         command.upgrade(config, "head")
-        assert _current_revision(temporary_database) == "0024_sdk_agent_loop"
+        assert _current_revision(temporary_database) == EXPECTED_REVISION
     finally:
         engine.dispose()
 

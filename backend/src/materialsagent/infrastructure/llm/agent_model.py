@@ -82,12 +82,14 @@ class AgentModelAdapter:
         self.factory = factory
 
     def native_model(self, *, timeout: float | None = None, output_limit: int | None = None,
-                     http_client=None, http_async_client=None):
+                     http_client=None, http_async_client=None, streaming: bool | None = None):
         """Create a provider chat model without the legacy JSON response format."""
         from materialsagent.infrastructure.llm.factory import create_chat_model
 
         config = self.configurations["agent_decision"]
         changes = {}
+        if streaming is not None:
+            changes["streaming"] = streaming
         if timeout is not None:
             changes["timeout_seconds"] = min(timeout, config.timeout_seconds)
         if output_limit is not None:

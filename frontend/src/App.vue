@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import ConversationSidebar from "./components/ConversationSidebar.vue";
 import DeleteConversationDialog from "./components/DeleteConversationDialog.vue";
 import AgentRunCard from "./components/AgentRunCard.vue";
@@ -21,13 +21,29 @@ const deleteOperation = ref<string | null>(null);
 watch(chat.fence, value => { agent.writeBlocked.value = !!value; });
 watch(agent.selectedId, () => { viewing.value = null; });
 const pendingHere = computed(() => agent.pending.value?.conversationId === agent.selectedId.value ? agent.pending.value : null);
+const scrollArea = ref<HTMLElement>();
+const following = ref(true);
+let scrollFrame = 0;
+function trackScroll() {
+  const el = scrollArea.value;
+  if (el) following.value = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+}
+watch(() => [agent.messages.value, agent.processes.value, agent.runs.value], () => {
+  if (!following.value || scrollFrame) return;
+  scrollFrame = requestAnimationFrame(() => { scrollFrame = 0; void nextTick(() => {
+    if (following.value && scrollArea.value) scrollArea.value.scrollTop = scrollArea.value.scrollHeight;
+  }); });
+}, { deep: true, flush: "post" });
+watch(agent.selectedId, () => { following.value = true; });
+onUnmounted(() => cancelAnimationFrame(scrollFrame));
 const composerText = computed(() => !pendingHere.value?.accepted && typeof pendingHere.value?.body.content_text === "string" ? pendingHere.value.body.content_text : agent.draft.value.text);
 const composerAttachment = computed(() => !pendingHere.value?.accepted && Array.isArray(pendingHere.value?.body.attachments) ? pendingHere.value.body.attachments[0] as Attachment | undefined : agent.draft.value.attachment);
 const timeline = computed(() => {
   const entries: Array<{key:string;sequence:number;message:Message|null;run:AgentRun|null}> = agent.messages.value.map(message => ({ key: message.answer_root_message_id ?? message.message_id,
     sequence: message.sequence, message, run: null as AgentRun | null }));
   for (const run of agent.runs.value) {
-    if (!["PENDING", "RUNNING", "WAITING_FOR_CONFIRMATION"].includes(run.status) && !run.error_message && !run.outcome_unknown) continue;
+    const awaitingMessage = run.status === "SUCCEEDED" && !agent.messages.value.some(m => m.message_id === run.final_message_id);
+    if (!awaitingMessage && !["PENDING", "RUNNING", "WAITING_FOR_CONFIRMATION", "INTERRUPTED", "TERMINATED"].includes(run.status) && !run.error_message && !run.outcome_unknown) continue;
     const owned = agent.messages.value.filter(m => m.agent_run_id === run.agent_run_id);
     const anchor = agent.messages.value.find(m => run.answer_root_message_id
       ? m.answer_root_message_id === run.answer_root_message_id : m.message_id === run.source_message_id);
@@ -37,6 +53,12 @@ const timeline = computed(() => {
   return entries.sort((a, b) => a.sequence - b.sequence);
 });
 const awaitingConfirmation = computed(() => agent.runs.value.some(run => run.status === "WAITING_FOR_CONFIRMATION"));
+const interrupted = computed(() => agent.runs.value.some(run => run.status === "INTERRUPTED"));
+function showProcess(message: Message) {
+  if (message.role !== "ASSISTANT" || !message.agent_run_id) return false;
+  return !timeline.value.some(item => item.run?.agent_run_id === message.agent_run_id) &&
+    !agent.messages.value.some(m => m.role === "ASSISTANT" && m.agent_run_id === message.agent_run_id && m.sequence > message.sequence);
+}
 const deleteId = ref<string | null>(null);
 const deleting = ref(false);
 const deleteError = ref<string | null>(null);
@@ -98,7 +120,7 @@ function safely(promise: Promise<unknown>) { void promise.catch(() => { agent.er
       @create="safely(agent.select(null))" @select="safely(agent.select($event))" @delete="deleteId = $event"
       @load-more="safely(agent.refreshConversations(true))" />
     <main class="app-main" :class="{ 'app-main--empty': agent.runs.value.length === 0 && !agent.loading.value }">
-      <section class="conversation-scroll">
+      <section ref="scrollArea" class="conversation-scroll" @scroll.passive="trackScroll">
       <section v-if="chat.fence.value" class="global-error" role="status"><p>对话删除待核查，新工作已暂停。关闭提示或重新打开页面不会解除禁令。</p><p v-if="deleteError">{{ deleteError }}</p><button class="button" :disabled="deleting" @click="safely(reconcileDelete())">核查对话删除</button></section>
       <section v-if="agent.error.value || (agent.pending.value && !agent.sending.value)" class="global-error" role="status">
         <p>{{ agent.error.value || '有一项提交尚未确认结果。' }}</p>
@@ -109,8 +131,11 @@ function safely(promise: Promise<unknown>) { void promise.catch(() => { agent.er
       <section v-if="timeline.length" class="agent-timeline" aria-label="对话消息">
         <template v-for="item in timeline" :key="item.key">
           <ChatMessage v-if="item.message" :message="item.message" :conversation-id="agent.selectedId.value!" :disabled="agent.busy.value"
+            :process="agent.processes.value[item.message.agent_run_id ?? '']" :show-process="showProcess(item.message)"
             @regenerate="safely(agent.regenerate($event))" @artifact="view($event)" />
           <AgentRunCard v-else-if="item.run" :run="item.run" :disabled="agent.busy.value" :reconciling="reconciling !== null" :receipt="receipts[item.run.agent_run_id]"
+            :process="agent.processes.value[item.run.agent_run_id]" :reconnecting="agent.reconnecting.value[item.run.agent_run_id]"
+            @resume="safely(agent.resume(item.run))" @stop="safely(agent.stop())"
             @confirm="safely(agent.confirm(item.run, $event))" @retry="safely(agent.retry(item.run, $event))"
             @reconcile="safely(reconcileRun(item.run, $event))" />
         </template>
@@ -128,7 +153,7 @@ function safely(promise: Promise<unknown>) { void promise.catch(() => { agent.er
       <p v-if="chat.pending.value" class="muted" role="status">正在处理已提交的数据，完成后会在这里显示结果。</p>
       <section v-if="chat.notice.value" role="status"><p>{{ chat.notice.value }}</p><button class="button" :disabled="!!chat.fence.value" @click="safely(chat.observe(true))">核查结果</button></section>
       </section>
-      <ChatComposer :key="`${agent.selectedId.value}:${agent.resumeTarget.value?.agent_run_id ?? 'new'}`" :disabled="agent.busy.value || awaitingConfirmation" :sending="agent.sending.value" :generating="agent.generating.value" :stopping="agent.stopping.value" :completed="agent.completed.value"
+      <ChatComposer :key="`${agent.selectedId.value}:${agent.resumeTarget.value?.agent_run_id ?? 'new'}`" :disabled="agent.busy.value || awaitingConfirmation || interrupted" :sending="agent.sending.value" :generating="agent.generating.value" :stopping="agent.stopping.value" :completed="agent.completed.value"
         :waiting-question="agent.resumeTarget.value?.waiting ? agent.resumeTarget.value.waiting.question : null"
         :initial-draft="composerText"
         :attachment="composerAttachment" :uploading="agent.uploading.value" :upload-error="agent.uploadError.value" :can-retry-upload="agent.canRetryUpload.value"

@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import ResultPresentation from "./ResultPresentation.vue";
+import ResearchProcess from "./ResearchProcess.vue";
 import { toolLabel } from "../api/agent";
-import type { AgentRun } from "../api/agent";
+import type { AgentRun, ProcessSnapshot } from "../api/agent";
 import type { Attachment } from "../api/artifacts";
-const props = defineProps<{ run: AgentRun; disabled: boolean; reconciling?: boolean; receipt?: string | undefined }>();
-defineEmits<{ confirm: [approved: boolean]; retry: [invocationId: string]; reconcile: [invocationId: string]; artifact: [value: { message: string; attachment: Attachment }] }>();
+const props = defineProps<{ run: AgentRun; disabled: boolean; reconciling?: boolean; receipt?: string | undefined; process?: ProcessSnapshot | undefined; reconnecting?: boolean | undefined }>();
+defineEmits<{ confirm: [approved: boolean]; resume: []; stop: []; retry: [invocationId: string]; reconcile: [invocationId: string]; artifact: [value: { message: string; attachment: Attachment }] }>();
 const terminal = computed(() => ["SUCCEEDED", "TERMINATED"].includes(props.run.status));
 function valueText(value: unknown): string {
   if (Array.isArray(value)) return value.map(valueText).join("、");
@@ -17,6 +18,7 @@ function valueText(value: unknown): string {
 <template>
   <article class="chat-turn">
     <section class="chat-assistant" aria-label="助手回复">
+      <ResearchProcess :run-id="run.agent_run_id" :snapshot="process" :active="['PENDING', 'RUNNING'].includes(run.status)" show-current :reconnecting="reconnecting" />
       <p v-if="run.status === 'RUNNING' || run.status === 'PENDING'" class="muted" role="status">{{ run.pending_execution?.status === "RUNNING" ? `正在执行${toolLabel(run.pending_execution.tool_name)}…` : "正在处理你的请求…" }}</p>
       <section v-if="run.status === 'WAITING_FOR_CONFIRMATION' && run.pending_execution" class="chat-confirmation">
         <p>将执行{{ toolLabel(run.pending_execution.tool_name) }}，请确认以下内容。</p>
@@ -28,6 +30,10 @@ function valueText(value: unknown): string {
       <p v-if="run.stopped" class="muted" role="status">{{ run.pending_execution?.status === "RUNNING" ? "已停止生成，已提交的计算仍在运行，完成后会保留结果。" : "已停止生成，已保存的内容仍保留。" }}</p>
       <p v-if="run.outcome_unknown" class="field-error" role="alert">暂时无法确认结果，请核查原操作。不会重复执行。</p>
       <p v-else-if="run.error_message && !run.stopped" class="field-error" role="alert">{{ run.error_message }}</p>
+      <div v-if="run.status === 'INTERRUPTED'" class="agent-run__actions">
+        <button class="button button--primary" :disabled="disabled" @click="$emit('resume')">继续处理</button>
+        <button class="button" :disabled="disabled" @click="$emit('stop')">结束本次处理</button>
+      </div>
       <p v-if="receipt" role="status">{{ receipt }}</p>
       <div v-if="terminal" class="agent-run__actions">
         <template v-for="execution in run.executions" :key="execution.invocation_run_id">

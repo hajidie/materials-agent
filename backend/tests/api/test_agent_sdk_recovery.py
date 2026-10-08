@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from backend.tests.agent_state import wait_run
 
 from materialsagent.application.agent_runtime import AgentRuntime
 from materialsagent.domain.ports.agent import AgentConflictError
@@ -23,8 +24,7 @@ def test_ask_user_interrupt_survives_process_restart(api_harness):
         submitted = client.post(f"/api/v1/conversations/{conversation_id}/messages",
             json={"content_text": "研究材料"}, headers={"Idempotency-Key": "sdk-question"}).json()["data"]
         run_id = submitted["agent_run"]["agent_run_id"]
-        waiting = client.post(f"/api/v1/agent-runs/{run_id}/advance",
-            json={"submission_id": submitted["submission_id"]}).json()["data"]
+        waiting = wait_run(client, run_id).json()["data"]
         assert waiting["status"] == "WAITING_FOR_USER"
 
     with api_harness.create_client(actor_id, agent_model=model) as client:
@@ -35,8 +35,7 @@ def test_ask_user_interrupt_survives_process_restart(api_harness):
         submitted = client.post(f"/api/v1/conversations/{conversation_id}/messages",
             json={"content_text": "屈服强度", "reply_to": reply},
             headers={"Idempotency-Key": "sdk-answer"}).json()["data"]
-        result = client.post(f"/api/v1/agent-runs/{run_id}/advance",
-            json={"submission_id": submitted["submission_id"]}).json()["data"]
+        result = wait_run(client, run_id).json()["data"]
         assert result["status"] == "SUCCEEDED"
         assert result["agent_run_id"] == run_id
 
@@ -59,8 +58,7 @@ def test_confirmation_interrupt_survives_process_restart(api_harness):
         submitted = client.post(f"/api/v1/conversations/{conversation_id}/messages",
             json={"content_text": "执行测试操作"}, headers={"Idempotency-Key": "sdk-confirm"}).json()["data"]
         run_id = submitted["agent_run"]["agent_run_id"]
-        waiting = client.post(f"/api/v1/agent-runs/{run_id}/advance",
-            json={"submission_id": submitted["submission_id"]}).json()["data"]
+        waiting = wait_run(client, run_id).json()["data"]
         assert waiting["status"] == "WAITING_FOR_CONFIRMATION"
         assert sink.write_count == 0
 
@@ -70,7 +68,7 @@ def test_confirmation_interrupt_survives_process_restart(api_harness):
             json={"waiting_version": waiting["waiting_version"],
                   "confirmation_version": pending["confirmation_version"]})
         assert response.status_code == 200, response.text
-        assert response.json()["data"]["status"] == "SUCCEEDED"
+        assert wait_run(client, run_id).json()["data"]["status"] == "SUCCEEDED"
         assert sink.write_count == 1
 
 
@@ -90,8 +88,7 @@ def test_conversation_delete_drains_failed_checkpoint_cleanup(api_harness, monke
         submitted = client.post(f"/api/v1/conversations/{conversation_id}/messages",
             json={"content_text": "解释材料"}, headers={"Idempotency-Key": "sdk-delete"}).json()["data"]
         run_id = submitted["agent_run"]["agent_run_id"]
-        finished = client.post(f"/api/v1/agent-runs/{run_id}/advance",
-            json={"submission_id": submitted["submission_id"]}).json()["data"]
+        finished = wait_run(client, run_id).json()["data"]
         assert finished["status"] == "SUCCEEDED"
         assert runtime.store.checkpoint_cleanup_ids() == [run_id]
         monkeypatch.setattr(runtime.checkpoint_cleanup, "delete", original_delete)
@@ -160,6 +157,7 @@ def test_final_checkpoint_replays_publication_without_another_model_call(api_har
             checkpointer=saver, checkpoint_cleanup=checkpoints)
         try:
             await runtime.recover()
+            await manually_resume(runtime, run.agent_run_id, actor_id)
         finally:
             await runtime.close()
             await checkpoints.close()
@@ -224,6 +222,7 @@ def test_replied_question_replays_without_asking_again(api_harness):
         runtime = AgentRuntime(store, model, NoTools(), checkpointer=saver, checkpoint_cleanup=checkpoints)
         try:
             await runtime.recover()
+            await manually_resume(runtime, run.agent_run_id, actor_id)
         finally:
             await runtime.close()
             await checkpoints.close()
@@ -280,6 +279,7 @@ def test_reply_claim_crash_resumes_the_existing_question(api_harness):
         runtime = AgentRuntime(store, model, NoTools(), checkpointer=saver, checkpoint_cleanup=checkpoints)
         try:
             await runtime.recover()
+            await manually_resume(runtime, run.agent_run_id, actor_id)
         finally:
             await runtime.close()
             await checkpoints.close()
@@ -344,10 +344,11 @@ def test_confirmation_claim_crash_preserves_approval(api_harness):
             await asyncio.to_thread(store.recover_interrupted, runtime.process_id, repair=runtime.tools.repair)
             current = store.get(run.agent_run_id, actor_id)
             with pytest.raises(AgentConflictError):
-                await runtime.advance(run.agent_run_id, actor_id,
-                    waiting_version=current.waiting_version, confirmation=False)
+                store.accept_confirmation(run.agent_run_id, actor_id, current.waiting_version,
+                    current.pending_execution.confirmation_version, False)
             assert sink.write_count == 0
             await runtime.recover()
+            await manually_resume(runtime, run.agent_run_id, actor_id)
         finally:
             await runtime.close()
             await checkpoints.close()
@@ -374,8 +375,7 @@ def test_new_model_call_cannot_reuse_completed_tool_call_id(api_harness):
             json={"content_text": "把数值从 MPa 换算到 GPa"},
             headers={"Idempotency-Key": "sdk-reused-call"}).json()["data"]
         run_id = submitted["agent_run"]["agent_run_id"]
-        result = client.post(f"/api/v1/agent-runs/{run_id}/advance",
-            json={"submission_id": submitted["submission_id"]}).json()["data"]
+        result = wait_run(client, run_id).json()["data"]
         assert result["status"] == "TERMINATED"
         stored = client.app.state.agent_runtime.store.get(run_id, actor_id)
         assert stored.error_code == "DUPLICATE_TOOL_CALL_ID"
@@ -470,6 +470,7 @@ def test_replay_never_dispatches_a_tool_call_twice(api_harness, crash_window):
         second.checkpoint_cleanup = checkpoints
         try:
             await second.recover()
+            await manually_resume(second, run.agent_run_id, actor_id)
         finally:
             await second.close()
             await checkpoints.close()
@@ -527,6 +528,7 @@ def test_replay_prepares_an_unlinked_tool_call_once(api_harness, crash_window):
         second.checkpointer, second.checkpoint_cleanup = saver, checkpoints
         try:
             await second.recover()
+            await manually_resume(second, run.agent_run_id, actor_id)
         finally:
             await second.close()
             await checkpoints.close()
@@ -597,6 +599,7 @@ def test_replay_after_tool_effect_allows_a_second_tool_call(api_harness, crash_w
         second.checkpointer, second.checkpoint_cleanup = saver, checkpoints
         try:
             await second.recover()
+            await manually_resume(second, run.agent_run_id, actor_id)
         finally:
             await second.close()
             await checkpoints.close()
@@ -648,6 +651,7 @@ def test_model_response_without_sdk_checkpoint_replays(api_harness):
         second.checkpointer, second.checkpoint_cleanup = saver, checkpoints
         try:
             await second.recover()
+            await manually_resume(second, run.agent_run_id, actor_id)
         finally:
             await second.close()
             await checkpoints.close()
@@ -658,3 +662,10 @@ def test_model_response_without_sdk_checkpoint_replays(api_harness):
     assert len(recovered.executions) == len(recovered.observations) == 1
     first_client.close()
     second_client.close()
+
+
+async def manually_resume(runtime, run_id, actor_id):
+    current = runtime.store.get(run_id, actor_id)
+    assert current.status == "INTERRUPTED"
+    await runtime.resume(run_id, actor_id, current.submission_id, current.version)
+    await asyncio.gather(*list(runtime.running_tasks.values()))

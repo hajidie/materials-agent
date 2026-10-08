@@ -234,7 +234,7 @@ class SQLAlchemyUnitOfWork:
                 from materialsagent.domain.ports.agent import AgentConflictError
                 row = session.scalar(select(AgentRunRow).where(AgentRunRow.agent_run_id == owner[0]).with_for_update())
                 active = row is not None and row.version == owner[1] and row.status == "RUNNING" and row.document.get("claim") == owner[2]
-                if not active and not self._stopped_receipt_allowed(session, row, owner):
+                if not active and not self._inactive_receipt_allowed(session, row, owner):
                     session.rollback()
                     raise AgentConflictError("Execution owner is stale.")
             self._validate_routing_states(session)
@@ -264,9 +264,10 @@ class SQLAlchemyUnitOfWork:
             raise PersistenceError("Persistence operation failed.") from None
 
     @staticmethod
-    def _stopped_receipt_allowed(session, row, owner):
-        """A stopped Agent cannot dispatch; its frozen Invocation may finish publication."""
-        if (row is None or row.status != "TERMINATED" or row.document.get("error_code") != "USER_STOPPED"
+    def _inactive_receipt_allowed(session, row, owner):
+        """A stopped/interrupted Agent may only finish its frozen Invocation."""
+        if (row is None or not (row.status == "INTERRUPTED" or
+                (row.status == "TERMINATED" and row.document.get("error_code") == "USER_STOPPED"))
                 or row.document.get("claim") != owner[2] or len(owner) < 4 or not owner[3]):
             return False
         pending = row.document.get("pending_execution") or {}

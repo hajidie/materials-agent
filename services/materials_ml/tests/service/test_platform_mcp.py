@@ -99,7 +99,7 @@ def post_message(http, path, *, json, headers=None):
     accepted=http.post(path,json=json,headers=headers)
     if accepted.status_code != 202:return accepted
     data=accepted.json()["data"]
-    advanced=http.post(f"/api/v1/agent-runs/{data['agent_run']['agent_run_id']}/advance",json={"submission_id":data["submission_id"]})
+    advanced=wait_run(http, data["agent_run"]["agent_run_id"])
     if advanced.status_code != 200:return advanced
     return httpx.Response(200,json={"data":{**data,"agent_run":advanced.json()["data"]}})
 
@@ -142,7 +142,7 @@ def confirm(http, run):
     response = http.post(f"/api/v1/agent-runs/{run['agent_run_id']}/invocations/{pending['invocation_run_id']}/confirm",
         json={"waiting_version": run["waiting_version"], "confirmation_version": pending["confirmation_version"]})
     assert response.status_code == 200, response.text
-    return diagnostic_run(http, response.json()["data"])
+    return diagnostic_run(http, wait_run(http, run["agent_run_id"]).json()["data"])
 
 
 def result(run):
@@ -318,12 +318,17 @@ def test_unknown_training_safe_observation_historical_receipt_and_no_reexecution
                 backend.settings["enable_dev_materials_ml_tools"] = False
             backend.settings["enable_materials_ml_resource_context"] = False
             backend.start()
-            stopped = diagnostic_run(http, http.get(f"/api/v1/agent-runs/{waiting['agent_run_id']}").json()["data"])
+            current = http.get(f"/api/v1/agent-runs/{waiting['agent_run_id']}").json()["data"]
+            assert current["status"] == "INTERRUPTED"
+            resumed = http.post(f"/api/v1/agent-runs/{waiting['agent_run_id']}/resume",
+                json={"submission_id": current["submission_id"], "version": current["version"]})
+            assert resumed.status_code == 202, resumed.text
+            stopped = diagnostic_run(http, wait_run(http, waiting["agent_run_id"]).json()["data"])
         observation = next(o for o in stopped["observations"] if o["kind"] == "TOOL_RESULT")
         invocation = observation["invocation_run_id"]
         prefix = f"/api/v1/agent-runs/{waiting['agent_run_id']}/invocations/{invocation}"
         if stopped["status"] == "SUCCEEDED":
-            # SDK recovery may verify the original receipt and finish the Run.
+            # Explicit resume verifies the original receipt before finishing the Run.
             assert observation["status"] == "SUCCEEDED" and stopped["answer_message"] is not None
             assert len(stopped["executions"]) == 1
             remote = result(stopped)
@@ -417,7 +422,12 @@ def test_platform_prediction_interruption_stops_tree_and_blocks_agent(platform, 
                 except httpx.HTTPError:
                     pass
                 backend.start()
-                stopped = diagnostic_run(http, http.get(f"/api/v1/agent-runs/{waiting['agent_run_id']}").json()["data"])
+                current = http.get(f"/api/v1/agent-runs/{waiting['agent_run_id']}").json()["data"]
+            assert current["status"] == "INTERRUPTED"
+            resumed = http.post(f"/api/v1/agent-runs/{waiting['agent_run_id']}/resume",
+                json={"submission_id": current["submission_id"], "version": current["version"]})
+            assert resumed.status_code == 202, resumed.text
+            stopped = diagnostic_run(http, wait_run(http, waiting["agent_run_id"]).json()["data"])
             else:
                 stopped = pending.result(timeout=15)
             for handle in handles:
@@ -437,3 +447,14 @@ def test_platform_prediction_interruption_stops_tree_and_blocks_agent(platform, 
         assert remote["status"] == "OUTCOME_UNKNOWN"
         assert remote["remote_receipt"]["resource"]["status"] == "CANCELLED"
         assert len(service.list(Prediction, scope)) == 1
+
+
+def wait_run(http, run_id):
+    deadline = time.monotonic() + 75
+    while time.monotonic() < deadline:
+        response = http.get(f"/api/v1/agent-runs/{run_id}")
+        assert response.status_code == 200, response.text
+        if response.json()["data"]["status"] not in {"PENDING", "RUNNING"}:
+            return response
+        time.sleep(.05)
+    raise AssertionError("Run did not settle")

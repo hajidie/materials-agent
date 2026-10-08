@@ -3,6 +3,7 @@ import { createMaterialsAgentApi } from "../api/client";
 import { agentRequest, AgentRequestError, type AgentRun, type ChatMessage, type AcceptedSubmission } from "../api/agent";
 import type { Attachment } from "../api/artifacts";
 import type { ConversationListItem } from "../api/types";
+import { useProcessStreams } from "./useProcessStreams";
 
 interface PendingOperation {
   path: string;
@@ -28,7 +29,6 @@ export function useAgentRuns() {
   const runs = ref<AgentRun[]>([]);
   const messages = ref<ChatMessage[]>([]);
   const stopping = ref(false);
-  let advanceController: AbortController | null = null;
   let stopPromise: Promise<void> | null = null;
   const loading = ref(false);
   const sending = ref(false);
@@ -42,12 +42,20 @@ export function useAgentRuns() {
   let timer: ReturnType<typeof setInterval> | undefined;
   let polling = false;
   let generation = 0;
+  function updateRun(run: AgentRun) {
+    if (run.conversation_id !== selectedId.value) return;
+    const previous = runs.value.find(r => r.agent_run_id === run.agent_run_id);
+    if (previous && previous.version > run.version) return;
+    runs.value = [...runs.value.filter(r => r.agent_run_id !== run.agent_run_id), run];
+    resumeTarget.value = runs.value.find(r => r.status === "WAITING_FOR_USER") ?? null;
+  }
+  const streams = useProcessStreams(updateRun, () => { void refresh().catch(() => undefined); });
   try {
     const raw = sessionStorage.getItem(PENDING_KEY);
     if (raw) {
       const value = JSON.parse(raw);
       if (typeof value.key === "string" && typeof value.path === "string" && value.body &&
-          /^\/(conversations\/[^/]+\/messages|messages\/[^/]+\/regenerate|agent-runs\/[^/]+\/(retry|invocations\/[^/]+\/(confirm|reject)))$/.test(value.path)) {
+          /^\/(conversations\/[^/]+\/messages|messages\/[^/]+\/regenerate|agent-runs\/[^/]+\/(resume|retry|invocations\/[^/]+\/(confirm|reject)))$/.test(value.path)) {
         pending.value = value;
       }
     }
@@ -176,6 +184,7 @@ export function useAgentRuns() {
       }
       runs.value = [...map.values()].sort((a, b) => a.created_at.localeCompare(b.created_at) || a.agent_run_id.localeCompare(b.agent_run_id));
       resumeTarget.value = runs.value.find(run => run.status === "WAITING_FOR_USER") ?? null;
+      for (const run of runs.value) streams.observe(run);
       const messageQuery = messageBefore ? `?before=${encodeURIComponent(messageBefore)}` : "";
       const messagePage = await agentRequest<{ items: ChatMessage[]; next_cursor: number | null }>(`/conversations/${encodeURIComponent(id)}/messages${messageQuery}`);
       if (epoch !== generation || selectedId.value !== id) return;
@@ -189,6 +198,7 @@ export function useAgentRuns() {
   async function select(id: string | null, uploadCreation = false) {
     if (uploading.value && !uploadCreation) return;
     generation++;
+    streams.reset();
     selectedId.value = id;
     runs.value = [];
     messages.value = [];
@@ -205,19 +215,18 @@ export function useAgentRuns() {
   async function stop() {
     if (stopPromise) return stopPromise;
     const operation = pending.value;
-    const run = runs.value.find(r => ["PENDING", "RUNNING"].includes(r.status));
+    const run = runs.value.find(r => ["PENDING", "RUNNING", "INTERRUPTED"].includes(r.status));
     if (!operation && !run) return;
     if (operation) { operation.stopRequested = true; persistPending(); }
     stopping.value = true;
     const target = operation?.accepted ?? (run?.submission_id ? { runId: run.agent_run_id, submissionId: run.submission_id } : null);
-    if (!target) return; // Acceptance is short; sendPending observes the intent before starting advance.
+    if (!target) return; // sendPending sends the stop as soon as acceptance is known.
     stopPromise = (async () => {
       try {
         const stopped = await agentRequest<{ agent_run: AgentRun }>(`/agent-runs/${encodeURIComponent(target.runId)}/stop`, { body: { submission_id: target.submissionId } });
         if (stopped.agent_run.conversation_id === selectedId.value) {
           runs.value = [...runs.value.filter(r => r.agent_run_id !== stopped.agent_run.agent_run_id), stopped.agent_run];
         }
-        advanceController?.abort();
         if (pending.value === operation) { pending.value = null; persistPending(); }
         sending.value = false;
         await refresh();
@@ -232,7 +241,6 @@ export function useAgentRuns() {
   async function sendPending() {
     if (!pending.value || sending.value) return;
     const operation = pending.value;
-    let controller: AbortController | null = null;
     sending.value = true; error.value = null;
     try {
       if (!operation.conversationId) {
@@ -242,21 +250,16 @@ export function useAgentRuns() {
         persistPending(); await select(operation.conversationId);
       }
       if (!operation.accepted) {
-        const result = await agentRequest<AcceptedSubmission>(operation.path, { body: operation.body, key: operation.key });
+        const result = await agentRequest<AcceptedSubmission | AgentRun>(operation.path, { body: operation.body, key: operation.key });
         if (pending.value !== operation) return;
-        if (!("agent_run" in result)) {
-          pending.value = null; persistPending(); await refresh(); return;
-        }
-        operation.accepted = { runId: result.agent_run.agent_run_id, submissionId: result.submission_id };
+        const acceptedRun = "agent_run" in result ? result.agent_run : result;
+        operation.accepted = { runId: acceptedRun.agent_run_id, submissionId: result.submission_id ?? acceptedRun.submission_id! };
+        updateRun(acceptedRun);
+        streams.observe(acceptedRun);
         persistPending();
         if (operation.path.endsWith("/messages")) { saveDraft({ text: "" }); completed.value++; }
       }
       if (operation.stopRequested) { await stop(); return; }
-      await refresh();
-      controller = new AbortController();
-      advanceController = controller;
-      await agentRequest<AgentRun>(`/agent-runs/${encodeURIComponent(operation.accepted.runId)}/advance`,
-        { body: { submission_id: operation.accepted.submissionId }, signal: controller.signal });
       if (pending.value === operation) { pending.value = null; persistPending(); }
       await refresh(); await refreshConversations();
     } catch (cause) {
@@ -266,11 +269,14 @@ export function useAgentRuns() {
       if (!operation.stopRequested) {
         const uncertain = !(cause instanceof AgentRequestError) || cause.uncertain;
         error.value = uncertain ? "请求结果尚未确认，请核查原提交。" : "请求未被接受，请检查当前对话后重试。";
+        if (cause instanceof AgentRequestError && operation.path.endsWith('/resume')) {
+          if (cause.code === 'TOOL_OUTCOME_UNKNOWN') error.value = "原计算的结果尚未确认，请稍后再点继续处理；已提交的计算不会重复执行。";
+          if (cause.code === 'CHECKPOINT_MISSING') error.value = "恢复所需的运行记录缺失。已保存的内容仍可查看，请结束本次处理后重新提交。";
+        }
         if (!uncertain && pending.value === operation) { pending.value = null; persistPending(); }
       }
     } finally {
       if (!pending.value || pending.value === operation) sending.value = false;
-      if (advanceController === controller) advanceController = null;
     }
   }
 
@@ -313,6 +319,13 @@ export function useAgentRuns() {
     persistPending(); await sendPending();
   }
 
+  async function resume(run: AgentRun) {
+    if (busy.value || run.status !== "INTERRUPTED" || !run.submission_id) return;
+    pending.value = { path: `/agent-runs/${encodeURIComponent(run.agent_run_id)}/resume`,
+      body: { submission_id: run.submission_id, version: run.version }, key: crypto.randomUUID(), conversationId: run.conversation_id };
+    persistPending(); await sendPending();
+  }
+
   async function remove(id: string) {
     if (sending.value || pending.value || uploading.value) return;
     await conversationsApi.deleteConversation?.(id);
@@ -349,8 +362,9 @@ export function useAgentRuns() {
     } catch { error.value = "无法连接本地服务，请检查服务状态后刷新。"; }
     timer = setInterval(() => { void refresh().catch(() => undefined); }, 3000);
   }
-  onUnmounted(() => { if (timer) clearInterval(timer); generation++; });
+  onUnmounted(() => { if (timer) clearInterval(timer); generation++; streams.reset(); });
   return { conversations, selectedId, runs, messages, loading, sending, generating, stopping, stop, regenerate, completed, busy, writeBlocked, error, pending, nextCursor, conversationCursor, ensureConversation, deleted,
     uploading, uploadError, canRetryUpload, draft, setDraftText, uploadAttachment, checkUpload, removeAttachment,
+    processes: streams.processes, reconnecting: streams.reconnecting, resume,
     resumeTarget, initialize, select, refresh, refreshConversations, submit, sendPending, confirm, retry, remove };
 }

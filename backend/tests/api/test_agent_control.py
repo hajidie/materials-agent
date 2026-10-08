@@ -1,5 +1,5 @@
 import asyncio
-from backend.tests.agent_state import post_message, post_operation
+from backend.tests.agent_state import post_message, post_operation, wait_run
 from backend.tests.agent_inspection import stored_run
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
@@ -73,7 +73,7 @@ def test_stale_run_owner_cannot_commit_tool_result(api_harness):
         runtime.store.recover_interrupted("replacement")
         one.status="TERMINATED"
         with pytest.raises(AgentConflictError):runtime.store.save(one)
-        assert runtime.store.get(run.agent_run_id,"agent-test").status == "PENDING"
+        assert runtime.store.get(run.agent_run_id,"agent-test").status == "INTERRUPTED"
 
 def test_standard_tool_argument_wait_resumes_in_main_loop_with_full_proposal(api_harness):
     roles=[]
@@ -167,7 +167,8 @@ def test_invocation_confirmation_api_reauthorizes_and_is_idempotent(api_harness,
         url = f"/api/v1/agent-runs/{first['agent_run_id']}/invocations/{pending['invocation_run_id']}/" + ("confirm" if approved else "reject")
         body = {"waiting_version": first["waiting_version"], "confirmation_version":pending["confirmation_version"]}
         assert client.post(url, json={**body, "confirmation_version":"stale"}).status_code == 409
-        result = client.post(url, json=body).json()["data"]
+        assert client.post(url, json=body).status_code == 200
+        result = wait_run(client, first["agent_run_id"]).json()["data"]
         assert result["status"] == ("SUCCEEDED" if approved else "TERMINATED"), result["error_code"]
         assert sink.write_count == int(approved)
         replay = client.post(url, json=body)
@@ -251,10 +252,10 @@ def test_restart_repairs_committed_result_without_redispatch_or_model(api_harnes
         run, _ = runtime.store.submit(conversation, "agent-test", "1000 MPa 转 GPa", "interrupted")
         with pytest.raises(SystemExit):
             asyncio.run(runtime.advance(run.agent_run_id, "agent-test"))
-        assert runtime.store.get(run.agent_run_id, "agent-test").status == "RUNNING"
+        assert runtime.store.get(run.agent_run_id, "agent-test").status == "INTERRUPTED"
         runtime.store.recover_interrupted("replacement", repair=gateway.repair)
         recovered = runtime.store.get(run.agent_run_id, "agent-test")
-        assert recovered.status == "PENDING"
+        assert recovered.status == "INTERRUPTED"
         monkeypatch.setattr(gateway, "execute", lambda *_: pytest.fail("redispatched"))
         async def resume_with_fresh_checkpoint():
             from materialsagent.infrastructure.db.agent_checkpoint import AgentCheckpointStore
@@ -262,7 +263,9 @@ def test_restart_repairs_committed_result_without_redispatch_or_model(api_harnes
             runtime.checkpointer = await checkpoints.open()
             runtime.checkpoint_cleanup = checkpoints
             try:
-                await runtime.advance(run.agent_run_id, "agent-test")
+                current = runtime.store.get(run.agent_run_id, "agent-test")
+                await runtime.resume(run.agent_run_id, "agent-test", current.submission_id, current.version)
+                await asyncio.gather(*list(runtime.running_tasks.values()))
             finally:
                 await checkpoints.close()
         asyncio.run(resume_with_fresh_checkpoint())
@@ -335,7 +338,9 @@ def test_restart_between_managed_result_and_invocation_repairs_both(api_harness,
             runtime.checkpointer = await checkpoints.open()
             runtime.checkpoint_cleanup = checkpoints
             try:
-                await runtime.advance(run.agent_run_id, "managed-gap")
+                current = runtime.store.get(run.agent_run_id, "managed-gap")
+                await runtime.resume(run.agent_run_id, "managed-gap", current.submission_id, current.version)
+                await asyncio.gather(*list(runtime.running_tasks.values()))
             finally:
                 await checkpoints.close()
         asyncio.run(resume_with_fresh_checkpoint())

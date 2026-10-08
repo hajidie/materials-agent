@@ -21,7 +21,7 @@ class AgentRunRow(Base):
     __tablename__ = "agent_run"
     __table_args__ = (
         CheckConstraint("version >= 0", name="ck_agent_run_version"),
-        CheckConstraint("status IN ('PENDING','RUNNING','WAITING_FOR_USER','WAITING_FOR_CONFIRMATION','SUCCEEDED','TERMINATED')", name="ck_agent_run_status"),
+        CheckConstraint("status IN ('PENDING','RUNNING','WAITING_FOR_USER','WAITING_FOR_CONFIRMATION','INTERRUPTED','SUCCEEDED','TERMINATED')", name="ck_agent_run_status"),
         Index("ix_agent_run_conversation_created", "conversation_id", "created_at", "agent_run_id"),
     )
     agent_run_id: Mapped[str] = mapped_column(Text, primary_key=True)
@@ -77,14 +77,87 @@ class AgentCheckpointCleanupRow(Base):
     attempts: Mapped[int] = mapped_column(Integer, default=0)
 
 
+class AgentProcessRow(Base):
+    __tablename__ = "agent_process"
+    agent_run_id: Mapped[str] = mapped_column(ForeignKey("agent_run.agent_run_id", ondelete="CASCADE"), primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer)
+    document: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE)
+
+
 AGENT_TABLES = [AgentRunRow.__table__, AgentSubmissionRow.__table__,
                 AgentObservationRow.__table__, AgentModelCallRow.__table__, AgentExecutionRow.__table__,
-                AgentCheckpointCleanupRow.__table__]
+                AgentCheckpointCleanupRow.__table__, AgentProcessRow.__table__]
 
 
 class SQLAlchemyAgentStore:
     def __init__(self, session_factory):
         self.sessions = session_factory
+
+    def load_process(self, run_id, actor_id):
+        with self.sessions() as session:
+            run = session.get(AgentRunRow, run_id)
+            if run is None or run.actor_id != actor_id:
+                raise AgentFailure("AGENT_RUN_NOT_FOUND")
+            row = session.get(AgentProcessRow, run_id)
+            return row.document if row else {"revision": 0, "segments": []}
+
+    def save_process(self, run_id, actor_id, document):
+        with self.sessions.begin() as session:
+            run = session.scalar(select(AgentRunRow).where(AgentRunRow.agent_run_id == run_id,
+                AgentRunRow.actor_id == actor_id).with_for_update())
+            if run is None:
+                raise AgentFailure("AGENT_RUN_NOT_FOUND")
+            row = session.get(AgentProcessRow, run_id)
+            if row is None:
+                session.add(AgentProcessRow(agent_run_id=run_id, revision=document["revision"], document=document))
+            elif document["revision"] > row.revision:
+                row.revision, row.document = document["revision"], document
+
+    def resume(self, run_id, actor_id, submission_id, version, *, requested_version=None):
+        requested_version = version if requested_version is None else requested_version
+        from .ml_resources import lock_conversation
+        with self.sessions.begin() as session:
+            row = session.get(AgentRunRow, run_id)
+            if row is None or row.actor_id != actor_id:
+                raise AgentFailure("AGENT_RUN_NOT_FOUND")
+            lock_conversation(session, actor_id, row.conversation_id, writable=True)
+            row = session.scalar(select(AgentRunRow).where(AgentRunRow.agent_run_id == run_id)
+                .with_for_update().execution_options(populate_existing=True))
+            run = self._run(row.document)
+            if run.submission_id != submission_id:
+                raise AgentConflictError("Submission is stale.")
+            if run.resumed_version == requested_version:
+                return self._hydrate(session, run)
+            if run.status != "INTERRUPTED" or run.version != version:
+                raise AgentConflictError("Recovery version is stale.")
+            run.status, run.error_code, run.resumed_version = "PENDING", None, requested_version
+            run.recovery_replay = bool(run.calls or run.pending_tool_call_id)
+            run.version += 1
+            row.version, row.status, row.document = run.version, run.status, run.model_dump(mode="json")
+            return self._hydrate(session, run)
+
+    def accept_confirmation(self, run_id, actor_id, waiting_version, confirmation_version, approved):
+        from .ml_resources import lock_conversation
+        with self.sessions.begin() as session:
+            row = session.get(AgentRunRow, run_id)
+            if row is None or row.actor_id != actor_id:
+                raise AgentFailure("AGENT_RUN_NOT_FOUND")
+            lock_conversation(session, actor_id, row.conversation_id, writable=True)
+            row = session.scalar(select(AgentRunRow).where(AgentRunRow.agent_run_id == run_id)
+                .with_for_update().execution_options(populate_existing=True))
+            run = self._run(row.document)
+            record = run.pending_execution
+            decision = {"tool_call_id": record.tool_call_id if record else None,
+                        "waiting_version": waiting_version, "approved": approved}
+            if run.confirmation_response == decision:
+                return self._hydrate(session, run)
+            if (run.status != "WAITING_FOR_CONFIRMATION" or run.waiting_version != waiting_version
+                    or record is None or record.confirmation_version != confirmation_version):
+                raise AgentConflictError("Confirmation target changed.")
+            run.confirmation_response, run.status = decision, "PENDING"
+            run.version += 1
+            row.version, row.status, row.document = run.version, run.status, run.model_dump(mode="json")
+            return self._hydrate(session, run)
 
     def checkpoint_cleanup_ids(self, *, limit: int = 100) -> list[str]:
         with self.sessions() as session:
@@ -175,7 +248,7 @@ class SQLAlchemyAgentStore:
             if any(not value or value.get("contract") != "chat-v2" for value in contracts):
                 raise AgentFailure("CONVERSATION_UPGRADE_REQUIRED")
             active = session.scalar(select(AgentRunRow.agent_run_id).where(AgentRunRow.conversation_id == conversation_id,
-                AgentRunRow.status.in_(["PENDING", "RUNNING", "WAITING_FOR_CONFIRMATION"])))
+                AgentRunRow.status.in_(["PENDING", "RUNNING", "WAITING_FOR_CONFIRMATION", "INTERRUPTED"])))
             if active:
                 raise AgentConflictError("A submission is already active.")
             for attachment in attachments:
@@ -283,7 +356,7 @@ class SQLAlchemyAgentStore:
             if row is None or row.actor_id != run.actor_id or row.version != version:
                 raise AgentConflictError("AgentRun version changed.")
             previous = self._run(row.document)
-            if run.status in ("PENDING", "RUNNING", "WAITING_FOR_CONFIRMATION"):
+            if run.status in ("PENDING", "RUNNING", "WAITING_FOR_CONFIRMATION", "INTERRUPTED"):
                 from .ml_resources import lock_conversation
                 lock_conversation(session, run.actor_id, run.conversation_id, writable=True)
             if previous.status == "RUNNING" and previous.claim != run.claim:
@@ -322,7 +395,7 @@ class SQLAlchemyAgentStore:
         """Release stale claims and meter interrupted model calls before SDK replay."""
         with self.sessions() as session:
             rows = session.scalars(select(AgentRunRow).where(or_(
-                AgentRunRow.status.in_(["PENDING", "RUNNING", "WAITING_FOR_USER", "WAITING_FOR_CONFIRMATION"]),
+                AgentRunRow.status.in_(["PENDING", "RUNNING", "INTERRUPTED", "WAITING_FOR_USER", "WAITING_FOR_CONFIRMATION"]),
                 and_(AgentRunRow.status == "TERMINATED",
                      AgentRunRow.document["error_code"].as_string() == "USER_STOPPED"),
             ))).all()
@@ -339,13 +412,14 @@ class SQLAlchemyAgentStore:
                             self.receipt(run_id, actor_id, record, observation)
                     except (AgentFailure, AgentConflictError):
                         pass
+                result.append((run_id, actor_id, status))
                 continue
-            if status == "RUNNING":
+            if status in {"PENDING", "RUNNING"}:
                 with self.sessions.begin() as session:
                     row = session.scalar(select(AgentRunRow).where(
                         AgentRunRow.agent_run_id == run_id,
                         AgentRunRow.actor_id == actor_id).with_for_update())
-                    if row is None or row.status != "RUNNING":
+                    if row is None or row.status not in {"PENDING", "RUNNING"}:
                         continue
                     run = self._run(row.document)
                     if run.process_id == process_id:
@@ -360,13 +434,14 @@ class SQLAlchemyAgentStore:
                                 total_tokens=call.input_reserved + call.output_limit,
                                 source="estimated", estimator_version="cl100k-x2-or-utf8-framing-v1")
                             run.llm_tokens += call.usage.total_tokens
-                    run.status, run.claim, run.process_id = "PENDING", None, None
+                    run.status, run.claim, run.process_id = "INTERRUPTED", None, None
+                    run.error_code = "PROCESS_INTERRUPTED"
                     run.recovery_replay = True
                     run.version += 1
                     run.updated_at = now()
                     self._audit(session, run)
                     row.version, row.status, row.document = run.version, run.status, run.model_dump(mode="json")
-                result.append((run_id, actor_id, "PENDING"))
+                result.append((run_id, actor_id, "INTERRUPTED"))
             else:
                 result.append((run_id, actor_id, status))
         return result
@@ -432,7 +507,7 @@ class SQLAlchemyAgentStore:
             run = self._run(row.document)
             if run.submission_id != submission_id:
                 raise AgentConflictError("Submission is stale.")
-            if run.status not in ("PENDING", "RUNNING"):
+            if run.status not in ("PENDING", "RUNNING", "INTERRUPTED"):
                 return self._hydrate(session, run), run.error_code == "USER_STOPPED"
             run.status, run.error_code, run.stop_requested_at = "TERMINATED", "USER_STOPPED", now()
             run.updated_at = now()
@@ -465,7 +540,7 @@ class SQLAlchemyAgentStore:
             if (not pending or not pending.dispatched or pending.invocation_run_id != record.invocation_run_id
                     or pending.tool_call_id != record.tool_call_id or pending.execution_fingerprint != record.execution_fingerprint
                     or observation.invocation_run_id != record.invocation_run_id
-                    or run.status not in ("RUNNING", "TERMINATED")):
+                    or run.status not in ("RUNNING", "INTERRUPTED", "TERMINATED")):
                 raise AgentConflictError("Receipt does not own this dispatched execution.")
             if run.status == "TERMINATED" and run.error_code != "USER_STOPPED":
                 raise AgentConflictError("Only a stopped run accepts a late receipt.")

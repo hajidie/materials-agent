@@ -1,4 +1,4 @@
-"""Canonical message fixtures and explicit request-hosted advancement for tests."""
+"""Canonical message fixtures and background run observation for tests."""
 from materialsagent.domain.models.agent import AgentRun as Run, identifier
 
 
@@ -23,7 +23,7 @@ def agent_run(*, goal="test", context=None, user_inputs=None, user_messages=None
 
 
 def post_message(client, path, *, json, headers=None, **options):
-    """Existing scenario fixtures now exercise acceptance followed by advancement."""
+    """Existing scenario fixtures now exercise acceptance followed by background completion."""
     body = dict(json)
     mode = body.pop("mode", None)
     if mode == "RESUME_RUN":
@@ -34,8 +34,10 @@ def post_message(client, path, *, json, headers=None, **options):
     if accepted.status_code != 202:
         return accepted
     data = accepted.json()["data"]
-    advanced = client.post("/api/v1/agent-runs/" + data["agent_run"]["agent_run_id"] + "/advance",
-                           json={"submission_id": data["submission_id"]})
+    if data["idempotency_replayed"]:
+        import httpx
+        return httpx.Response(200, json={"data": data})
+    advanced = wait_run(client, data["agent_run"]["agent_run_id"])
     if advanced.status_code != 200:
         return advanced
     # Preserve the submission envelope; advancement remains separately asserted in new API tests.
@@ -48,9 +50,24 @@ def post_operation(client, path, *, json=None, headers=None):
     if accepted.status_code != 202:
         return accepted
     data = accepted.json()["data"]
-    advanced = client.post(f"/api/v1/agent-runs/{data['agent_run']['agent_run_id']}/advance",
-                          json={"submission_id": data["submission_id"]})
-    if advanced.status_code != 200:
-        return advanced
+    advanced = wait_run(client, data["agent_run"]["agent_run_id"])
     import httpx
     return httpx.Response(200, json={"data": {**data, "agent_run": advanced.json()["data"]}})
+
+
+def wait_run(client, run_id, timeout=20):
+    """Wait for both durable state and background closeout, without triggering work."""
+    import time
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        result = client.get(f"/api/v1/agent-runs/{run_id}")
+        if result.status_code != 200:
+            return result
+        data = result.json()["data"]
+        runtime = client.app.state.agent_runtime
+        if data["status"] not in {"PENDING", "RUNNING"} and not any(
+            key[0] == run_id and not task.done() for key, task in list(runtime.running_tasks.items())
+        ):
+            return result
+        time.sleep(0.02)
+    raise AssertionError(f"Run did not settle: {run_id}")
