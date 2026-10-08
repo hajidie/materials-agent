@@ -274,6 +274,8 @@ export function useAgentRuns() {
         if (cause instanceof AgentRequestError && operation.path.endsWith('/resume')) {
           if (cause.code === 'TOOL_OUTCOME_UNKNOWN') error.value = "原计算的结果尚未确认，请稍后再点继续处理；已提交的计算不会重复执行。";
           if (cause.code === 'CHECKPOINT_MISSING') error.value = "恢复所需的运行记录缺失。已保存的内容仍可查看，请结束本次处理后重新提交。";
+          if (cause.code === 'LLM_RETRY_NOT_READY') error.value = "模型服务要求稍后再试，请等待后继续处理。";
+          if (cause.code === 'AGENT_RECOVERY_BUDGET_EXCEEDED') error.value = "本次处理已达到额度上限，请结束本次处理。";
         }
         if (!uncertain && pending.value === operation) { pending.value = null; persistPending(); }
       }
@@ -323,7 +325,8 @@ export function useAgentRuns() {
   }
 
   async function resume(run: AgentRun) {
-    if (busy.value || run.status !== "INTERRUPTED" || !run.submission_id) return;
+    if (busy.value || run.status !== "INTERRUPTED" || !run.submission_id || (run.can_resume === false &&
+        !(run.resume_after && ['CONTINUE', 'FIX_CONFIGURATION'].includes(run.recovery_action ?? '') && Date.now() >= Date.parse(run.resume_after)))) return;
     pending.value = { path: `/agent-runs/${encodeURIComponent(run.agent_run_id)}/resume`,
       body: { submission_id: run.submission_id, version: run.version }, key: crypto.randomUUID(), conversationId: run.conversation_id };
     persistPending(); await sendPending();

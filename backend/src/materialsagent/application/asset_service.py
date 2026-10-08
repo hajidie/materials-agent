@@ -222,13 +222,39 @@ class AssetService:
                     storage_bucket=self._bucket,
                     storage_namespace=self._storage_namespace,
                 )
-                unit_of_work.assets.add(pending)
-                unit_of_work.commit()
-                return pending, tool_run.tool_version, tool_run.model_bundle_id
+            self._save_pending(pending)
+            return pending, tool_run.tool_version, tool_run.model_bundle_id
         except ApplicationError:
             raise
         except Exception as error:
             raise from_persistence_error(error, task_id=task_id) from None
+
+    def _save_pending(self, pending: Asset) -> None:
+        import time
+        from materialsagent.domain.ports.unit_of_work import PersistenceError
+        for attempt in range(3):
+            # Original asset, operation and object key survive every retry.
+            with self._unit_of_work_factory() as uow:
+                existing = uow.assets.get(pending.asset_id)
+            if existing is not None:
+                if existing != pending:
+                    raise ApplicationConflictError(task_id=pending.task_id)
+                return
+            try:
+                with self._unit_of_work_factory() as uow:
+                    uow.assets.add(pending)
+                    uow.commit()
+                return
+            except PersistenceError:
+                with self._unit_of_work_factory() as uow:
+                    saved = uow.assets.get(pending.asset_id)
+                if saved is not None:
+                    if saved != pending:
+                        raise ApplicationConflictError(task_id=pending.task_id)
+                    return
+                if attempt == 2:
+                    raise
+                time.sleep((0.5, 1)[attempt])
 
     def _finalize(
         self,
@@ -462,6 +488,22 @@ class AssetService:
         )
 
     def _commit_available(self, asset: Asset, encoded: EncodedPng) -> Asset:
+        import time
+        for attempt in range(3):
+            try:
+                return self._commit_available_once(asset, encoded)
+            except DependencyUnavailableError:
+                with self._unit_of_work_factory() as uow:
+                    saved = uow.assets.get(asset.asset_id)
+                if saved is not None and saved.current_status == "AVAILABLE" and _available_matches(saved, encoded):
+                    return saved
+                # The next attempt reads the same asset first and reuses a
+                # committed AVAILABLE identity; it never uploads again.
+                if attempt == 2:
+                    raise
+                time.sleep((0.5, 1)[attempt])
+
+    def _commit_available_once(self, asset: Asset, encoded: EncodedPng) -> Asset:
         try:
             with self._unit_of_work_factory() as unit_of_work:
                 current = unit_of_work.assets.get(asset.asset_id)

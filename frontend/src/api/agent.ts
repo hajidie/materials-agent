@@ -36,6 +36,9 @@ export interface AgentRun {
   observations: Observation[];
   error_message: string | null;
   outcome_unknown: boolean;
+  can_resume?: boolean;
+  resume_after?: string | null;
+  recovery_action?: "CONTINUE" | "RECONCILE" | "FIX_CONFIGURATION" | "NONE";
   attachments: Attachment[];
   result_attachments: Attachment[];
   created_at: string;

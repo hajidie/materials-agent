@@ -192,7 +192,7 @@ def test_uploaded_asset_database_constraints_and_digest_guard(ebsd, api_harness)
 
 
 @pytest.mark.parametrize("connection_refused", [True, False])
-def test_unavailable_ebsd_runtime_requires_explicit_retry(ebsd, connection_refused):
+def test_unavailable_ebsd_runtime_requires_explicit_retry(ebsd, connection_refused, api_harness):
     client, conversation, storage, runtime = ebsd
     asset = upload(client, conversation).json()["data"]["attachment"]["attachment_id"]
     adapter = client.app.state.agent_runtime.tools.registry.resolve("ebsd_yield_strength_predictor").binding.execution_target.client
@@ -207,11 +207,29 @@ def test_unavailable_ebsd_runtime_requires_explicit_retry(ebsd, connection_refus
         run = stored_run(client, submit(client, conversation, asset).json()["data"]["agent_run"])
     finally:
         adapter._pool = pool
-    failed = next(e for e in run["executions"] if e["status"] == "FAILED")
-    assert failed["retryable"] is connection_refused and runtime.execution_count == 0
     assert not any((o.get("result_summary") or {}).get("data") for o in run["observations"])
     if not connection_refused:
+        assert run["status"] == "INTERRUPTED" and run["pending_execution"]["status"] == "OUTCOME_UNKNOWN"
+        assert not run["observations"] and runtime.execution_count == 0
+        from materialsagent.application.context import ActorContext
+        from materialsagent.domain.models.tool_invocation import InvocationStatus
+        invocation_id = run["pending_execution"]["invocation_run_id"]
+        invocation = client.app.state.invocation_service.get(ActorContext(actor_id="ebsd-test", user_id=None), invocation_id)
+        assert invocation.run.status is InvocationStatus.OUTCOME_UNKNOWN
+        checked = client.post(f"/api/v1/agent-runs/{run['agent_run_id']}/invocations/{invocation_id}/reconcile")
+        assert checked.status_code == 200, checked.text
+        assert checked.json()["data"]["status"] == "OUTCOME_UNKNOWN"
+        from alembic import command
+        from alembic.config import Config
+        config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
+        config.attributes["settings"] = api_harness.settings
+        with pytest.raises(RuntimeError, match="Resolve unknown Managed outcomes"):
+            command.downgrade(config, "0025_agent_process_stream")
+        assert client.app.state.invocation_service.get(
+            ActorContext(actor_id="ebsd-test", user_id=None), invocation_id).run.status is InvocationStatus.OUTCOME_UNKNOWN
         return
+    failed = next(e for e in run["executions"] if e["status"] == "FAILED")
+    assert failed["retryable"] is True and runtime.execution_count == 0
     response = post_operation(client, f"/api/v1/agent-runs/{run['agent_run_id']}/retry",
         json={"retry_type": "TOOL_RETRY", "invocation_run_id": failed["invocation_run_id"]},
         headers={"Idempotency-Key": "runtime-reconnected"})

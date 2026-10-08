@@ -93,12 +93,12 @@ class LocalZTA35GToolClientAdapter:
             **validated_input.to_json(),
         }
         payload = self._request_json("POST", "/internal/v1/execute", body)
-        return _parse_output(
-            payload,
-            metadata=metadata,
-            validated_input=validated_input,
-            request_context=request_context,
-        )
+        try:
+            return _parse_output(payload, metadata=metadata, validated_input=validated_input,
+                                 request_context=request_context)
+        except ToolClientProtocolError as error:
+            error.outcome_unknown = True
+            raise
 
     def readiness(self, metadata: ToolMetadata) -> str:
         try:
@@ -158,9 +158,9 @@ class LocalZTA35GToolClientAdapter:
         except urllib3.exceptions.NewConnectionError:
             raise ToolClientUnavailableError() from None
         except (TimeoutError, urllib3.exceptions.TimeoutError):
-            raise ToolClientTimeoutError() from None
+            raise ToolClientTimeoutError(outcome_unknown=method == "POST") from None
         except (OSError, urllib3.exceptions.HTTPError):
-            raise ToolClientUnavailableError() from None
+            raise ToolClientUnavailableError(outcome_unknown=method == "POST") from None
         try:
             response_bytes = response.data
             if not isinstance(response_bytes, bytes) or len(response_bytes) > MAX_RESPONSE_BYTES:
@@ -174,6 +174,9 @@ class LocalZTA35GToolClientAdapter:
             if response.status != 200:
                 raise _runtime_error(decoded)
             return decoded
+        except ToolClientProtocolError as error:
+            error.outcome_unknown = method == "POST"
+            raise
         finally:
             response.release_conn()
 

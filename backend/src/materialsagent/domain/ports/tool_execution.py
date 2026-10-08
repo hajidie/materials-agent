@@ -7,21 +7,25 @@ from typing import Protocol
 
 class ToolClientError(RuntimeError):
     """Sanitized Tool Client failure."""
+    outcome_unknown = False
 
 
 class ToolClientTimeoutError(ToolClientError):
-    def __init__(self) -> None:
+    def __init__(self, *, outcome_unknown: bool = False) -> None:
         super().__init__("Tool Runtime timed out.")
+        self.outcome_unknown = outcome_unknown
 
 
 class ToolClientUnavailableError(ToolClientError):
-    def __init__(self) -> None:
+    def __init__(self, *, outcome_unknown: bool = False) -> None:
         super().__init__("Tool Runtime is unavailable.")
+        self.outcome_unknown = outcome_unknown
 
 
 class ToolClientProtocolError(ToolClientError):
-    def __init__(self) -> None:
+    def __init__(self, *, outcome_unknown: bool = False) -> None:
         super().__init__("Tool Runtime returned an invalid response.")
+        self.outcome_unknown = outcome_unknown
 
 
 class ToolClientRuntimeError(ToolClientError):

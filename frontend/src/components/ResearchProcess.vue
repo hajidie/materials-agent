@@ -45,7 +45,7 @@ function statusLabel(value?: string) {
         <p v-if="loading && !data" class="muted">正在加载过程…</p>
         <p v-if="error && !data" class="field-error">过程暂时无法加载。<button class="button" @click="load">重试加载</button></p>
         <section v-for="segment in history" :key="segment.segment_id" class="research-process__step">
-          <p class="research-process__label">{{ segment.kind === 'reasoning' ? '模型思考' : segment.kind === 'text' ? '行动说明' : `${statusLabel(segment.tool_status)} · ${toolLabel(segment.tool_name ?? '')}` }}<span v-if="segment.status === 'interrupted'"> · 未完成</span></p>
+          <p class="research-process__label">{{ segment.kind === 'reasoning' ? '模型思考' : segment.kind === 'text' ? '行动说明' : segment.kind === 'activity' && !segment.tool_name ? '处理状态' : `${statusLabel(segment.tool_status)} · ${toolLabel(segment.tool_name ?? '')}` }}<span v-if="segment.status === 'interrupted'"> · 未完成</span></p>
           <AssistantMarkdown v-if="segment.text" :text="segment.text" :complete="segment.status === 'complete'" compact />
           <ResultPresentation v-if="segment.presentation" :value="segment.presentation" />
         </section>

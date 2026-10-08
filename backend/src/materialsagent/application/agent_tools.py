@@ -48,8 +48,9 @@ class ManagedToolWorkflow:
             receipt = self.execution.execute_revision_with_output(actor, task_id=task_id,
                 task_input_revision_id=task_input_revision_id, request_id=request_id)
         except ToolExecutionOutcomeError as error:
-            self._select_failed_execution(actor, task_id=task_id, tool_run_id=error.tool_run_id,
-                code=error.code, safe_message=str(error))
+            if error.code != "RUNTIME_OUTCOME_UNKNOWN":
+                self._select_failed_execution(actor, task_id=task_id, tool_run_id=error.tool_run_id,
+                    code=error.code, safe_message=str(error))
             raise
         return self._commit(actor, receipt, retry=False)
 
@@ -57,8 +58,9 @@ class ManagedToolWorkflow:
         try:
             receipt = self.execution.execute_reserved_retry(actor, tool_run_id=tool_run_id)
         except ToolExecutionOutcomeError as error:
-            self._select_failed_execution(actor, task_id=error.task_id, tool_run_id=error.tool_run_id,
-                code=error.code, safe_message=str(error))
+            if error.code != "RUNTIME_OUTCOME_UNKNOWN":
+                self._select_failed_execution(actor, task_id=error.task_id, tool_run_id=error.tool_run_id,
+                    code=error.code, safe_message=str(error))
             raise
         if receipt is None:
             return None
@@ -70,6 +72,9 @@ class ManagedToolWorkflow:
             assets = self.assets.create_from_output(actor, task_id=task_id, tool_run_id=tool_run_id,
                 output=receipt.output) if receipt.output.images else []
         except ApplicationError as error:
+            if error.code in {"DEPENDENCY_UNAVAILABLE", "ASSET_ORPHANED", "DATABASE_UNAVAILABLE"}:
+                raise ToolExecutionOutcomeError("原计算已返回，产物保存状态需要核查。", code="RUNTIME_OUTCOME_UNKNOWN",
+                    status_code=503, task_id=task_id, tool_run_id=tool_run_id) from None
             self._terminalize_asset_failure(actor, task_id=task_id, tool_run_id=tool_run_id,
                 code=error.code, safe_message=str(error))
             raise
@@ -77,9 +82,8 @@ class ManagedToolWorkflow:
             commit = self.results.commit_retry_result if retry else self.results.commit_initial_result
             commit(actor, receipt=receipt, assets=assets)
         except ResultPersistenceError as error:
-            self._terminalize_result_failure(actor, task_id=task_id, tool_run_id=tool_run_id,
-                code=error.code, safe_message=str(error))
-            raise
+            raise ToolExecutionOutcomeError("原计算已返回，结果保存状态需要核查。", code="RUNTIME_OUTCOME_UNKNOWN",
+                status_code=503, task_id=task_id, tool_run_id=tool_run_id) from None
         return self.load_current_for_task(actor, task_id=task_id)
 
     def load_current_for_task(self, actor, *, task_id):
@@ -674,21 +678,31 @@ class RegistryAgentGateway:
             invocation = uow.invocation_runs.get_owned(record.invocation_run_id, run.actor_id)
             if not invocation or invocation.conversation_id != run.conversation_id:
                 return None
+            def unknown():
+                return tool_observation(tool_call_id=record.tool_call_id, kind="TOOL_RESULT", status="OUTCOME_UNKNOWN",
+                    tool_name=record.tool_name, invocation_run_id=invocation.invocation_run_id,
+                    error={"code": "TOOL_OUTCOME_UNKNOWN", "outcome": "UNKNOWN", "retryable": False,
+                        "message": "不能判断资源已创建或未创建，需要核查原操作回执。"})
             if invocation.execution_profile is not ToolExecutionProfile.MANAGED:
                 result = uow.invocation_results.get(invocation.invocation_result_id) if invocation.invocation_result_id else None
                 if result:
                     return tool_observation(tool_call_id=record.tool_call_id, kind="TOOL_RESULT", status="SUCCEEDED", tool_name=record.tool_name,
                         invocation_run_id=invocation.invocation_run_id, data=plain(result.data), presentation=plain(result.presentation))
+                if invocation.status is InvocationStatus.OUTCOME_UNKNOWN:
+                    return unknown()
                 if invocation.status in {InvocationStatus.FAILED, InvocationStatus.OUTCOME_UNKNOWN}:
                     return tool_observation(tool_call_id=record.tool_call_id, kind="TOOL_RESULT", status="FAILED", tool_name=record.tool_name,
                         invocation_run_id=invocation.invocation_run_id, error={"code": invocation.error_code,
-                        "retryable": invocation.status is InvocationStatus.FAILED and invocation.executor_id != "mcp",
+                        "retryable": invocation.status is InvocationStatus.FAILED and (invocation.executor_id != "mcp" or
+                            invocation.policy_snapshot.get("auto_retry_safe", False) and invocation.error_code == "MCP_READ_TRANSIENT_FAILED"),
                         **({"outcome": "UNKNOWN", "message": invocation.safe_error_message}
                            if invocation.status is InvocationStatus.OUTCOME_UNKNOWN and invocation.executor_id == "mcp" else {})})
                 return None
             task = uow.tasks.get_owned(invocation.task_id, run.actor_id)
             result = uow.tool_results.get_owned(task.selected_result_id, run.actor_id) if task and task.selected_result_id else None
             if not result:
+                if invocation.status is InvocationStatus.OUTCOME_UNKNOWN:
+                    return unknown()
                 if invocation.status is InvocationStatus.FAILED:
                     return tool_observation(tool_call_id=record.tool_call_id, kind="TOOL_RESULT", status="FAILED", tool_name=record.tool_name,
                         invocation_run_id=invocation.invocation_run_id, task_id=invocation.task_id,
@@ -700,7 +714,7 @@ class RegistryAgentGateway:
             if result.task_id != invocation.task_id or (invocation.managed_tool_run_id and result.tool_run_id != invocation.managed_tool_run_id):
                 raise AgentFailure("OBSERVATION_SOURCE_MISMATCH")
             result_id = result.result_id
-            if invocation.status is InvocationStatus.RUNNING:
+            if invocation.status in {InvocationStatus.RUNNING, InvocationStatus.OUTCOME_UNKNOWN}:
                 repaired = invocation.transition(
                     InvocationStatus.FAILED if result.status == "FAILED" else InvocationStatus.SUCCEEDED,
                     now=self.invocations._clock(), completed_at=self.invocations._clock(),

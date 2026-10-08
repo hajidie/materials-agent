@@ -503,8 +503,11 @@ class ToolDefinition:
     context_projection_version: str = "metadata-only-v1"
     confirmation_prompt: str | None = None
     resource_parameters: tuple[ResourceParameterSpec, ...] = ()
+    auto_retry_safe: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.auto_retry_safe) is not bool or (self.auto_retry_safe and self.execution_profile is not ToolExecutionProfile.STANDARD):
+            raise ValueError("Automatic retry requires an explicitly safe standard tool.")
         input_schema = _controlled_json_object(
             self.input_schema,
             "input_schema",

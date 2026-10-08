@@ -1,6 +1,6 @@
 # 研究过程流式展示验收
 
-日期：2026-10-08。流式实现已提交于 `74cedf4`，审查修复已提交于 `0bf0db5`。下文保留实施与修复时的验收证据；当时只读核查用户业务数据库处于 `0025_agent_process_stream`，验收写入使用独立测试数据库。本机当前运行态见末尾核查，不能由历史通过结果推导。
+日期：2026-10-08。流式实现已提交于 `74cedf4`，审查修复已提交于 `0bf0db5`。下文保留实施与修复时的验收证据；当时只读核查用户业务数据库处于 `0025_agent_process_stream`，验收写入使用独立测试数据库。本页运行态核查属于该阶段的历史快照；后续容错改动、`0026_managed_outcome_unknown` 迁移及最近现场核查见 [容错验收](reliability.md)，不能由历史通过结果推导当前状态。
 
 ## 已实现
 
@@ -39,7 +39,7 @@ PostgreSQL 恢复可用后，在确认重放、回复草稿和 ML 验收脚本�
 
 ## 部署与限制
 
-- Backend 迁移 head 为 `0025_agent_process_stream`。上述复验只迁移临时测试数据库，不清理用户历史；用户业务库的版本是复验当时的只读核查结果。`scripts/dev/local-dev.ps1 -Action Start` 会升级所配置的 Backend 数据库、初始化 SDK checkpoint 表并启动服务；已有服务需重启才能加载新代码。
+- 流式复验当时 Backend 迁移 head 为 `0025_agent_process_stream`，后续迁移见 [容错验收](reliability.md)。上述复验只迁移临时测试数据库，不清理用户历史；用户业务库的版本是复验当时的只读核查结果。`scripts/dev/local-dev.ps1 -Action Start` 会升级所配置的 Backend 数据库、初始化 SDK checkpoint 表并启动服务；已有服务需重启才能加载新代码。
 - 第一版依赖单个 Backend 进程的任务托管和订阅广播；多 worker/分布式执行不在本次范围。
 - 历史保存累计内容，不保存逐 token 的播放轨迹。保存由内容更新和收口触发，不是固定定时器；硬断电可能丢失自上次保存以来的片段，约 1 秒的保存节流不构成丢失上界。
 - 后端重启、晚到回执和不重复工具派发由数据库/SDK 回归覆盖；未在浏览器中强杀后台进程。真实 EBSD GPU 与独立 ML 浏览器链路的补跑结果见上表，未覆盖真实 Provider 驱动的完整 ML 流程和长时 SEM 生成。
@@ -47,7 +47,7 @@ PostgreSQL 恢复可用后，在确认重放、回复草稿和 ML 验收脚本�
 
 测试过程的日志、浏览器截图和辅助脚本保存在忽略目录 `tmp/`，不属于生产代码或提交内容。架构与协议见 [流式展示设计](../design/streaming-research-process.md)。
 
-## 代码与运行态核查（2026-10-08）
+## 流式阶段代码与运行态核查（2026-10-08 历史快照）
 
 - 核查基线为 `main` 的 `0bf0db5`；收尾开始时工作树干净。Backend Python 3.11.15 下只读运行 `alembic -c backend/alembic.ini heads`，返回 `0025_agent_process_stream (head)`；这只证明代码迁移链，不证明业务库版本。
 - 本次运行 `test_agent_process.py`、`test_sdk_agent_loop.py`、`test_agent_store_confirmation.py`：12 passed。前端 `assistant-markdown.test.ts`、`process-streams.test.ts`、`app-flow.test.ts`：21 passed。这些是离线合同与 jsdom 回归。
@@ -55,7 +55,7 @@ PostgreSQL 恢复可用后，在确认重放、回复草稿和 ML 验收脚本�
 - `/api/v1/tools` 的 7 个启用工具全部为 `AVAILABLE`：单位换算、ZTA35G、EBSD，以及 ML 分析、训练提交、训练查询和预测。此项证明就绪探针通过，实际执行范围见下一项。
 - 浏览器提交独立验证消息，将 25 °C 换算为 K：Run 为 `SUCCEEDED`，2 次模型调用、1 次单位换算执行，结果 298.15 K。页面经历进行中与完成态，公式正确排版；刷新后回答和研究过程恢复，保存 60 字符模型思考，未出现重复工具执行。完成态 SSE 重连返回 `snapshot`、`settled`，浏览器控制台未捕获 warn/error。
 - 只读查询业务库 `alembic_version` 为 `0025_agent_process_stream`。本次未执行迁移、停服或删除验证对话；验证对话保留供复核。
-- 当前基础链路为 `verified-current`。未重跑 GPU 推理、SEM 生成、ML 训练/预测完整链路、后台强杀恢复或全量验收；未测量完成前首段内容到达时间。上述场景继续使用历史证据，不由本次就绪和单位换算验证推导通过。
+- 该次核查的基础链路为 `verified-current`。未重跑 GPU 推理、SEM 生成、ML 训练/预测完整链路、后台强杀恢复或全量验收；未测量完成前首段内容到达时间。上述场景继续使用历史证据，不由该次就绪和单位换算验证推导通过。
 
 ## 依赖与构建告警复核（2026-10-08）
 

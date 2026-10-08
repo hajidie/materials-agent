@@ -66,6 +66,9 @@ class TokenUsage(Contract):
 
 class ModelCall(Contract):
     call_id: str = Field(default_factory=identifier)
+    logical_call_id: str | None = None
+    attempt_no: int = Field(default=1, ge=1)
+    failure_category: str | None = None
     role: Literal["agent_decision"]
     status: Literal["RUNNING", "SUCCEEDED", "FAILED"] = "RUNNING"
     prompt_digest: str
@@ -204,6 +207,9 @@ class AgentRun(Contract):
     confirmation_response: dict[str, Any] | None = None
     recovery_replay: bool = False
     resumed_version: int | None = None
+    retry_not_before: datetime | None = None
+    pending_model_retry: dict[str, Any] | None = None
+    persistence_operation_id: str | None = None
     duplicate_of_invocation_run_id: str | None = None
     source_agent_run_id: str | None = None
     retry_type: Literal["TOOL_RETRY", "ANSWER_REGENERATION"] | None = None

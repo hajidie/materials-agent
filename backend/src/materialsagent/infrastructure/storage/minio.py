@@ -3,6 +3,7 @@ from __future__ import annotations
 from hashlib import sha256
 from io import BytesIO
 import re
+import time
 from typing import Any, Mapping
 import unicodedata
 
@@ -83,30 +84,30 @@ class MinioStorageService:
                 return existing
             raise StorageConflictError("Object storage conflict.")
 
-        try:
-            self._client.put_object(
-                self._bucket,
-                object_key,
-                BytesIO(payload),
-                len(payload),
-                content_type=content_type,
-                metadata={
-                    **normalized_metadata,
-                    "sha256": digest,
-                    "size-bytes": str(len(payload)),
-                },
-            )
-        except StorageUnavailableError:
-            raise StorageWriteOutcomeUnknownError(
-                "Object storage unavailable."
-            ) from None
-        except StorageError:
-            raise
-        except Exception:
-            raise StorageWriteOutcomeUnknownError(
-                "Object storage unavailable."
-            ) from None
-        return expected
+        for attempt in range(3):
+            try:
+                self._client.put_object(self._bucket, object_key, BytesIO(payload), len(payload),
+                    content_type=content_type, metadata={**normalized_metadata,
+                        "sha256": digest, "size-bytes": str(len(payload))})
+                return expected
+            except StorageError as error:
+                if not isinstance(error, StorageUnavailableError):
+                    raise
+            except Exception:
+                pass
+            # A lost acknowledgement does not authorize a second object or a
+            # delete. Verify the same key and full content identity first.
+            try:
+                committed = self.head(object_key)
+            except StorageError:
+                raise StorageWriteOutcomeUnknownError("Object storage unavailable.") from None
+            if committed is not None:
+                if committed == expected:
+                    return committed
+                raise StorageConflictError("Object storage conflict.")
+            if attempt == 2:
+                raise StorageWriteOutcomeUnknownError("Object storage unavailable.") from None
+            time.sleep((0.5, 1)[attempt])
 
     def head(self, object_key: str) -> StoredObjectMetadata | None:
         validate_object_key(object_key)

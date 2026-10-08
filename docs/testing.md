@@ -51,6 +51,14 @@ ML 自动验收需与浏览器 ML 验收、常驻 Worker 串行运行；单实�
 
 测试命名沿用现有约定：Python 为 `test_*.py`，前端为 `*.test.ts`。
 
+## 最小完整容错
+
+`backend/tests/unit/test_agent_reliability.py` 注入临时错误、鉴权/额度错误、Retry-After、预算耗尽、流式半途断连、迟到分片、整段模型超时和退避停止，验证恢复原 Run 后不重复已成功工具。`test_mcp_executor.py` 验证安全只读查询最多三次且仍为一个 Invocation，写操作未知不重新派发，完整回执与身份回执有不同恢复资格。
+
+`backend/tests/api/test_agent_recovery_api.py` 使用真实 PostgreSQL，注入提交前失败和提交回包丢失，检查答案原子性、原操作身份、恢复版本及同进程遗留运行修复；并发回归覆盖扫描期间的新提交与人工恢复，确认正常答案仍能提交。`backend/tests/api/test_ebsd.py` 检查传输结果未知时 Invocation 确实持久化为 `OUTCOME_UNKNOWN`、核查不重新执行，以及存在未决 Managed 记录时拒绝降级数据库。`backend/tests/integration/db/test_migrations.py` 覆盖迁移 head 与空历史的升降级往返。`backend/tests/integration/storage/test_minio_storage.py` 包含真实上传回包丢失后核查同一对象，以及核查不可用时禁止重传/删除。前端 `agent-recovery.test.ts` 验证恢复动作、待核查按钮、Retry-After 倒计时与预算耗尽禁用。
+
+运行这些测试后，再执行完整 Backend 回归和单独的 Mock Runtime 回归；涉及 MCP 时，用独立 ML 环境开启 `ML_INTEGRATION=1` 执行 `test_platform_mcp.py`、`test_mcp.py`。这些故障由替身或受控边界注入，不会关闭共享 PostgreSQL/MinIO 服务。真实 Provider/GPU、浏览器断网与真实进程崩溃的覆盖情况分别记录在 [容错验收](acceptance/reliability.md)。
+
 ## 研究过程流式展示
 
 相关测试：`backend/tests/unit/test_agent_process.py` 验证分片、脱敏、晚到消息归并与调度交接；`backend/tests/api/test_agent_process_stream.py` 验证 SSE、所有权、历史、显式恢复、回执与删除；`test_agent_sdk_recovery.py` 保留 SDK 崩溃窗口重放验证。

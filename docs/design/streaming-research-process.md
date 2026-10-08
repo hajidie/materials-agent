@@ -1,6 +1,6 @@
 # 科研过程流式展示设计
 
-状态：已实现并提交。实现提交为 `74cedf4`，后续审查修复为 `0bf0db5`；运行态与验收范围见 [验收记录](../acceptance/streaming-research-process.md)。
+状态：流式功能已实现并提交，实现提交为 `74cedf4`，后续审查修复为 `0bf0db5`。后续容错扩展的失败与恢复规则以 [架构说明](../architecture.md#失败与恢复边界) 为准；运行态与验收范围分别见 [流式验收](../acceptance/streaming-research-process.md) 和 [容错验收](../acceptance/reliability.md)。
 
 更新：2026-10-08。
 
@@ -88,6 +88,8 @@ Provider 模型适配层显式开启 Agent 调用的 `streaming=True` 与 `strea
 Backend 启动时把旧活动 Run 收敛为中断并保存过程和预算；等待补充或确认的 Run 保留等待语义。checkpoint 缺失且已有模型调用或待执行操作时终止为 `CHECKPOINT_MISSING`，不能伪装成可恢复。
 
 用户继续时校验 submission 身份与 Run 版本，先核查原工具回执。已完成结果可复用；没有可验证回执则保留中断并等待，禁止自动重派。新模型调用保留旧片段的未完成标记。
+
+后续容错扩展还会在可恢复模型故障、配置待修正和依赖故障时暂停。前端依据公开的恢复动作与最早恢复时间展示继续、核查或修正后继续；人工继续仍受原任务累计预算约束。重试、流关闭和恢复资格的完整规则见 [架构说明](../architecture.md#失败与恢复边界)。
 
 停止取消后续模型决策，已派发 GPU/ML 工作可能继续，迟到结果仍按原回执保存。存在 `INTERRUPTED` Run 时，迁移拒绝降级；先解决中断状态才能降级。
 

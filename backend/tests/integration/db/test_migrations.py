@@ -31,7 +31,7 @@ IMMEDIATE_PREVIOUS_REVISION = "0006_asset"
 M8_REVISION = "0008_idempotency_record"
 M9_REVISION = "0009_timeline_query_indexes"
 M10_REVISION = "0010_registry_routing_state"
-EXPECTED_REVISION = "0025_agent_process_stream"
+EXPECTED_REVISION = "0026_managed_outcome_unknown"
 
 
 def test_process_migration_preserves_existing_runs_and_guards_downgrade(temporary_database):

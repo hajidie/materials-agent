@@ -381,7 +381,10 @@ def create_app(
     if resolved_agent_runtime is None and resolved_agent_store and resolved_invocation_service:
         gateway = RegistryAgentGateway(resolved_tool_registry, resolved_unit_of_work_factory,
             resolved_invocation_service, resolved_tool_workflow_service, resolved_tool_result_query_service)
-        resolved_agent_runtime = AgentRuntime(resolved_agent_store, resolved_agent_model, gateway, **({"clock": clock} if clock else {}))
+        resolved_agent_runtime = AgentRuntime(resolved_agent_store, resolved_agent_model, gateway,
+            model_retry_max_retries=resolved_settings.agent_model_retry_max_retries,
+            model_retry_window_seconds=resolved_settings.agent_model_retry_window_seconds,
+            **({"clock": clock} if clock else {}))
     from materialsagent.infrastructure.db.agent_checkpoint import AgentCheckpointStore
     agent_checkpoints = (AgentCheckpointStore(resolved_settings)
         if isinstance(resolved_agent_runtime, AgentRuntime)
@@ -438,6 +441,7 @@ def create_app(
                 await run_in_threadpool(resolved_invocation_service.recover_mcp, resolved_actor_context, cutoff=process_cutoff)
             if agent_checkpoints is not None:
                 await resolved_agent_runtime.recover()
+                resolved_agent_runtime.start_recovery_scan()
             if (
                 resolved_conversation_cleanup_service is not None
                 and resolved_actor_context is not None

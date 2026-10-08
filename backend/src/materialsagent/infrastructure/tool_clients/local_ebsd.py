@@ -51,9 +51,9 @@ class LocalEBSDToolClientAdapter(LocalZTA35GToolClientAdapter):
             # Connection creation failed before an HTTP request could be sent.
             raise ToolClientRuntimeError(code="RUNTIME_NOT_READY", safe_message="EBSD Runtime is unavailable.", retryable=True) from None
         except (TimeoutError, urllib3.exceptions.TimeoutError):
-            raise ToolClientTimeoutError() from None
+            raise ToolClientTimeoutError(outcome_unknown=True) from None
         except (OSError, urllib3.exceptions.HTTPError):
-            raise ToolClientUnavailableError() from None
+            raise ToolClientUnavailableError(outcome_unknown=True) from None
         try:
             body = response.read(65537)
             if len(body) > 65536:
@@ -63,7 +63,12 @@ class LocalEBSDToolClientAdapter(LocalZTA35GToolClientAdapter):
                 raise _runtime_error(result)
             return parse_result(result, request)
         except (ValueError, TypeError, KeyError):
-            raise ToolClientProtocolError() from None
+            raise ToolClientProtocolError(outcome_unknown=True) from None
+        except ToolClientProtocolError as error:
+            error.outcome_unknown = True
+            raise
+        except (OSError, urllib3.exceptions.HTTPError):
+            raise ToolClientUnavailableError(outcome_unknown=True) from None
         finally:
             response.close()
             response.release_conn()

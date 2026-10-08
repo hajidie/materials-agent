@@ -47,7 +47,7 @@ class Client:
         return {"lookup_status": "FOUND", "resource": {"id": "run-1", "status": "PENDING", "scope_id": scope}}
 
 
-def setup(name="train_tabular_regression", *, authorized=True):
+def setup(name="train_tabular_regression", *, authorized=True, defer_execution=False):
     store = _store()
     registry = ToolRegistry(build_ml_tools(binding_version="1", endpoint_digest="b" * 64))
     client = Client(store)
@@ -57,7 +57,7 @@ def setup(name="train_tabular_regression", *, authorized=True):
     registration = registry.resolve("materials_ml_" + name)
     args = {"dataset_id": "dataset"} if name == "analyze_tabular_dataset" else {
         "dataset_id": "dataset", "features": ["x"], "target": "y"}
-    public = service.create_from_proposal(ACTOR, _resolved(registration, args), request_id="req", idempotency_key="key")
+    public = service.create_from_proposal(ACTOR, _resolved(registration, args), request_id="req", idempotency_key="key", defer_execution=defer_execution)
     return store, registry, client, service, public.run
 
 
@@ -176,7 +176,7 @@ def test_unknown_has_safe_observation_and_reconcile_does_not_change_history():
     gateway = RegistryAgentGateway(registry, lambda: _Uow(store), service, None, None)
     observation = gateway.repair(SimpleNamespace(actor_id=ACTOR.actor_id, conversation_id="conversation_1", agent_run_id="agent"),
         SimpleNamespace(invocation_run_id=run.invocation_run_id, tool_call_id="step", tool_name=run.tool_id, unit_annotations=[]))
-    assert observation.status == "FAILED"
+    assert observation.status == "OUTCOME_UNKNOWN"
     assert observation.error["retryable"] is False and observation.error["outcome"] == "UNKNOWN"
     assert "不能判断资源已创建或未创建" in observation.error["message"]
     resolved = service.reconcile_mcp(ACTOR, run.invocation_run_id).run
@@ -184,6 +184,59 @@ def test_unknown_has_safe_observation_and_reconcile_does_not_change_history():
     assert client.lookup_calls == [dict(unknown.remote_operation)]
     assert resolved.remote_receipt["lookup_status"] == "FOUND"
     assert client.calls == 1 and client.preparations == 1 and store.results == {}
+
+
+def test_safe_read_retries_only_remote_read_and_freezes_one_invocation(monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda _: None)
+    store, registry, client, service, run = setup("analyze_tabular_dataset", defer_execution=True)
+    assert run.policy_snapshot["auto_retry_safe"] is True
+    original = client.call
+    attempts = []
+    def read(binding, arguments, context):
+        attempts.append((context.invocation_run_id, dict(arguments)))
+        if len(attempts) < 3:
+            raise MCPFailure("MCP_OUTCOME_UNKNOWN", unknown=True, transient=True)
+        return original(binding, arguments, context)
+    client.call = read
+    result = service._drive_pending(ACTOR, run.invocation_run_id)
+    assert result.status is InvocationStatus.SUCCEEDED
+    assert len(attempts) == 3 and len(set(identity for identity, _ in attempts)) == 1
+    assert all(args == {"dataset_id": "dataset"} for _, args in attempts)
+    assert client.preparations == 1 and len(store.runs) == 1
+
+
+def test_safe_read_exhaustion_is_confirmed_retryable_failure(monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda _: None)
+    store, registry, client, service, run = setup("analyze_tabular_dataset", defer_execution=True)
+    client.fail = MCPFailure("MCP_UNAVAILABLE", transient=True)
+    failed = service._drive_pending(ACTOR, run.invocation_run_id)
+    assert failed.status is InvocationStatus.FAILED and client.calls == 3
+    gateway = RegistryAgentGateway(registry, lambda: _Uow(store), service, None, None)
+    observation = gateway.repair(SimpleNamespace(actor_id=ACTOR.actor_id, conversation_id="conversation_1", agent_run_id="agent"),
+        SimpleNamespace(invocation_run_id=run.invocation_run_id, tool_call_id="read", tool_name=run.tool_id, unit_annotations=[]))
+    assert observation.error["retryable"] is True
+
+
+def test_protocol_error_is_never_retried_even_for_safe_read():
+    store, registry, client, service, run = setup("analyze_tabular_dataset", defer_execution=True)
+    client.fail = MCPFailure("MCP_BINDING_MISMATCH")
+    failed = service._drive_pending(ACTOR, run.invocation_run_id)
+    assert failed.status is InvocationStatus.FAILED and client.calls == 1
+
+
+def test_full_receipt_recovers_result_without_resubmission():
+    store, registry, client, service, run = setup()
+    client.fail = MCPFailure("MCP_OUTCOME_UNKNOWN", unknown=True, transient=True)
+    service.confirm(ACTOR, run.invocation_run_id)
+    resource = {"id": "run-1", "scope_id": "conversation_1", "status": "PENDING", "version": 1,
+        "created_at": "2026-10-08T00:00:00Z", "updated_at": "2026-10-08T00:00:00Z",
+        "dataset_id": "dataset", "spec": {"features": ["x"], "target": "y"}, "model_id": None,
+        "units": {}, "warnings": [], "cancel_requested": False, "recovery_required": False, "error_code": None}
+    client.lookup = lambda *_: {"lookup_status": "FOUND", "resource": resource}
+    recovered = service.reconcile_mcp(ACTOR, run.invocation_run_id)
+    assert recovered.run.status is InvocationStatus.SUCCEEDED
+    assert recovered.result.data["resource"]["id"] == "run-1"
+    assert client.calls == 1 and client.preparations == 1
 
 
 def test_exact_permission_and_binding_drift_fail_closed():

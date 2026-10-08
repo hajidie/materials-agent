@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 from datetime import datetime
+import time
 from typing import Any
 
 from sqlalchemy import or_, and_, CheckConstraint, DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, delete, select, update
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError, InterfaceError, DisconnectionError, TimeoutError as PoolTimeoutError
 from sqlalchemy.orm import Mapped, mapped_column
 
 from materialsagent.domain.models.agent import AgentRun, RunBudget, TokenUsage, Observation, fingerprint, identifier, now, tool_call_key
@@ -15,6 +16,7 @@ from materialsagent.infrastructure.db.base import Base
 from materialsagent.infrastructure.db.conversation_task import ConversationRow, MessageRow
 
 JSON_TYPE = JSON().with_variant(JSONB(), "postgresql")
+TRANSIENT_DATABASE_ERRORS = (OperationalError, InterfaceError, DisconnectionError, PoolTimeoutError)
 
 
 class AgentRunRow(Base):
@@ -130,6 +132,10 @@ class SQLAlchemyAgentStore:
                 return self._hydrate(session, run)
             if run.status != "INTERRUPTED" or run.version != version:
                 raise AgentConflictError("Recovery version is stale.")
+            from materialsagent.application.reliability import validate_resume
+            validate_resume(run, now())
+            if run.pending_execution and run.pending_execution.dispatched:
+                raise AgentFailure("TOOL_OUTCOME_UNKNOWN")
             run.status, run.error_code, run.resumed_version = "PENDING", None, requested_version
             run.recovery_replay = bool(run.calls or run.pending_tool_call_id)
             run.version += 1
@@ -348,6 +354,38 @@ class SQLAlchemyAgentStore:
             return self._hydrate(session, run), False
 
     def save(self, run: AgentRun) -> None:
+        # Retry this short transaction only after reading its original version and
+        # operation identity. The model/tool invocation is outside this boundary.
+        run.persistence_operation_id = identifier()
+        original_version = run.version
+        pending_message = run.pending_message
+        for attempt in range(3):
+            try:
+                self._save_once(run)
+                return
+            except TRANSIENT_DATABASE_ERRORS:
+                try:
+                    with self.sessions() as session:
+                        row = session.get(AgentRunRow, run.agent_run_id)
+                        if row is None or row.actor_id != run.actor_id:
+                            raise AgentConflictError("Persistence owner changed.")
+                        if row.document.get("persistence_operation_id") == run.persistence_operation_id:
+                            if row.version != original_version + 1:
+                                raise AgentConflictError("Persistence version changed.")
+                            if pending_message and session.get(MessageRow, pending_message["message_id"]) is None:
+                                raise AgentConflictError("Persistence receipt is inconsistent.")
+                            run.version, run.pending_message = row.version, None
+                            return
+                        if row.version != original_version:
+                            raise AgentConflictError("Persistence claim changed.")
+                except TRANSIENT_DATABASE_ERRORS:
+                    # No authoritative read means no repeat write.
+                    raise
+                if attempt == 2:
+                    raise
+                time.sleep((0.5, 1)[attempt])
+
+    def _save_once(self, run: AgentRun) -> None:
         version = run.version
         with self.sessions.begin() as session:
             # Serialize deletion versus acquisition, only for this short commit.
@@ -394,7 +432,8 @@ class SQLAlchemyAgentStore:
         run.version = version + 1
         run.pending_message = None
 
-    def recover_interrupted(self, process_id: str, *, repair=None) -> list[tuple[str, str, str]]:
+    def recover_interrupted(self, process_id: str, *, repair=None, protected_run_ids=(),
+                            include_current_orphans=False) -> list[tuple[str, str, str]]:
         """Release stale claims and meter interrupted model calls before SDK replay."""
         with self.sessions() as session:
             rows = session.scalars(select(AgentRunRow).where(or_(
@@ -405,13 +444,16 @@ class SQLAlchemyAgentStore:
             candidates = [(row.agent_run_id, row.actor_id, row.status) for row in rows]
         result = []
         for run_id, actor_id, status in candidates:
+            if run_id in protected_run_ids:
+                continue
             if status == "TERMINATED":
                 run = self.get(run_id, actor_id)
                 record = run.pending_execution
                 if repair is not None and record and record.dispatched:
                     try:
                         observation = repair(run, record)
-                        if observation is not None:
+                        from materialsagent.application.reliability import unknown_observation
+                        if not unknown_observation(observation):
                             self.receipt(run_id, actor_id, record, observation)
                     except (AgentFailure, AgentConflictError):
                         pass
@@ -425,7 +467,7 @@ class SQLAlchemyAgentStore:
                     if row is None or row.status not in {"PENDING", "RUNNING"}:
                         continue
                     run = self._run(row.document)
-                    if run.process_id == process_id:
+                    if run.process_id == process_id and not include_current_orphans:
                         continue
                     # Downtime is not active execution time. The previous
                     # process persisted its metered active time at each fence.
@@ -439,6 +481,9 @@ class SQLAlchemyAgentStore:
                             run.llm_tokens += call.usage.total_tokens
                     run.status, run.claim, run.process_id = "INTERRUPTED", None, None
                     run.error_code = "PROCESS_INTERRUPTED"
+                    if run.pending_execution and run.pending_execution.dispatched:
+                        run.pending_execution.status = "OUTCOME_UNKNOWN"
+                        run.error_code = "TOOL_OUTCOME_UNKNOWN"
                     run.recovery_replay = True
                     run.version += 1
                     run.updated_at = now()
@@ -529,6 +574,49 @@ class SQLAlchemyAgentStore:
             return self._hydrate(session, run), True
 
     def receipt(self, run_id, actor_id, record, observation):
+        from materialsagent.application.reliability import unknown_observation
+        if unknown_observation(observation):
+            raise AgentFailure("TOOL_OUTCOME_UNKNOWN")
+        for attempt in range(3):
+            try:
+                return self._receipt_once(run_id, actor_id, record, observation)
+            except TRANSIENT_DATABASE_ERRORS:
+                current = self.get(run_id, actor_id)
+                found = next((o for o in current.observations if o.invocation_run_id == record.invocation_run_id), None)
+                if found is not None:
+                    if found.observation_id != observation.observation_id:
+                        raise AgentConflictError("Receipt identity changed.")
+                    return current
+                if (current.pending_execution is None or
+                        current.pending_execution.invocation_run_id != record.invocation_run_id):
+                    raise AgentConflictError("Receipt owner changed.")
+                if attempt == 2:
+                    raise
+                time.sleep((0.5, 1)[attempt])
+
+    def mark_outcome_unknown(self, run_id, actor_id, record):
+        with self.sessions.begin() as session:
+            row = session.scalar(select(AgentRunRow).where(AgentRunRow.agent_run_id == run_id,
+                AgentRunRow.actor_id == actor_id).with_for_update())
+            if row is None:
+                raise AgentFailure("AGENT_RUN_NOT_FOUND")
+            run = self._run(row.document)
+            pending = run.pending_execution
+            if (pending is None or not pending.dispatched or pending.invocation_run_id != record.invocation_run_id
+                    or pending.execution_fingerprint != record.execution_fingerprint):
+                return self._hydrate(session, run)  # A committed receipt owns newer facts.
+            if run.terminal and run.error_code != "USER_STOPPED":
+                raise AgentConflictError("Execution owner is terminal.")
+            pending.status = "OUTCOME_UNKNOWN"
+            if not run.terminal:
+                run.status, run.error_code = "INTERRUPTED", "TOOL_OUTCOME_UNKNOWN"
+            run.version += 1
+            run.updated_at = now()
+            self._audit(session, run)
+            row.version, row.status, row.document = run.version, run.status, run.model_dump(mode="json")
+            return self._hydrate(session, run)
+
+    def _receipt_once(self, run_id, actor_id, record, observation):
         with self.sessions.begin() as session:
             from .ml_resources import lock_conversation
             owner = session.get(AgentRunRow, run_id)
@@ -555,6 +643,8 @@ class SQLAlchemyAgentStore:
             run.observations.append(observation)
             run.executions.append(record.model_copy(deep=True))
             run.pending_execution, run.draft, run.retry_execution = None, None, None
+            if run.status == "INTERRUPTED" and run.error_code in {"TOOL_OUTCOME_UNKNOWN", "MCP_OUTCOME_UNKNOWN"}:
+                run.error_code = "PROCESS_INTERRUPTED"
             self._audit(session, run)
             run.version += 1
             run.updated_at = now()

@@ -14,6 +14,8 @@ from materialsagent.application.idempotency import validate_idempotency_key
 from materialsagent.domain.models.agent import AgentRun
 from materialsagent.domain.models.attachment import Attachment
 from materialsagent.domain.ports.agent import AgentConflictError, AgentFailure
+from materialsagent.application.reliability import recovery_action
+from materialsagent.domain.models.agent import now
 
 router = APIRouter(tags=["agent-runs"])
 
@@ -40,6 +42,9 @@ class AgentRunView(BaseModel):
     observations: list[dict]
     error_message: str | None
     outcome_unknown: bool
+    can_resume: bool = False
+    resume_after: str | None = None
+    recovery_action: Literal["CONTINUE", "RECONCILE", "FIX_CONFIGURATION", "NONE"] = "NONE"
     attachments: list[dict]
     result_attachments: list[dict]
     created_at: str
@@ -140,10 +145,20 @@ def public(run: AgentRun):
             "status": o.status, "presentation": protect_text(project_result(o), private),
             "artifacts": [{"attachment_id": a["asset_id"], "kind": "image", "name": "结果图片"} for a in o.artifacts if a.get("asset_id")]
             } for o in run.observations if o.kind == "TOOL_RESULT"],
-        outcome_unknown=run.error_code == "MCP_OUTCOME_UNKNOWN" or any(e.status == "OUTCOME_UNKNOWN" for e in run.executions),
+        outcome_unknown=run.error_code in {"MCP_OUTCOME_UNKNOWN", "TOOL_OUTCOME_UNKNOWN"} or any(
+            e.status == "OUTCOME_UNKNOWN" for e in [*run.executions, *([run.pending_execution] if run.pending_execution else [])]),
+        recovery_action=recovery_action(run),
+        resume_after=run.retry_not_before.isoformat() if run.retry_not_before else None,
+        can_resume=recovery_action(run) in {"CONTINUE", "FIX_CONFIGURATION"} and (
+            run.retry_not_before is None or now() >= run.retry_not_before),
         error_message={
             "PROCESS_INTERRUPTED": "服务重启后任务已暂停。可恢复处理，已保存的过程仍保留。",
             "USER_STOPPED": "已停止生成，已保存的内容仍保留。",
+            "LLM_TEMPORARILY_UNAVAILABLE": "模型服务暂时不可用，自动重试已结束。可继续处理，已完成的结果会复用。",
+            "LLM_RECOVERY_WINDOW_EXCEEDED": "模型请求等待超时，任务已暂停。可继续处理，累计额度不会重置。",
+            "LLM_CONFIGURATION_REQUIRED": "模型鉴权、额度或配置需要修正。修正后可继续处理。",
+            "LLM_RETRY_AFTER": "模型服务要求稍后再试，任务已暂停。等待结束后可继续处理。",
+            "DEPENDENCY_UNAVAILABLE": "保存服务暂时不可用，任务已暂停。服务恢复后可继续处理。",
             "CONTEXT_BUDGET_EXCEEDED": "本次请求所需的上下文超出处理上限，未能继续。已上传的附件和已保存的结果仍保留。",
             "LLM_TOKEN_BUDGET_EXCEEDED": "本次处理已达到推理额度上限，未能继续。已上传的附件和已保存的结果仍保留。",
         }.get(run.error_code, "本次处理未完成，已保存的结果仍可查看。") if run.error_code else None)
@@ -178,12 +193,11 @@ async def submit(conversation_id: str, body: Submission, request: Request,
             if not message or message.actor_id != actor.actor_id or message.conversation_id != conversation_id or message.phase != "question":
                 raise AgentFailure("MESSAGE_NOT_FOUND")
             target = message.agent_run_id
-    run, replayed = await asyncio.to_thread(runtime.store.submit, conversation_id, actor.actor_id, body.content_text, key_value(idempotency_key),
+    run, replayed = await runtime.submit(conversation_id, actor.actor_id, body.content_text, key_value(idempotency_key),
         run_id=target, waiting_version=body.reply_to.waiting_version if body.reply_to else None,
         question_message_id=body.reply_to.question_message_id if body.reply_to else None,
         budget=request.app.state.agent_budget, attachments=[a.model_dump() for a in body.attachments])
     response = accepted(run, replayed, request)
-    runtime.schedule(run)
     return response
 
 
@@ -270,11 +284,10 @@ async def regenerate(message_id: str, request: Request, actor: Annotated[ActorCo
                idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None):
     runtime = runtime_for(request)
     source = runtime.store.answer_run(message_id, actor.actor_id)
-    run, replayed = await asyncio.to_thread(runtime.store.submit, source.conversation_id, actor.actor_id, source.goal, key_value(idempotency_key),
+    run, replayed = await runtime.submit(source.conversation_id, actor.actor_id, source.goal, key_value(idempotency_key),
         budget=request.app.state.agent_budget, retry_source=source, retry_type="ANSWER_REGENERATION",
         source_answer_message_id=message_id)
     response = accepted(run, replayed, request)
-    runtime.schedule(run)
     return response
 
 
@@ -333,9 +346,8 @@ async def _confirmation(run_id, invocation_id, body, request, actor, approved):
         if recorded and approved:
             return {"request_id": request.state.request_id, "data": public(run)}
         raise AgentConflictError("Confirmation target changed.")
-    run = await asyncio.to_thread(runtime.store.accept_confirmation, run_id, actor.actor_id,
+    run = await runtime.accept_confirmation(run_id, actor.actor_id,
         body.waiting_version, body.confirmation_version, approved)
-    runtime.schedule(run)
     return {"request_id": request.state.request_id, "data": public(run)}
 
 
@@ -358,7 +370,7 @@ def receipt_target(run_id, invocation_id, request, actor):
         raise HTTPException(404, detail="INVOCATION_NOT_FOUND")
     service = request.app.state.invocation_service
     value = service.get(actor, invocation_id)
-    if value.run.conversation_id != run.conversation_id or value.run.executor_id != "mcp":
+    if value.run.conversation_id != run.conversation_id:
         raise HTTPException(404, detail="INVOCATION_NOT_FOUND")
     return service, value
 
@@ -377,17 +389,30 @@ def _receipt_json(value):
 
 
 @router.post("/api/v1/agent-runs/{run_id}/invocations/{invocation_id}/reconcile")
-def reconcile_receipt(run_id: str, invocation_id: str, request: Request,
+async def reconcile_receipt(run_id: str, invocation_id: str, request: Request,
                       actor: Annotated[ActorContext, Depends(get_actor_context)]):
-    service, _ = receipt_target(run_id, invocation_id, request, actor)
-    value = service.reconcile_mcp(actor, invocation_id)
+    service, value = await asyncio.to_thread(receipt_target, run_id, invocation_id, request, actor)
+    if value.run.executor_id == "mcp" and value.run.remote_operation and value.run.status.value == "OUTCOME_UNKNOWN":
+        value = await asyncio.to_thread(service.reconcile_mcp, actor, invocation_id)
+    runtime = runtime_for(request)
+    run = await asyncio.to_thread(runtime.store.get, run_id, actor.actor_id)
+    record = next(r for r in [*run.executions, *([run.pending_execution] if run.pending_execution else [])]
+                  if r.invocation_run_id == invocation_id)
+    if run.pending_execution and run.pending_execution.invocation_run_id == invocation_id:
+        from materialsagent.application.reliability import unknown_observation
+        observation = await asyncio.to_thread(runtime.tools.repair, run, record)
+        if not unknown_observation(observation):
+            run = await asyncio.to_thread(runtime.store.receipt, run_id, actor.actor_id, record, observation)
+            await runtime.process.tools(run)
+            runtime.process.changed(run_id)
+            value = await asyncio.to_thread(service.get, actor, invocation_id)
     registration = None
     registrar = getattr(runtime_for(request).tools, "resource_registrar", None)
     if registrar:
-        run = runtime_for(request).store.get(run_id, actor.actor_id)
+        run = await asyncio.to_thread(runtime.store.get, run_id, actor.actor_id)
         record = next(r for r in [*run.executions, *([run.pending_execution] if run.pending_execution else [])]
                       if r.invocation_run_id == invocation_id)
-        registration = registrar.explicit_reconcile(run, record)
+        registration = await asyncio.to_thread(registrar.explicit_reconcile, run, record)
     return {"request_id": request.state.request_id, "data": {"invocation_run_id": invocation_id,
         "status": value.run.status.value, "remote_receipt": _receipt_json(value.run.remote_receipt),
         **({"registration": registration} if registrar else {})}}
@@ -416,9 +441,8 @@ async def retry(run_id: str, body: RetryRequest, request: Request,
     execution = next((e for e in source.executions if e.invocation_run_id == body.invocation_run_id), None)
     if execution is None or execution.status != "FAILED" or not execution.retryable:
         raise AgentFailure("TOOL_RETRY_NOT_ALLOWED")
-    run, replayed = await asyncio.to_thread(runtime.store.submit, source.conversation_id, actor.actor_id, source.goal, key_value(idempotency_key),
+    run, replayed = await runtime.submit(source.conversation_id, actor.actor_id, source.goal, key_value(idempotency_key),
         budget=request.app.state.agent_budget, retry_source=source, retry_type=body.retry_type,
         retry_invocation_id=body.invocation_run_id)
     response = accepted(run, replayed, request)
-    runtime.schedule(run)
     return response

@@ -261,12 +261,24 @@ def test_real_local_commit_uncertainty_never_overwrites_success_or_resubmits(pla
             assert result(completed)["id"] == runs[0]["id"]
             assert result(confirm(http, waiting))["id"] == runs[0]["id"]
         else:
-            assert completed["status"] == "TERMINATED" and completed["answer_message"] is None
-            observation = next(o for o in completed["observations"] if o["kind"] == "TOOL_RESULT")
-            assert observation["error"]["code"] == "MCP_OUTCOME_UNKNOWN"
-            prefix = f"/api/v1/agent-runs/{waiting['agent_run_id']}/invocations/{observation['invocation_run_id']}"
-            reconciled = http.post(prefix + "/reconcile").json()["data"]
-            assert reconciled["status"] == "OUTCOME_UNKNOWN" and reconciled["remote_receipt"]["resource"]["id"] == runs[0]["id"]
+            assert completed["status"] == "INTERRUPTED" and completed["answer_message"] is None
+            assert not completed["observations"]
+            pending = completed["pending_execution"]
+            assert pending["status"] == "OUTCOME_UNKNOWN"
+            prefix = f"/api/v1/agent-runs/{waiting['agent_run_id']}/invocations/{pending['invocation_run_id']}"
+            # Repair the dependency, then commit the original full receipt.
+            backend.stop(); backend.fault = None; backend.start()
+            reconciliation = http.post(prefix + "/reconcile")
+            assert reconciliation.status_code == 200, reconciliation.text
+            reconciled = reconciliation.json()["data"]
+            assert reconciled["status"] == "SUCCEEDED" and reconciled["remote_receipt"]["resource"]["id"] == runs[0]["id"]
+            current = http.get(f"/api/v1/agent-runs/{waiting['agent_run_id']}").json()["data"]
+            resumed = http.post(f"/api/v1/agent-runs/{waiting['agent_run_id']}/resume",
+                json={"submission_id": current["submission_id"], "version": current["version"]})
+            assert resumed.status_code == 202, resumed.text
+            finished = diagnostic_run(http, wait_run(http, waiting["agent_run_id"]).json()["data"])
+            assert result(finished)["id"] == runs[0]["id"]
+            assert len(resource.get(root + "/training-runs").json()["items"]) == 1
 
 
 DELAY_TRAIN = '''
@@ -284,7 +296,7 @@ uvicorn.run(app, host="127.0.0.1", port=int(sys.argv[1]), access_log=False, log_
 
 
 @pytest.mark.parametrize("fault", ["timeout", "backend-death", "backend-disabled"])
-def test_unknown_training_safe_observation_historical_receipt_and_no_reexecution(platform, csv_payload, fault):
+def test_unknown_training_reconciles_original_receipt_and_resumes_without_resubmission(platform, csv_payload, fault):
     backend, ml = platform
     ml.stop(); ml.program = DELAY_TRAIN; ml.start()
     backend.stop()
@@ -320,49 +332,39 @@ def test_unknown_training_safe_observation_historical_receipt_and_no_reexecution
             backend.start()
             current = http.get(f"/api/v1/agent-runs/{waiting['agent_run_id']}").json()["data"]
             assert current["status"] == "INTERRUPTED"
-            resumed = http.post(f"/api/v1/agent-runs/{waiting['agent_run_id']}/resume",
-                json={"submission_id": current["submission_id"], "version": current["version"]})
-            assert resumed.status_code == 202, resumed.text
-            stopped = diagnostic_run(http, wait_run(http, waiting["agent_run_id"]).json()["data"])
-        observation = next(o for o in stopped["observations"] if o["kind"] == "TOOL_RESULT")
-        invocation = observation["invocation_run_id"]
+            stopped = diagnostic_run(http, current)
+        assert stopped["status"] == "INTERRUPTED" and stopped["answer_message"] is None
+        assert not stopped["observations"], "An unknown result is not a failed observation"
+        assert len(stopped["calls"]) == len(waiting["calls"]), "Model continued after unknown"
+        invocation = stopped["pending_execution"]["invocation_run_id"]
         prefix = f"/api/v1/agent-runs/{waiting['agent_run_id']}/invocations/{invocation}"
-        if stopped["status"] == "SUCCEEDED":
-            # Explicit resume verifies the original receipt before finishing the Run.
-            assert observation["status"] == "SUCCEEDED" and stopped["answer_message"] is not None
-            assert len(stopped["executions"]) == 1
-            remote = result(stopped)
-            assert http.get(prefix + "/receipt").json()["data"]["status"] == "SUCCEEDED"
-        else:
-            assert stopped["status"] == "TERMINATED" and stopped["answer_message"] is None
-            assert len(stopped["calls"]) == len(waiting["calls"]), "Model continued after unknown"
-            assert observation["error"]["code"] == "MCP_OUTCOME_UNKNOWN"
-            assert observation["error"]["outcome"] == "UNKNOWN" and observation["error"]["retryable"] is False
-            if fault == "backend-disabled":
-                assert http.get(prefix + "/receipt").json()["data"]["status"] == "OUTCOME_UNKNOWN"
-                backend.stop(); backend.settings["enable_dev_materials_ml_tools"] = True; backend.start()
-            reconciled = http.post(prefix + "/reconcile").json()["data"]
-            assert reconciled["status"] == "OUTCOME_UNKNOWN"
-            assert reconciled["remote_receipt"]["lookup_status"] == "FOUND"
-            remote = reconciled["remote_receipt"]["resource"]
-            with ThreadPoolExecutor(4) as pool:
-                checks = list(pool.map(lambda _: http.post(prefix + "/reconcile"), range(4)))
-            assert all(r.status_code == 200 and r.json()["data"]["status"] == "OUTCOME_UNKNOWN"
-                       and r.json()["data"]["remote_receipt"]["resource"]["id"] == remote["id"] for r in checks)
-        assert remote["status"] == "PENDING"
-        if fault == "backend-disabled" and stopped["status"] == "SUCCEEDED":
+        if fault == "backend-disabled":
+            assert http.get(prefix + "/receipt").json()["data"]["status"] == "OUTCOME_UNKNOWN"
             backend.stop(); backend.settings["enable_dev_materials_ml_tools"] = True; backend.start()
+        # Lookup waits for the original service operation, never submits again.
+        reconciled = http.post(prefix + "/reconcile")
+        assert reconciled.status_code == 200, reconciled.text
+        reconciled = reconciled.json()["data"]
+        assert reconciled["status"] == "SUCCEEDED"
+        assert reconciled["remote_receipt"]["lookup_status"] == "FOUND"
+        remote = reconciled["remote_receipt"]["resource"]
+        with ThreadPoolExecutor(4) as pool:
+            checks = list(pool.map(lambda _: http.post(prefix + "/reconcile"), range(4)))
+        assert all(r.status_code == 200 and r.json()["data"]["status"] == "SUCCEEDED"
+                   and r.json()["data"]["remote_receipt"]["resource"]["id"] == remote["id"] for r in checks)
+        assert remote["status"] == "PENDING"
+        current = http.get(f"/api/v1/agent-runs/{waiting['agent_run_id']}").json()["data"]
+        resumed = http.post(f"/api/v1/agent-runs/{waiting['agent_run_id']}/resume",
+            json={"submission_id": current["submission_id"], "version": current["version"]})
+        assert resumed.status_code == 202, resumed.text
+        finished = diagnostic_run(http, wait_run(http, waiting["agent_run_id"]).json()["data"])
+        assert result(finished)["id"] == remote["id"] and len(finished["executions"]) == 1
         retry = http.post(f"/api/v1/agent-runs/{waiting['agent_run_id']}/retry", headers={"Idempotency-Key": "forbidden-retry"},
             json={"retry_type": "TOOL_RETRY", "invocation_run_id": invocation})
         assert retry.status_code >= 400
         assert len(resource.get(root + "/training-runs").json()["items"]) == 1
-        worker = worker_process(ml)
-        try:
-            assert worker.wait(timeout=45) == 0, worker.stderr.read().decode(errors="replace")
-        finally:
-            if worker.poll() is None:
-                worker.kill(); worker.wait(timeout=5)
-        assert resource.get(root + "/training-runs/" + remote["id"]).json()["status"] == "SUCCEEDED"
+        # This contract acknowledges submission. Actual Worker completion is
+        # covered separately by the LR/RF full prediction acceptance above.
 
 
 GATED_PREDICTION = '''
@@ -424,20 +426,16 @@ def test_platform_prediction_interruption_stops_tree_and_blocks_agent(platform, 
                 backend.start()
                 current = http.get(f"/api/v1/agent-runs/{waiting['agent_run_id']}").json()["data"]
                 assert current["status"] == "INTERRUPTED"
-                resumed = http.post(f"/api/v1/agent-runs/{waiting['agent_run_id']}/resume",
-                    json={"submission_id": current["submission_id"], "version": current["version"]})
-                assert resumed.status_code == 202, resumed.text
-                stopped = diagnostic_run(http, wait_run(http, waiting["agent_run_id"]).json()["data"])
+                stopped = diagnostic_run(http, current)
             else:
                 stopped = pending.result(timeout=15)
             for handle in handles:
                 assert_exited(handle)
-        assert stopped["status"] == "TERMINATED" and stopped["answer_message"] is None
+        assert stopped["status"] == "INTERRUPTED" and stopped["answer_message"] is None
         assert len(stopped["calls"]) == len(waiting["calls"])
-        observation = next(o for o in stopped["observations"] if o["kind"] == "TOOL_RESULT")
-        assert observation["error"]["code"] == "MCP_OUTCOME_UNKNOWN"
-        assert observation["error"]["retryable"] is False and observation["error"]["outcome"] == "UNKNOWN"
-        prefix = f"/api/v1/agent-runs/{waiting['agent_run_id']}/invocations/{observation['invocation_run_id']}"
+        assert not stopped["observations"]
+        invocation = stopped["pending_execution"]["invocation_run_id"]
+        prefix = f"/api/v1/agent-runs/{waiting['agent_run_id']}/invocations/{invocation}"
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             remote = http.post(prefix + "/reconcile").json()["data"]

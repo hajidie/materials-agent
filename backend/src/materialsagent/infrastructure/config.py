@@ -64,6 +64,8 @@ class AppSettings(BaseSettings):
     zta35g_runtime_token: SecretStr | None = None
     zta35g_runtime_timeout_seconds: float = Field(default=1200.0, gt=0, le=86400)
     agent_max_model_calls: int = Field(default=12, ge=1, le=100)
+    agent_model_retry_max_retries: int = Field(default=2, ge=0, le=10)
+    agent_model_retry_window_seconds: float = Field(default=180, gt=0, le=3600)
     agent_max_tool_executions: int = Field(default=4, ge=1, le=32)
     agent_max_active_seconds: float = Field(default=3600, gt=0, le=86400)
     agent_max_llm_tokens: int = Field(default=64000, ge=1, le=2000000)
@@ -149,6 +151,8 @@ ENVIRONMENT_FIELDS = {
     "ZTA35G_RUNTIME_TOKEN": "zta35g_runtime_token",
     "ZTA35G_RUNTIME_TIMEOUT_SECONDS": "zta35g_runtime_timeout_seconds",
     "AGENT_MAX_MODEL_CALLS": "agent_max_model_calls",
+    "AGENT_MODEL_RETRY_MAX_RETRIES": "agent_model_retry_max_retries",
+    "AGENT_MODEL_RETRY_WINDOW_SECONDS": "agent_model_retry_window_seconds",
     "AGENT_MAX_TOOL_EXECUTIONS": "agent_max_tool_executions",
     "AGENT_MAX_ACTIVE_SECONDS": "agent_max_active_seconds",
     "AGENT_MAX_LLM_TOKENS": "agent_max_llm_tokens",

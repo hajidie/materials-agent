@@ -30,6 +30,13 @@ RESOURCE_FIELDS = {
 RESOURCE_FIELDS["train_tabular_regression"] = RESOURCE_FIELDS["get_training_run"]
 
 
+def transient_transport(error):
+    if isinstance(error, BaseExceptionGroup):
+        return bool(error.exceptions) and all(transient_transport(child) for child in error.exceptions)
+    return isinstance(error, (httpx.TransportError, TimeoutError, ConnectionError)) or (
+        isinstance(error, httpx.HTTPStatusError) and error.response.status_code in {408, 429, 500, 502, 503, 504})
+
+
 class BoundedTransport(httpx.AsyncBaseTransport):
     """Bound wire bytes before the SDK parses JSON; refuse SDK-followed redirects."""
     def __init__(self, allowed_url):
@@ -176,7 +183,8 @@ class SessionSlot:
                                         future.set_result(result)
                                     except BaseException as error:
                                         pending_failure = error if isinstance(error, MCPFailure) else MCPFailure(
-                                            "MCP_OUTCOME_UNKNOWN" if self.sent else "MCP_UNAVAILABLE", unknown=self.sent)
+                                            "MCP_OUTCOME_UNKNOWN" if self.sent else "MCP_UNAVAILABLE", unknown=self.sent,
+                                            transient=transient_transport(error))
                                         await self.cancel(session)
                                         raise
                                     self.context = None
@@ -196,7 +204,8 @@ class SessionSlot:
                     if pending and not pending[1].done():
                         # Transport/protocol ambiguity after dispatch is never a safe retry.
                         failure = pending_failure or (error if isinstance(error, MCPFailure) else MCPFailure(
-                            "MCP_OUTCOME_UNKNOWN" if self.sent else "MCP_UNAVAILABLE", unknown=self.sent))
+                            "MCP_OUTCOME_UNKNOWN" if self.sent else "MCP_UNAVAILABLE", unknown=self.sent,
+                            transient=transient_transport(error)))
                         pending[1].set_exception(failure)
                     pending, self.context = None, None
         finally:
@@ -252,7 +261,7 @@ class MCPClient:
         try:
             slot = self.available.get_nowait()
         except asyncio.QueueEmpty:
-            raise MCPFailure("MCP_CLIENT_BUSY") from None
+            raise MCPFailure("MCP_CLIENT_BUSY", transient=True) from None
         try:
             future = asyncio.get_running_loop().create_future()
             await slot.commands.put((call, future))

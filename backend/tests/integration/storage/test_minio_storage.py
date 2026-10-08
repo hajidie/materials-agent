@@ -87,7 +87,7 @@ def test_put_failure_after_write_starts_has_unknown_outcome() -> None:
 
     assert str(exc_info.value) == "Object storage unavailable."
     assert "sensitive endpoint" not in str(exc_info.value)
-    assert client.put_calls == 1
+    assert client.put_calls == 3  # Same key; authoritative HEAD confirmed absence before each retry.
 
 
 def test_configured_bucket_bootstrap_is_repeatable(
@@ -97,6 +97,42 @@ def test_configured_bucket_bootstrap_is_repeatable(
     ensure_object_storage_bucket(minio_storage)
 
     assert minio_storage.bucket_exists() is True
+
+
+def test_real_upload_lost_ack_reconciles_same_object(minio_storage, unique_object_key):
+    real = minio_storage._client
+    class LostAck:
+        calls = 0
+        def stat_object(self, *args):
+            return real.stat_object(*args)
+        def put_object(self, *args, **kwargs):
+            self.calls += 1
+            real.put_object(*args, **kwargs)
+            raise TimeoutError("private endpoint")
+    proxy = LostAck()
+    storage = MinioStorageService(client=proxy, bucket=minio_storage._bucket)
+    result = storage.put(unique_object_key, b"original-result", "application/octet-stream", {"operation-id": "upload-original"})
+    assert proxy.calls == 1 and result.object_key == unique_object_key
+    assert minio_storage.get(unique_object_key, max_bytes=100) == b"original-result"
+
+
+def test_unavailable_upload_check_never_replays_or_deletes():
+    class Unknown:
+        puts, heads, deletes = 0, 0, 0
+        def stat_object(self, *_):
+            self.heads += 1
+            if self.heads == 1:
+                raise S3Error(None, "NoSuchKey", "absent", None, None, None)
+            raise ConnectionError()
+        def put_object(self, *args, **kwargs):
+            self.puts += 1
+            raise TimeoutError()
+        def remove_object(self, *_):
+            self.deletes += 1
+    client = Unknown()
+    with pytest.raises(storage_port.StorageWriteOutcomeUnknownError):
+        MinioStorageService(client=client, bucket="test").put("original/key", b"data", "application/octet-stream")
+    assert client.puts == 1 and client.deletes == 0
 
 
 def test_put_head_get_delete_and_repeated_delete(

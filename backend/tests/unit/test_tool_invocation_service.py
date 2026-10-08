@@ -78,6 +78,7 @@ def test_invocation_state_machine_has_one_exact_authoritative_transition_table()
                 InvocationStatus.OUTCOME_UNKNOWN,
             }
         ),
+        InvocationStatus.OUTCOME_UNKNOWN: frozenset({InvocationStatus.SUCCEEDED, InvocationStatus.FAILED}),
     }
     assert "PARTIALLY_SUCCEEDED" not in {status.value for status in InvocationStatus}
 

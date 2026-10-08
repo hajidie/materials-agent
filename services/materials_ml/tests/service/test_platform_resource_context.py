@@ -9,7 +9,7 @@ from dotenv import dotenv_values
 
 from materials_ml import load_package, predict
 from materials_ml_service.domain import TrainingRun
-from test_platform_mcp import platform, conversation, confirm, result, ROOT, diagnostic_run, post_message
+from test_platform_mcp import platform, conversation, confirm, result, ROOT, diagnostic_run, post_message, wait_run
 from test_platform_resources import resources_platform, upload
 from test_end_to_end import worker_process
 
@@ -158,16 +158,18 @@ def test_registration_recovery_and_unknown_explicit_reconcile_preserve_history(c
         backend.stop(); backend.fault = fault; backend.start()
         waiting = message(http, scope, "用刚才上传的数据训练 LR，特征 x、z，目标 strength_MPa", "train")
         completed = confirm(http, waiting)
-        expected = "TERMINATED" if fault == "commit-before" else "SUCCEEDED"
+        expected = "INTERRUPTED" if fault == "commit-before" else "SUCCEEDED"
         assert completed["status"] == expected
         if fault == "commit-before":
-            assert completed["observations"][-1]["error"]["code"] == "MCP_OUTCOME_UNKNOWN"
+            assert not completed["observations"] and completed["answer_message"] is None
+            assert completed["pending_execution"]["status"] == "OUTCOME_UNKNOWN"
         assert len(http.get(prefix + "/resources").json()["data"]["items"]) == 1
         backend.stop(); backend.fault = None; backend.start()
         # Startup receipt checking is not an explicit registration authorization.
         assert len(http.get(prefix + "/resources").json()["data"]["items"]) == 1
         base = f"/api/v1/agent-runs/{completed['agent_run_id']}"
-        invocation = completed["executions"][0]["invocation_run_id"]
+        record = completed["pending_execution"] if fault == "commit-before" else completed["executions"][0]
+        invocation = record["invocation_run_id"]
         endpoint = base + f"/invocations/{invocation}/reconcile" if fault == "commit-before" else base + "/resources/reconcile"
         assert http.post(endpoint).status_code == 200
         assert http.post(endpoint).status_code == 200
@@ -175,11 +177,23 @@ def test_registration_recovery_and_unknown_explicit_reconcile_preserve_history(c
         assert len(refs) == 2
         original = diagnostic_run(http, http.get(base).json()["data"])
         assert original["status"] == completed["status"]
-        assert original["observations"] == completed["observations"]
         assert original["answer_message"] == completed["answer_message"]
         if fault == "commit-before":
+            # Only the verified original receipt may add a new observation.
+            assert original["pending_execution"] is None and original["tool_executions"] == 1
+            assert len(original["observations"]) == 1 and original["observations"][0]["status"] == "SUCCEEDED"
+            assert original["calls"] == completed["calls"], "Reconciliation must not advance the model"
             registered = next(r for r in refs if r["resource_type"] == "training_run")
             assert ":reconcile:" in registered["source"]
+            current = http.get(base).json()["data"]
+            assert current["can_resume"] and current["recovery_action"] == "CONTINUE"
+            resumed = http.post(base + "/resume", json={"submission_id": current["submission_id"], "version": current["version"]})
+            assert resumed.status_code == 202, resumed.text
+            finished = diagnostic_run(http, wait_run(http, completed["agent_run_id"]).json()["data"])
+            assert result(finished)["id"] == registered["resource_id"]
+            assert finished["tool_executions"] == 1 and finished["observations"] == original["observations"]
+        else:
+            assert original["observations"] == completed["observations"]
 
 
 @pytest.mark.parametrize("fault", ["deleted", "offline", "disabled"])

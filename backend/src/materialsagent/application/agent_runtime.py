@@ -10,7 +10,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.types import interrupt
 
 from materialsagent.domain.models.agent import (
-    AgentRun, ExecutionRecord, ModelCall, Observation, TokenUsage, canonical,
+    AgentRun, ExecutionRecord, ModelCall, Observation, canonical,
     fingerprint, identifier, now,
 )
 from materialsagent.domain.models.ml_resource_context import model_draft, model_observation
@@ -21,6 +21,7 @@ from .native_tool_protocol import decode_tool_arguments, validate_model_message
 from .sdk_agent_loop import NATIVE_AGENT_INSTRUCTIONS, SdkAgentLoop
 from .unit_resolution import project_units
 from .agent_process import AgentProcess, PublicText
+from .reliability import model_fault, unknown_observation, validate_resume
 
 
 def trim_public_context(frame, messages, maximum: int) -> int:
@@ -54,16 +55,24 @@ class AgentRuntime:
     def __init__(self, store: AgentStore, model: Any, tools: AgentToolGateway,
                  *, checkpointer: Any = None, checkpoint_cleanup: Any = None,
                  process_id: str | None = None, monotonic: Callable[[], float] = time.monotonic,
-                 clock: Callable[[], datetime] = now):
+                 clock: Callable[[], datetime] = now, model_retry_max_retries: int = 2,
+                 model_retry_window_seconds: float = 180):
         self.store, self.model, self.tools = store, model, tools
         self.checkpointer = checkpointer
         self.checkpoint_cleanup = checkpoint_cleanup
         self.process_id = process_id or identifier()
         self.monotonic, self.clock = monotonic, clock
+        self.model_retry_max_retries = model_retry_max_retries
+        self.model_retry_window_seconds = model_retry_window_seconds
         self.context_framework = ContextFramework()
         self.model_tasks: dict[tuple[str, str | None], asyncio.Task] = {}
         self.stop_events: dict[tuple[str, str | None], asyncio.Event] = {}
         self.receipt_tasks: set[asyncio.Task] = set()
+        self.receipt_owners: dict[asyncio.Task, str] = {}
+        self.recovery_task: asyncio.Task | None = None
+        # Admission must persist PENDING and register its owner atomically with
+        # respect to recovery. Model/tool execution does not hold this lock.
+        self.recovery_lock = asyncio.Lock()
         self.running_tasks: dict[tuple[str, str | None], asyncio.Task] = {}
         self.scheduled_again: set[str] = set()
         self.process = AgentProcess(store)
@@ -113,10 +122,27 @@ class AgentRuntime:
                 error = finished.exception()
                 if error is not None:
                     import logging
-                    logging.getLogger(__name__).error("agent_background_failed", exc_info=error)
+                    logging.getLogger(__name__).error("agent_background_failed run=%s category=%s",
+                        run.agent_run_id, type(error).__name__)
         task.add_done_callback(done)
 
+    async def submit(self, *args, **kwargs):
+        async with self.recovery_lock:
+            run, replayed = await asyncio.to_thread(self.store.submit, *args, **kwargs)
+            self.schedule(run)
+            return run, replayed
+
+    async def accept_confirmation(self, *args):
+        async with self.recovery_lock:
+            run = await asyncio.to_thread(self.store.accept_confirmation, *args)
+            self.schedule(run)
+            return run
+
     async def resume(self, run_id: str, actor_id: str, submission_id: str, version: int):
+        async with self.recovery_lock:
+            return await self._resume(run_id, actor_id, submission_id, version)
+
+    async def _resume(self, run_id: str, actor_id: str, submission_id: str, version: int):
         requested_version = version
         run = await asyncio.to_thread(self.store.get, run_id, actor_id)
         if run.submission_id != submission_id:
@@ -126,6 +152,7 @@ class AgentRuntime:
             return run
         if run.status != "INTERRUPTED" or run.version != version:
             raise AgentConflictError("Recovery version is stale.")
+        validate_resume(run, self.clock())
         checkpoint = await self.checkpointer.aget_tuple({"configurable": {"thread_id": run_id}})
         if checkpoint is None and (run.calls or run.pending_tool_call_id):
             raise AgentFailure("CHECKPOINT_MISSING")
@@ -134,7 +161,7 @@ class AgentRuntime:
             found = next((o for o in run.observations if o.invocation_run_id == record.invocation_run_id), None)
             if found is None:
                 found = await asyncio.to_thread(self.tools.repair, run, record)
-                if found is None:
+                if unknown_observation(found):
                     raise AgentFailure("TOOL_OUTCOME_UNKNOWN")
                 run = await asyncio.to_thread(self.store.receipt, run_id, actor_id, record, found)
                 version = run.version
@@ -143,6 +170,9 @@ class AgentRuntime:
         return run
 
     async def close(self) -> None:
+        if self.recovery_task:
+            self.recovery_task.cancel()
+            await asyncio.gather(self.recovery_task, return_exceptions=True)
         jobs = list(self.running_tasks.values())
         for task in jobs:
             task.cancel()
@@ -166,9 +196,31 @@ class AgentRuntime:
             except Exception:
                 await asyncio.to_thread(self.store.checkpoint_cleanup_failed, run_id)
 
-    async def recover(self) -> None:
+    def start_recovery_scan(self) -> None:
+        if self.recovery_task is not None:
+            return
+        async def scan():
+            while True:
+                await asyncio.sleep(5)
+                try:
+                    await self.recover(include_current_orphans=True)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    import logging
+                    logging.getLogger(__name__).warning("agent_recovery_scan_failed category=%s", type(error).__name__)
+        self.recovery_task = asyncio.create_task(scan(), name="agent-recovery")
+
+    async def recover(self, *, include_current_orphans=False) -> None:
+        async with self.recovery_lock:
+            await self._recover(include_current_orphans=include_current_orphans)
+
+    async def _recover(self, *, include_current_orphans=False) -> None:
+        protected = {key[0] for key, task in self.running_tasks.items() if not task.done()}
+        protected.update(owner for task, owner in self.receipt_owners.items() if not task.done())
         candidates = await asyncio.to_thread(
             self.store.recover_interrupted, self.process_id, repair=self.tools.repair,
+            **({"protected_run_ids": protected, "include_current_orphans": True} if include_current_orphans else {}),
         )
         for run_id, actor_id, status in candidates:
             checkpoint = await self.checkpointer.aget_tuple({"configurable": {"thread_id": run_id}})
@@ -260,6 +312,8 @@ class AgentRuntime:
         current_call: ModelCall | None = None
         request_limit = 0
         request_estimate = 0
+        logical_call_id, attempt_no = None, 0
+        logical_deadline = 0.0
         resources = getattr(self.tools, "resource_context", None)
         streams: dict[str, dict] = {}
 
@@ -278,6 +332,9 @@ class AgentRuntime:
             state = streams.get(call_id)
             if state is None or state["closed"] or stopped_event.is_set():
                 return
+            if message.usage_metadata or message.response_metadata.get("token_usage"):
+                # Keep observed usage even if the response transport fails later.
+                state["usage_message"] = message
             reasoning = message.additional_kwargs.get("reasoning_content", "")
             text = message.content if isinstance(message.content, str) else "".join(
                 b.get("text", "") for b in message.content if isinstance(b, dict) and b.get("type") == "text")
@@ -329,7 +386,7 @@ class AgentRuntime:
             return self.context_framework.build(profile, payload, run)
 
         async def before_model(messages, frame):
-            nonlocal current_call, request_limit, request_estimate
+            nonlocal current_call, request_limit, request_estimate, attempt_no
             check_budget(new_model=True)
             config = getattr(self.model, "configurations", {}).get("agent_decision")
             max_output = (config.max_tokens or 1024) if config is not None else 1024
@@ -342,27 +399,71 @@ class AgentRuntime:
             if request_limit < minimum:
                 raise AgentFailure("LLM_TOKEN_BUDGET_EXCEEDED" if ceiling == run.budget.max_llm_tokens - run.llm_tokens
                                    else "CONTEXT_BUDGET_EXCEEDED")
-            current_call = ModelCall(role="agent_decision", prompt_digest=fingerprint(
+            attempt_no += 1
+            current_call = ModelCall(role="agent_decision", logical_call_id=logical_call_id,
+                attempt_no=attempt_no, prompt_digest=fingerprint(
                 [frame.payload, [message.model_dump(mode="json") for message in messages]]),
                 output_limit=request_limit, input_reserved=request_estimate)
             run.calls.append(current_call)
+            run.pending_model_retry = None
+            run.retry_not_before = None
             private = set(frame.private) | internal_values(run.model_dump(mode="json"))
             streams[current_call.call_id] = {"reasoning": PublicText(private), "text": PublicText(private), "closed": False}
             await persist()  # Reserve before the external model call.
             check_budget()
-            selected = self.model.native_model(timeout=remaining_time(), output_limit=request_limit, streaming=True)
-            return selected.model_copy(update={"metadata": {**(selected.metadata or {}), "agent_call_id": current_call.call_id}})
+            request_timeout = min(remaining_time(), logical_deadline - self.monotonic(),
+                                  config.timeout_seconds if config is not None else 60)
+            if request_timeout <= 0:
+                raise AgentFailure("LLM_RECOVERY_WINDOW_EXCEEDED")
+            selected = self.model.native_model(timeout=request_timeout, output_limit=request_limit, streaming=True)
+            return selected.model_copy(update={"metadata": {**(selected.metadata or {}),
+                "agent_call_id": current_call.call_id, "agent_request_timeout": request_timeout}})
 
-        async def model_failure():
+        async def model_step():
+            nonlocal logical_call_id, attempt_no, logical_deadline
+            logical_call_id, attempt_no = identifier(), 0
+            seconds = min(self.model_retry_window_seconds, remaining_time())
+            logical_deadline = self.monotonic() + seconds
+            return seconds
+
+        async def model_failure(error, response=None):
             if current_call is None or current_call.status != "RUNNING":
                 return
-            current_call.status, current_call.error_code = "FAILED", "LLM_CALL_FAILED"
-            current_call.usage = TokenUsage(input_tokens=request_estimate, output_tokens=request_limit,
-                total_tokens=request_estimate + request_limit, source="estimated",
-                estimator_version="cl100k-x2-or-utf8-framing-v1")
+            if isinstance(error, asyncio.CancelledError) and not stopped_event.is_set() and self.monotonic() >= logical_deadline:
+                error = TimeoutError()
+            fault = model_fault(error, self.clock())
+            current_call.status, current_call.error_code = "FAILED", fault.code
+            current_call.failure_category = fault.category
+            state = streams[current_call.call_id]
+            from materialsagent.domain.ports.agent import PreparedAgentCall
+            from materialsagent.infrastructure.llm.agent_model import normalize_usage
+            request = PreparedAgentCall("agent_decision", [], request_limit, request_estimate, remaining_time())
+            current_call.usage = normalize_usage(response if response is not None else state.get("usage_message"), request)
             run.llm_tokens += current_call.usage.total_tokens
+            state["closed"] = True
+            for kind in ("reasoning", "text"):
+                text = state[kind].finish(incomplete=True)
+                if response is not None:
+                    raw = response.content if kind == "text" else response.additional_kwargs.get("reasoning_content", "")
+                    if isinstance(raw, str) and raw:
+                        text = protect_text(raw, state[kind].private)
+                if text:
+                    await publish_text(current_call.call_id, kind, status="interrupted", purpose="process", text=text)
+            # This durable marker precedes the middleware's backoff wait.
+            will_retry = fault.auto_retry and attempt_no <= self.model_retry_max_retries
+            run.pending_model_retry = {"logical_call_id": logical_call_id, "attempt_no": attempt_no,
+                "failure_category": fault.category, "will_retry": will_retry}
+            run.retry_not_before = fault.not_before
+            import logging
+            logging.getLogger(__name__).info("agent_model_attempt_failed run=%s logical_call=%s attempt=%s category=%s elapsed=%.3f",
+                run_id, logical_call_id, attempt_no, fault.category, max(0, self.monotonic() - last))
             try:
                 await persist()
+                if will_retry:
+                    await self.process.upsert(run_id, actor_id, {
+                        "segment_id": f"{current_call.call_id}:retry", "kind": "activity", "purpose": "process",
+                        "status": "complete", "text": f"正在重试，第 {attempt_no + 1}/{self.model_retry_max_retries + 1} 次",
+                    }, flush=True)
             except AgentConflictError:
                 pass
 
@@ -393,6 +494,7 @@ class AgentRuntime:
             request = PreparedAgentCall("agent_decision", [], request_limit, request_estimate, remaining_time())
             current_call.usage = normalize_usage(message, request)
             current_call.status = "SUCCEEDED"
+            run.pending_model_retry = None
             run.llm_tokens += current_call.usage.total_tokens
             if (replay_checkpoint and run.pending_tool_call_id is not None
                     and run.pending_execution is None and run.question_message_id is None
@@ -432,7 +534,7 @@ class AgentRuntime:
                 found = next((o for o in run.observations if o.invocation_run_id == record.invocation_run_id), None)
                 if found is None:
                     found = await asyncio.to_thread(self.tools.repair, run, record)
-                    if found is None:
+                    if unknown_observation(found):
                         raise AgentFailure("TOOL_OUTCOME_UNKNOWN")
                     run = await asyncio.to_thread(self.store.receipt, run_id, actor_id, record, found)
                 if run.pending_tool_call_id == record.tool_call_id:
@@ -451,28 +553,50 @@ class AgentRuntime:
             async def complete():
                 try:
                     observation = await asyncio.to_thread(self.tools.execute, run, record, min(timeout, remaining_time()))
-                except Exception:
+                except Exception as error:
                     observation = await asyncio.to_thread(self.tools.repair, run, record)
                     if observation is None:
-                        updated = await asyncio.to_thread(self.store.fail_execution, run_id, actor_id, record)
-                        await self.process.tools(updated)
-                        return updated
+                        from sqlalchemy.exc import SQLAlchemyError
+                        from materialsagent.domain.ports.unit_of_work import PersistenceError
+                        from .errors import DependencyUnavailableError
+                        if isinstance(error, (SQLAlchemyError, PersistenceError, DependencyUnavailableError)):
+                            observation = Observation(tool_call_id=record.tool_call_id, kind="TOOL_RESULT",
+                                status="OUTCOME_UNKNOWN", tool_name=record.tool_name, invocation_run_id=record.invocation_run_id)
+                        else:
+                            updated = await asyncio.to_thread(self.store.fail_execution, run_id, actor_id, record)
+                            await self.process.tools(updated)
+                            return updated
                 if observation.invocation_run_id != record.invocation_run_id:
                     raise AgentFailure("OBSERVATION_SOURCE_MISMATCH")
+                if unknown_observation(observation):
+                    marker = getattr(self.store, "mark_outcome_unknown", None)
+                    if marker:
+                        return await asyncio.to_thread(marker, run_id, actor_id, record)
+                    latest = await asyncio.to_thread(self.store.get, run_id, actor_id)
+                    if latest.terminal:
+                        return latest
+                    if latest.pending_execution:
+                        latest.pending_execution.status = "OUTCOME_UNKNOWN"
+                    if not latest.terminal:
+                        latest.status, latest.error_code = "INTERRUPTED", "TOOL_OUTCOME_UNKNOWN"
+                    await asyncio.to_thread(self.store.save, latest)
+                    return latest
                 updated = await asyncio.to_thread(self.store.receipt, run_id, actor_id, record, observation)
                 await self.process.tools(updated)
                 return updated
 
             task = asyncio.create_task(complete())
             self.receipt_tasks.add(task)
+            self.receipt_owners[task] = run_id
             task.add_done_callback(lambda finished: (self.receipt_tasks.discard(finished),
+                self.receipt_owners.pop(finished, None),
                 finished.exception() if not finished.cancelled() else None))
             run = await asyncio.shield(task)
             if run.status == "TERMINATED":
                 raise AgentConflictError("Run stopped after tool dispatch.")
             stored = next((o for o in run.observations if o.invocation_run_id == record.invocation_run_id), None)
             if stored is None:
-                raise AgentFailure("OBSERVATION_INCONSISTENT")
+                raise AgentFailure("TOOL_OUTCOME_UNKNOWN" if run.error_code == "TOOL_OUTCOME_UNKNOWN" else "OBSERVATION_INCONSISTENT")
             run.pending_tool_call_id = None
             run.pending_resource_map = {}
             await persist()
@@ -615,7 +739,8 @@ class AgentRuntime:
                 with httpx.Client() as sync_http:
                     initial_model = self.model.native_model(
                         timeout=remaining_time(), http_client=sync_http, http_async_client=async_http, streaming=True)
-                    graph = SdkAgentLoop(checkpointer=self.checkpointer)
+                    graph = SdkAgentLoop(checkpointer=self.checkpointer, max_retries=self.model_retry_max_retries,
+                        retry_window=min(self.model_retry_window_seconds, remaining_time()))
                     def model_task_changed(task: asyncio.Task | None) -> None:
                         if task is None:
                             self.model_tasks.pop(key, None)
@@ -626,7 +751,7 @@ class AgentRuntime:
                         thread_id=run_id, model=initial_model,
                         catalog=[] if run.tool_execution_disabled else self.tools.catalog(),
                         context=context, before_model=before_model, on_model=on_model,
-                        on_model_failure=model_failure, model_task_changed=model_task_changed,
+                        on_model_failure=model_failure, on_model_step=model_step, model_task_changed=model_task_changed,
                         on_tool=on_tool, on_delta=on_delta, resume=resume,
                         resumed=resumed_question or resumed_confirmation,
                         replay=replay_checkpoint,
@@ -679,10 +804,30 @@ class AgentRuntime:
         except AgentConflictError:
             return await asyncio.to_thread(self.store.get, run_id, actor_id)
         except Exception as error:
-            run.error_code = (error.code if isinstance(error, AgentFailure) else
-                              "LLM_CALL_FAILED" if current_call and current_call.error_code == "LLM_CALL_FAILED"
-                              else "AGENT_INTERNAL_ERROR")
-            run.status = "TERMINATED"
+            if current_call is not None and current_call.status == "RUNNING":
+                try:
+                    await model_failure(error)
+                except Exception:
+                    pass  # Recovery scanner settles an unacknowledged reservation.
+            from sqlalchemy.exc import SQLAlchemyError
+            from materialsagent.domain.ports.storage import StorageUnavailableError
+            from materialsagent.domain.ports.unit_of_work import DatabaseUnavailableError
+            from .errors import DependencyUnavailableError
+            fault = model_fault(error, self.clock())
+            model_failed = current_call is not None and current_call.status == "FAILED"
+            dependency_failed = isinstance(error, (SQLAlchemyError, StorageUnavailableError, DatabaseUnavailableError, DependencyUnavailableError))
+            code = error.code if isinstance(error, AgentFailure) else (
+                "DEPENDENCY_UNAVAILABLE" if dependency_failed else fault.code if model_failed else "AGENT_INTERNAL_ERROR")
+            recoverable = (model_failed and fault.recoverable) or dependency_failed or code in {
+                "TOOL_OUTCOME_UNKNOWN", "MCP_OUTCOME_UNKNOWN", "LLM_RECOVERY_WINDOW_EXCEEDED"}
+            if remaining_time() <= 0:
+                code, recoverable = "AGENT_ACTIVE_TIME_EXCEEDED", False
+            elif run.llm_tokens >= run.budget.max_llm_tokens:
+                code, recoverable = "LLM_TOKEN_BUDGET_EXCEEDED", False
+            elif len(run.calls) >= run.budget.max_model_calls:
+                code, recoverable = "AGENT_MODEL_CALL_BUDGET_EXCEEDED", False
+            run.error_code = code
+            run.status = "INTERRUPTED" if recoverable else "TERMINATED"
             run.final_message_id = None
             run.pending_message = None
             try:

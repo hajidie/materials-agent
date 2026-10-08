@@ -155,6 +155,8 @@ def _default_seed() -> int:
 
 
 def _safe_runtime_error(error: ToolClientError) -> tuple[str, str, int]:
+    if error.outcome_unknown:
+        return "RUNTIME_OUTCOME_UNKNOWN", "The original computation requires reconciliation.", 503
     if isinstance(error, ToolClientTimeoutError):
         return "RUNTIME_TIMEOUT", "Tool Runtime timed out.", 504
     if isinstance(error, ToolClientUnavailableError):
@@ -1227,6 +1229,25 @@ class ToolExecutionService:
         return None
 
     def _persist_runtime_success(
+        self, prepared: _PreparedToolAttempt, output: ToolExecutionOutput,
+    ) -> ToolExecutionReceipt:
+        import time
+        from .errors import DependencyUnavailableError
+        for attempt in range(3):
+            try:
+                return self._persist_runtime_success_once(prepared, output)
+            except DependencyUnavailableError:
+                with self._unit_of_work_factory() as uow:
+                    current = uow.tool_runs.get(prepared.tool_run.tool_run_id)
+                if current is None or not self._same_attempt_identity(current, prepared.tool_run):
+                    raise ApplicationConflictError(task_id=prepared.tool_run.task_id)
+                if current.output_summary == normalize_tool_output_summary(output):
+                    return ToolExecutionReceipt(tool_run=current, output=output)
+                if current.current_status != "RUNNING" or current.output_summary is not None or attempt == 2:
+                    raise
+                time.sleep((0.5, 1)[attempt])
+
+    def _persist_runtime_success_once(
         self,
         prepared: _PreparedToolAttempt,
         output: ToolExecutionOutput,
@@ -1309,13 +1330,14 @@ class ToolExecutionService:
         output: ToolExecutionOutput | None = None,
     ) -> None:
         code, safe_message, status_code = _safe_runtime_error(error)
-        self._persist_runtime_failure(
-            prepared.tool_run.tool_run_id,
-            task_id=prepared.tool_run.task_id,
-            code=code,
-            safe_message=safe_message,
-            output=output,
-        )
+        if not error.outcome_unknown:
+            self._persist_runtime_failure(
+                prepared.tool_run.tool_run_id,
+                task_id=prepared.tool_run.task_id,
+                code=code,
+                safe_message=safe_message,
+                output=output,
+            )
         raise ToolExecutionOutcomeError(
             safe_message,
             code=code,

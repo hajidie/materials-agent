@@ -67,6 +67,7 @@ ALLOWED_INVOCATION_TRANSITIONS = {
             InvocationStatus.OUTCOME_UNKNOWN,
         }
     ),
+    InvocationStatus.OUTCOME_UNKNOWN: frozenset({InvocationStatus.SUCCEEDED, InvocationStatus.FAILED}),
 }
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -337,9 +338,9 @@ class InvocationRun:
         ):
             raise ValueError("RUNNING requires an execution claim and lease.")
         if self.status is InvocationStatus.OUTCOME_UNKNOWN and (
-            self.execution_profile is not ToolExecutionProfile.SIDE_EFFECT and self.executor_id != "mcp"
+            self.execution_profile not in {ToolExecutionProfile.SIDE_EFFECT, ToolExecutionProfile.MANAGED} and self.executor_id != "mcp"
         ):
-            raise ValueError("OUTCOME_UNKNOWN is Side-effect-only.")
+            raise ValueError("OUTCOME_UNKNOWN requires an external execution.")
         if self.execution_attempt_count < 0:
             raise ValueError("execution_attempt_count must be nonnegative.")
         if self.dispatch_started_at is not None and (

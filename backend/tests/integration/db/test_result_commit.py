@@ -1142,6 +1142,7 @@ def _workflow_for_result_failure(
     assets: list[Asset],
     *,
     terminalization_factory=None,
+    result_factory=None,
 ) -> tuple[
     ToolWorkflowService,
     _StaticExecutionService,
@@ -1151,7 +1152,7 @@ def _workflow_for_result_failure(
     asset_service = _StaticAssetService(assets)
     normal_factory = _factory(engine)
     result_service = ResultService(
-        _FailFirstCommitFactory(engine),
+        result_factory or _FailFirstCommitFactory(engine),
         clock=lambda: BASE + timedelta(seconds=5),
         id_factory=lambda: "result_1",
     )
@@ -1165,7 +1166,7 @@ def _workflow_for_result_failure(
     return workflow, execution, asset_service
 
 
-def test_result_commit_failure_rolls_back_and_returns_no_memory_result(
+def test_short_result_commit_outage_retries_without_recomputing(
     migrated_database_engine: Engine,
 ) -> None:
     receipt, assets = _seed(
@@ -1182,28 +1183,23 @@ def test_result_commit_failure_rolls_back_and_returns_no_memory_result(
         )
     )
 
-    with pytest.raises(ResultPersistenceError):
-        workflow.execute(
-            ACTOR,
-            task_id="task_1",
-            task_input_revision_id="revision_1",
-            request_id="request_1",
-        )
+    completed = workflow.execute(ACTOR, task_id="task_1", task_input_revision_id="revision_1", request_id="request_1")
+    assert completed.result.result_id == "result_1"
 
     with _factory(migrated_database_engine)() as unit_of_work:
-        assert unit_of_work.tool_results.get("result_1") is None
-        assert unit_of_work.result_asset_links.list_for_result("result_1") == []
+        assert unit_of_work.tool_results.get("result_1") is not None
+        assert len(unit_of_work.result_asset_links.list_for_result("result_1")) == 1
         task = unit_of_work.tasks.get("task_1")
         run = unit_of_work.tool_runs.get("tool_run_1")
         asset = unit_of_work.assets.get("asset_1")
-        assert task.current_status == "FAILED"
+        assert task.current_status == "SUCCEEDED"
         assert task.selected_tool_run_id == "tool_run_1"
-        assert task.selected_result_id is None
-        assert task.error_code == "RESULT_PERSISTENCE_FAILED"
-        assert run.current_status == "FAILED"
-        assert run.completed_outputs == []
-        assert run.failed_outputs == list(run.requested_outputs)
-        assert run.error_code == "RESULT_PERSISTENCE_FAILED"
+        assert task.selected_result_id == "result_1"
+        assert task.error_code is None
+        assert run.current_status == "SUCCEEDED"
+        assert run.completed_outputs == list(run.requested_outputs)
+        assert run.failed_outputs == []
+        assert run.error_code is None
         assert run.diagnostics == receipt.tool_run.diagnostics
         assert run.output_summary == receipt.tool_run.output_summary
         assert asset.current_status == "AVAILABLE"
@@ -1276,22 +1272,28 @@ def test_result_failure_terminalization_commit_failure_preserves_real_state(
     terminalization_factory = _FailFirstCommitFactory(
         migrated_database_engine
     )
+    class AlwaysFailResult(_FailFirstCommitFactory):
+        def __call__(self):
+            return _FailFirstCommitUoW(self._session_factory, {"failed": False})
     workflow, execution, asset_service = (
         _workflow_for_result_failure(
             migrated_database_engine,
             receipt,
             assets,
             terminalization_factory=terminalization_factory,
+            result_factory=AlwaysFailResult(migrated_database_engine),
         )
     )
 
-    with pytest.raises(ResultPersistenceError):
+    from materialsagent.application.tool_execution import ToolExecutionOutcomeError
+    with pytest.raises(ToolExecutionOutcomeError) as unknown:
         workflow.execute(
             ACTOR,
             task_id="task_1",
             task_input_revision_id="revision_1",
             request_id="request_1",
         )
+    assert unknown.value.code == "RUNTIME_OUTCOME_UNKNOWN"
 
     with _factory(migrated_database_engine)() as unit_of_work:
         assert unit_of_work.tool_results.get("result_1") is None

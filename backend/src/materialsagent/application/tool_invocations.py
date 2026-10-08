@@ -5,12 +5,14 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Protocol
 from uuid import uuid4
+import time
 
 from materialsagent.application.context import ActorContext
 from materialsagent.application.errors import (
     ApplicationConflictError,
     ApplicationInternalError,
     ApplicationValidationError,
+    DependencyUnavailableError,
     ResourceNotFoundError,
 )
 from materialsagent.application.tool_projections import ToolProjectionService
@@ -60,6 +62,7 @@ class ToolExecutorContext:
     execution_claim_token: str
     binding_snapshot: Mapping[str, object] | None = None
     remote_operation: Mapping[str, object] | None = None
+    auto_retry_safe: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -385,6 +388,7 @@ class InvocationService:
                 "confirmation_ttl_seconds": policy.confirmation_ttl_seconds,
                 "idempotency_required": policy.idempotency_required,
                 "audit_required": policy.audit_required,
+                "auto_retry_safe": registration.definition.auto_retry_safe,
             },
             tool_projection=ToolProjectionService.for_invocation(
                 registration.definition
@@ -484,6 +488,7 @@ class InvocationService:
                 "confirmation_ttl_seconds": policy.confirmation_ttl_seconds,
                 "idempotency_required": policy.idempotency_required,
                 "audit_required": policy.audit_required,
+                "auto_retry_safe": registration.definition.auto_retry_safe,
             },
             tool_projection=ToolProjectionService.for_invocation(
                 registration.definition
@@ -688,8 +693,11 @@ class InvocationService:
                 task_input_revision_id=task_input_revision_id,
                 request_id=run.request_id,
             )
-        except Exception:
-            self._finalize_managed_failure(actor, persisted)
+        except Exception as error:
+            if getattr(error, "code", None) == "RUNTIME_OUTCOME_UNKNOWN" or isinstance(error, (PersistenceError, DependencyUnavailableError)):
+                self._finalize_unknown(actor, persisted)
+            else:
+                self._finalize_managed_failure(actor, persisted)
             raise
         tool_run = getattr(workflow, "tool_run", None)
         managed_tool_run_id = getattr(tool_run, "tool_run_id", None)
@@ -751,8 +759,11 @@ class InvocationService:
                 actor,
                 tool_run_id=run.managed_tool_run_id,
             )
-        except Exception:
-            self._finalize_managed_failure(actor, persisted)
+        except Exception as error:
+            if getattr(error, "code", None) == "RUNTIME_OUTCOME_UNKNOWN" or isinstance(error, (PersistenceError, DependencyUnavailableError)):
+                self._finalize_unknown(actor, persisted)
+            else:
+                self._finalize_managed_failure(actor, persisted)
             raise
         completed_at = self._clock()
         result_missing = False
@@ -892,6 +903,7 @@ class InvocationService:
                     "confirmation_ttl_seconds": policy.confirmation_ttl_seconds,
                     "idempotency_required": policy.idempotency_required,
                     "audit_required": policy.audit_required,
+                    "auto_retry_safe": registration.definition.auto_retry_safe,
                 },
                 tool_projection=ToolProjectionService.for_invocation(
                     registration.definition
@@ -1307,9 +1319,27 @@ class InvocationService:
         return ToolExecutorContext(invocation_run_id=run.invocation_run_id, request_id=run.request_id,
             idempotency_key=run.idempotency_key, actor_id=run.actor_id, conversation_id=run.conversation_id,
             execution_claim_token=run.execution_claim_token, binding_snapshot=run.binding_snapshot,
-            remote_operation=run.remote_operation)
+            remote_operation=run.remote_operation, auto_retry_safe=bool(run.policy_snapshot.get("auto_retry_safe", False)))
 
     def _commit_output(self, actor, saved, output):
+        for attempt in range(3):
+            try:
+                return self._commit_output_once(actor, saved, output)
+            except PersistenceError:
+                with self._unit_of_work_factory() as uow:
+                    current = uow.invocation_runs.get_owned(saved.invocation_run_id, actor.actor_id)
+                    result = uow.invocation_results.get(current.invocation_result_id) if current and current.invocation_result_id else None
+                if result is not None:
+                    if result.invocation_run_id != saved.invocation_run_id or _plain_json(result.data) != _plain_json(output.data):
+                        raise ApplicationConflictError()
+                    return current
+                if current is None or current.status != saved.status or current.execution_claim_token != saved.execution_claim_token:
+                    raise ApplicationConflictError()
+                if attempt == 2:
+                    raise
+                time.sleep((0.5, 1)[attempt])
+
+    def _commit_output_once(self, actor, saved, output):
         completed_at = self._clock()
         result = InvocationResult(
             invocation_result_id=self._id_factory("invres"),
@@ -1322,7 +1352,7 @@ class InvocationService:
             current = uow.invocation_runs.get_owned_for_update(saved.invocation_run_id, actor.actor_id)
             if current is None:
                 raise ResourceNotFoundError()
-            if current.status is not InvocationStatus.RUNNING:
+            if current.status not in {InvocationStatus.RUNNING, InvocationStatus.OUTCOME_UNKNOWN}:
                 return current
             succeeded = current.transition(
                 InvocationStatus.SUCCEEDED,
@@ -1335,7 +1365,7 @@ class InvocationService:
             uow.invocation_results.add(result)
             persisted = uow.invocation_runs.update(
                 succeeded,
-                expected_status=InvocationStatus.RUNNING,
+                expected_status=current.status,
                 expected_claim_token=saved.execution_claim_token,
             )
             if persisted is None:
@@ -1448,6 +1478,12 @@ class InvocationService:
             if saved is None:
                 raise ApplicationConflictError()
             uow.commit()
+        # Identity-only receipts remain unknown. The executor validates a full
+        # result against the frozen request before committing a usable result.
+        from .mcp_executor import result_from_receipt
+        output = result_from_receipt(registration, run, receipt)
+        if output is not None:
+            self._commit_output(actor, saved, output)
         return self.get(actor, invocation_run_id)
 
     def recover_mcp(self, actor, *, cutoff, limit=20):

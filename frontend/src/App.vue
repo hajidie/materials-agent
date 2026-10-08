@@ -101,8 +101,10 @@ async function reconcileRun(run: AgentRun, invocation: string) {
   if (reconciling.value) return;
   reconciling.value = run.agent_run_id;
   try {
-    await agentRequest(`/agent-runs/${encodeURIComponent(run.agent_run_id)}/invocations/${encodeURIComponent(invocation)}/reconcile`, { body: {} });
-    receipts.value[run.agent_run_id] = "已核查原操作，历史回复保持不变。已确认的完成结果会追加到对话。";
+    const receipt = await agentRequest<{ status: string }>(`/agent-runs/${encodeURIComponent(run.agent_run_id)}/invocations/${encodeURIComponent(invocation)}/reconcile`, { body: {} });
+    receipts.value[run.agent_run_id] = receipt.status === 'OUTCOME_UNKNOWN' || receipt.status === 'RUNNING'
+      ? "仍无法取得完整结果，请稍后核查原操作。已提交的操作不会重复执行。"
+      : "已核查原操作并保存结果，可继续处理。";
     if (agent.selectedId.value === run.conversation_id) await chat.observe(true);
   } catch { receipts.value[run.agent_run_id] = "暂时无法确认结果，请稍后核查。"; }
   finally { reconciling.value = null; }

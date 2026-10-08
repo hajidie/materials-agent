@@ -23,9 +23,10 @@ class MCPBinding:
 
 
 class MCPFailure(Exception):
-    def __init__(self, code: str, *, unknown: bool = False, receipt: Mapping | None = None):
+    def __init__(self, code: str, *, unknown: bool = False, receipt: Mapping | None = None, transient: bool = False):
         super().__init__(code)
         self.code, self.unknown, self.receipt = code, unknown, receipt
+        self.transient = transient
 
 
 class MCPClientPort(Protocol):

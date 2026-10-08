@@ -89,6 +89,7 @@ def build_ml_tools(*, binding_version, endpoint_digest, health_probe=None):
             execution_mode=ExecutionMode.SYNC, executor_id="mcp", presenter_id="materials_ml_v1",
             presentation_mode=PresentationMode.DETERMINISTIC,
             resource_parameters=RESOURCE_PARAMETERS[name],
+            auto_retry_safe=name in {"analyze_tabular_dataset", "get_training_run"},
             tool_execution_policy=ToolExecutionPolicy(lifecycle_policy=ToolLifecyclePolicy.ANY_TASK,
                 required_permissions=("materials_ml." + name,) if write else (), confirmation_required=write),
             confirmation_prompt=("确认" + TITLES[name] + "？此操作会创建持久化 ML 资源。") if write else None)

@@ -186,15 +186,35 @@ class ResultService:
         )
 
     def _commit_result(
+        self, actor: ActorContext, *, receipt: ToolExecutionReceipt, assets: list[Asset], selection_policy: str,
+    ) -> ToolResult:
+        import time
+        result_id, completed_at = self._id_factory(), self._clock()
+        for attempt in range(3):
+            try:
+                return self._commit_result_once(actor, receipt=receipt, assets=assets, selection_policy=selection_policy,
+                    result_id=result_id, completed_at=completed_at)
+            except ResultPersistenceError:
+                with self._unit_of_work_factory() as uow:
+                    persisted = uow.tool_results.get_for_tool_run(receipt.tool_run.tool_run_id)
+                    current = uow.tool_runs.get_owned(receipt.tool_run.tool_run_id, actor.actor_id)
+                # The inner recovery verifies committed results and all links.
+                # Only a confirmed absent result may repeat the pure transaction.
+                if (persisted is not None or current is None or current.current_status != "RUNNING"
+                        or current.output_summary != normalize_tool_output_summary(receipt.output) or attempt == 2):
+                    raise
+                time.sleep((0.5, 1)[attempt])
+
+    def _commit_result_once(
         self,
         actor: ActorContext,
         *,
         receipt: ToolExecutionReceipt,
         assets: list[Asset],
         selection_policy: str,
+        result_id: str,
+        completed_at: datetime,
     ) -> ToolResult:
-        result_id = self._id_factory()
-        completed_at = self._clock()
         task_id = receipt.tool_run.task_id
         output = receipt.output
         if _tool_output_fingerprint(output) != receipt.output_fingerprint:

@@ -151,7 +151,7 @@ class InvocationRunRow(Base):
             name="ck_invocation_running_claim",
         ),
         CheckConstraint(
-            "status <> 'OUTCOME_UNKNOWN' OR execution_profile = 'SIDE_EFFECT' OR "
+            "status <> 'OUTCOME_UNKNOWN' OR execution_profile IN ('SIDE_EFFECT', 'MANAGED') OR "
             "(executor_id = 'mcp' AND binding_snapshot IS NOT NULL)",
             name="ck_invocation_outcome_unknown_profile",
         ),

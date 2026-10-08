@@ -236,21 +236,24 @@ def test_unknown_requires_terminal_receipt_before_conversation_delete(resources_
         waiting = invoke(http, scope, "train_tabular_regression", {"dataset_id": data["resource_id"],
             "features": ["x", "z"], "target": "strength_MPa"}, "training")
         stopped = confirm(http, waiting)
-        observation = next(o for o in stopped["observations"] if o["kind"] == "TOOL_RESULT")
-        assert observation["error"]["code"] == "MCP_OUTCOME_UNKNOWN" and stopped["answer_message"] is None
-        inv = f"/api/v1/agent-runs/{waiting['agent_run_id']}/invocations/{observation['invocation_run_id']}"
+        assert stopped["status"] == "INTERRUPTED" and stopped["answer_message"] is None
+        assert not stopped["observations"] and stopped["pending_execution"]["status"] == "OUTCOME_UNKNOWN"
+        base = f"/api/v1/agent-runs/{waiting['agent_run_id']}"
+        inv = base + f"/invocations/{stopped['pending_execution']['invocation_run_id']}"
         assert http.delete(f"/api/v1/conversations/{scope}").status_code == 409
-        receipt = http.post(inv + "/reconcile").json()["data"]["remote_receipt"]
+        reconciled = http.post(inv + "/reconcile")
+        assert reconciled.status_code == 200, reconciled.text
+        assert reconciled.json()["data"]["status"] == "SUCCEEDED"
+        receipt = reconciled.json()["data"]["remote_receipt"]
         assert receipt["resource"]["status"] == "PENDING"
+        assert http.delete(f"/api/v1/conversations/{scope}").status_code == 409
+        # Ending the paused Run does not certify remote training completion.
+        ended = http.post(base + "/stop", json={"submission_id": stopped["submission_id"]})
+        assert ended.status_code == 200, ended.text
         assert http.delete(f"/api/v1/conversations/{scope}").status_code == 409
         run_id = receipt["resource"]["id"]
         ref = register(http, scope, "training_run", run_id)
         cancel = http.post(f"/api/v1/conversations/{scope}/ml/resources/{ref['reference_id']}/cancel")
         assert cancel.status_code == 200 and cancel.json()["data"]["status"] == "CANCELLED"
-        # Remote cancellation alone cannot reinterpret the earlier platform receipt.
-        assert http.delete(f"/api/v1/conversations/{scope}").status_code == 409
-        checked = http.post(inv + "/reconcile").json()["data"]
-        assert checked["status"] == "OUTCOME_UNKNOWN"
-        assert checked["remote_receipt"]["resource"]["status"] == "CANCELLED"
         assert len(remote.get(f"/api/v1/scopes/{scope}/training-runs").json()["items"]) == 1
         assert http.delete(f"/api/v1/conversations/{scope}").status_code == 200
