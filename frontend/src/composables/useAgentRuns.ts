@@ -11,6 +11,7 @@ interface PendingOperation {
   key: string;
   conversationId: string | null;
   createKey?: string;
+  draftKey?: string;
   accepted?: { runId: string; submissionId: string };
   stopRequested?: boolean;
 }
@@ -78,8 +79,8 @@ export function useAgentRuns() {
     }
   } catch { /* Discard invalid local drafts. */ }
   const draft = computed(() => drafts.value[draftKey.value] ?? { text: "" });
-  function saveDraft(value: { text: string; attachment?: Attachment }) {
-    drafts.value[draftKey.value] = value;
+  function saveDraft(value: { text: string; attachment?: Attachment }, key = draftKey.value) {
+    drafts.value[key] = value;
     sessionStorage.setItem(DRAFT_KEY, JSON.stringify(drafts.value));
   }
   function setDraftText(text: string) { if (!pending.value) saveDraft({ ...draft.value, text }); }
@@ -241,6 +242,7 @@ export function useAgentRuns() {
   async function sendPending() {
     if (!pending.value || sending.value) return;
     const operation = pending.value;
+    const submittedDraftKey = operation.draftKey ?? draftKey.value;
     sending.value = true; error.value = null;
     try {
       if (!operation.conversationId) {
@@ -257,7 +259,7 @@ export function useAgentRuns() {
         updateRun(acceptedRun);
         streams.observe(acceptedRun);
         persistPending();
-        if (operation.path.endsWith("/messages")) { saveDraft({ text: "" }); completed.value++; }
+        if (operation.path.endsWith("/messages")) { saveDraft({ text: "" }, submittedDraftKey); completed.value++; }
       }
       if (operation.stopRequested) { await stop(); return; }
       if (pending.value === operation) { pending.value = null; persistPending(); }
@@ -288,6 +290,7 @@ export function useAgentRuns() {
       body: target ? { content_text: text, reply_to: { question_message_id: target.question_message_id, waiting_version: target.waiting_version } }
         : { content_text: text },
       key: crypto.randomUUID(), conversationId: selectedId.value,
+      draftKey: draftKey.value,
       ...(selectedId.value ? {} : { createKey: crypto.randomUUID() }),
     };
     pending.value.body.attachments = draft.value.attachment ? [draft.value.attachment] : [];

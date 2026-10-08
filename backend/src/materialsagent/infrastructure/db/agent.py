@@ -147,12 +147,15 @@ class SQLAlchemyAgentStore:
                 .with_for_update().execution_options(populate_existing=True))
             run = self._run(row.document)
             record = run.pending_execution
-            decision = {"tool_call_id": record.tool_call_id if record else None,
+            if (run.waiting_version != waiting_version or record is None
+                    or record.confirmation_version != confirmation_version):
+                raise AgentConflictError("Confirmation target changed.")
+            decision = {"tool_call_id": record.tool_call_id,
                         "waiting_version": waiting_version, "approved": approved}
-            if run.confirmation_response == decision:
+            # Applying approval clears confirmation_response before execution ends.
+            if run.confirmation_response == decision or (approved and record.confirmed):
                 return self._hydrate(session, run)
-            if (run.status != "WAITING_FOR_CONFIRMATION" or run.waiting_version != waiting_version
-                    or record is None or record.confirmation_version != confirmation_version):
+            if run.status != "WAITING_FOR_CONFIRMATION":
                 raise AgentConflictError("Confirmation target changed.")
             run.confirmation_response, run.status = decision, "PENDING"
             run.version += 1

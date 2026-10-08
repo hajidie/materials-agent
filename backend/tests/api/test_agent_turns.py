@@ -150,6 +150,52 @@ def test_stop_before_background_claim_prevents_any_model_or_tool_call(api_harnes
         assert advance(client, submitted)["stopped"]
 
 
+def test_confirmation_replay_during_execution_does_not_dispatch_again(api_harness, monkeypatch):
+    from materialsagent.application.fake_side_effect_tool import FakeSideEffectSink
+    from materialsagent.application.tools import build_tool_registry
+
+    actor = "confirmation-replay"
+    api_harness.persist_actor(actor)
+    conversation = api_harness.persist_conversation(actor).conversation_id
+    sink = FakeSideEffectSink()
+    registry = build_tool_registry(enable_dev_fake_side_effect_tool=True, fake_side_effect_sink=sink)
+    settings = api_harness.settings.model_copy(update={"enable_dev_fake_side_effect_tool": True})
+    model = MockAgentModel(lambda _role, payload: {"type": "Finish", "answer": "已处理。"}
+        if payload["observations"] else {"type": "CallTool", "tool_name": "dev_fake_side_effect",
+            "arguments": {"message": "test-only receipt"}})
+    entered, release = Event(), Event()
+    attempts = []
+    with api_harness.create_client(actor, settings=settings, agent_model=model, tool_registry=registry) as client:
+        runtime = client.app.state.agent_runtime
+        original = runtime.tools.execute
+        def blocked(*args):
+            attempts.append(1)
+            entered.set()
+            assert release.wait(15)
+            return original(*args)
+        monkeypatch.setattr(runtime.tools, "execute", blocked)
+        waiting = advance(client, accept(client, conversation, "执行测试操作"))
+        pending = waiting["pending_execution"]
+        path = f"/api/v1/agent-runs/{waiting['agent_run_id']}/invocations/{pending['invocation_run_id']}"
+        body = {"waiting_version": waiting["waiting_version"], "confirmation_version": pending["confirmation_version"]}
+        try:
+            assert client.post(path + "/confirm", json=body).status_code == 200
+            assert entered.wait(10)
+            current = runtime.store.get(waiting["agent_run_id"], actor)
+            assert current.pending_execution.confirmed and current.confirmation_response is None
+            replayed = client.post(path + "/confirm", json=body)
+            assert replayed.status_code == 200, replayed.text
+            assert replayed.json()["data"]["version"] == current.version
+            assert client.post(path + "/reject", json=body).status_code == 409
+            assert client.post(path + "/confirm", json={**body, "waiting_version": body["waiting_version"] + 1}).status_code == 409
+            assert client.post(path + "/confirm", json={**body, "confirmation_version": "stale"}).status_code == 409
+        finally:
+            release.set()
+        result = wait_run(client, waiting["agent_run_id"]).json()["data"]
+        assert result["status"] == "SUCCEEDED"
+        assert len(result["executions"]) == len(attempts) == sink.write_count == 1
+
+
 def test_stopped_dispatched_tool_publishes_receipt_without_resuming_loop(api_harness, monkeypatch):
     client, conversation = client_for(api_harness)
     entered, release = Event(), Event()

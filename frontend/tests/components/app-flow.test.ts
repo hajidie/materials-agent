@@ -1,7 +1,9 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { defineComponent } from "vue";
 import App from "../../src/App.vue";
 import type { AgentRun, ChatMessage } from "../../src/api/agent";
+import { useAgentRuns } from "../../src/composables/useAgentRuns";
 const timestamp="2026-09-27T00:00:00Z";
 const conversation={conversation_id:"conv",title:"研究",created_at:timestamp,updated_at:timestamp,last_activity_preview:null};
 function run(patch:Partial<AgentRun>={}):AgentRun {
@@ -66,6 +68,57 @@ it('automatically binds the ordinary reply to the current question',async()=>{
   await w.get('textarea').setValue('1000 摄氏度');await w.get('form').trigger('submit');await flushPromises();
   expect(writes[0]?.body).toEqual({content_text:'1000 摄氏度',reply_to:{question_message_id:'question',waiting_version:3},attachments:[]});
   expect((w.get('textarea').element as HTMLTextAreaElement).value).toBe('');
+});
+it('clears the submitted reply and attachment before the same run asks another question',async()=>{
+  runs=[run({status:'WAITING_FOR_USER',version:2,final_message_id:null,question_message_id:'question',waiting_version:3,waiting:{question:'温度？'}})];
+  sessionStorage.setItem('materials-agent.attachments-drafts.v3',JSON.stringify({
+    'conv:run':{text:'1000 摄氏度',attachment:{attachment_id:'dataset',kind:'dataset',name:'conditions.csv'}},
+  }));
+  const originalFetch=globalThis.fetch;
+  vi.stubGlobal('fetch',vi.fn(async(input:RequestInfo|URL,init?:RequestInit)=>{
+    if(String(input).endsWith('/messages')&&init?.method==='POST'){
+      const body=JSON.parse(String(init.body));writes.push({url:String(input),body,key:new Headers(init.headers).get('Idempotency-Key')??''});
+      const accepted=run({status:'PENDING',version:3,final_message_id:null,question_message_id:'question',waiting_version:3});
+      runs=[run({status:'WAITING_FOR_USER',version:4,final_message_id:null,question_message_id:'next-question',waiting_version:4,waiting:{question:'时间？'}})];
+      return response({agent_run:accepted,submission_id:'submission',idempotency_replayed:false},202);
+    }
+    return originalFetch(input,init);
+  }));
+  const w=await show();await w.get('form').trigger('submit');await flushPromises();
+  expect(writes[0]?.body.attachments).toHaveLength(1);
+  expect((w.get('textarea').element as HTMLTextAreaElement).value).toBe('');
+  expect(w.find('[aria-label="已添加的附件"]').exists()).toBe(false);
+  expect(JSON.parse(sessionStorage.getItem('materials-agent.attachments-drafts.v3')!)['conv:run']).toEqual({text:''});
+  await w.get('textarea').setValue('2 小时');await w.get('form').trigger('submit');await flushPromises();
+  expect(writes[1]?.body).toEqual({content_text:'2 小时',reply_to:{question_message_id:'next-question',waiting_version:4},attachments:[]});
+});
+it('clears the original reply draft after uncertain acceptance and an earlier status refresh',async()=>{
+  runs=[run({status:'WAITING_FOR_USER',version:2,final_message_id:null,question_message_id:'question',waiting_version:3,waiting:{question:'温度？'}})];
+  sessionStorage.setItem('materials-agent.attachments-drafts.v3',JSON.stringify({
+    'conv:run':{text:'1000 摄氏度',attachment:{attachment_id:'dataset',kind:'dataset',name:'conditions.csv'}},
+    'conv:new':{text:'另一个尚未提交的想法'},
+  }));
+  const originalFetch=globalThis.fetch;
+  const accepted=run({status:'PENDING',version:3,final_message_id:null,question_message_id:'question',waiting_version:3});
+  vi.stubGlobal('fetch',vi.fn(async(input:RequestInfo|URL,init?:RequestInit)=>{
+    if(String(input).endsWith('/messages')&&init?.method==='POST'){
+      writes.push({url:String(input),body:JSON.parse(String(init.body)),key:new Headers(init.headers).get('Idempotency-Key')??''});
+      if(writes.length===1){runs=[accepted];throw new TypeError('lost acceptance response');}
+      runs=[run({status:'WAITING_FOR_USER',version:4,final_message_id:null,question_message_id:'next-question',waiting_version:4,waiting:{question:'时间？'}})];
+      return response({agent_run:accepted,submission_id:'submission',idempotency_replayed:true},202);
+    }
+    return originalFetch(input,init);
+  }));
+  let agent!:ReturnType<typeof useAgentRuns>;
+  wrappers.push(mount(defineComponent({setup(){agent=useAgentRuns();return ()=>null;}})));
+  await agent.select('conv');await agent.submit('1000 摄氏度');
+  expect(agent.pending.value).not.toBeNull();
+  await agent.refresh();expect(agent.draft.value.text).toBe('另一个尚未提交的想法');
+  await agent.sendPending();
+  expect(agent.draft.value).toEqual({text:''});
+  expect(JSON.parse(sessionStorage.getItem('materials-agent.attachments-drafts.v3')!)['conv:new']).toEqual({text:'另一个尚未提交的想法'});
+  expect(writes[1]?.key).toBe(writes[0]?.key);
+  expect(agent.pending.value).toBeNull();
 });
 it('stops through the backend, blocks duplicate sends and keeps published content',async()=>{
   let release=()=>{};gate=new Promise<void>(resolve=>{release=resolve;});

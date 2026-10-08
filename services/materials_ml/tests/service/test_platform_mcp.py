@@ -423,11 +423,11 @@ def test_platform_prediction_interruption_stops_tree_and_blocks_agent(platform, 
                     pass
                 backend.start()
                 current = http.get(f"/api/v1/agent-runs/{waiting['agent_run_id']}").json()["data"]
-            assert current["status"] == "INTERRUPTED"
-            resumed = http.post(f"/api/v1/agent-runs/{waiting['agent_run_id']}/resume",
-                json={"submission_id": current["submission_id"], "version": current["version"]})
-            assert resumed.status_code == 202, resumed.text
-            stopped = diagnostic_run(http, wait_run(http, waiting["agent_run_id"]).json()["data"])
+                assert current["status"] == "INTERRUPTED"
+                resumed = http.post(f"/api/v1/agent-runs/{waiting['agent_run_id']}/resume",
+                    json={"submission_id": current["submission_id"], "version": current["version"]})
+                assert resumed.status_code == 202, resumed.text
+                stopped = diagnostic_run(http, wait_run(http, waiting["agent_run_id"]).json()["data"])
             else:
                 stopped = pending.result(timeout=15)
             for handle in handles:
