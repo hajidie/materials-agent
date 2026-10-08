@@ -27,6 +27,16 @@ Backend 是业务协调者；真实 Runtime 是旧模型和 GPU 依赖的隔离�
 
 相关实现主要位于 `backend/src/materialsagent/application/agent_runtime.py`、`sdk_agent_loop.py`、`context_framework.py`、`tools.py` 和 `frontend/src/composables/`。
 
+## 研究过程与流式协议
+
+`AgentRuntime` 托管执行与正式回答提交，`SdkAgentLoop` 消费 SDK 的流式消息；`AgentProcess` 负责公开过程段、内容快照和订阅通知。`useProcessStreams.ts` 管理前端 EventSource，`ResearchProcess.vue` 与 `AssistantMarkdown.vue` 统一展示实时和历史内容。术语见 [词汇表](../GLOSSARY.md)；保存内容与执行生命周期的取舍见 [ADR-0001](adr/0001-retain-research-process-content.md) 和 [ADR-0002](adr/0002-run-independent-of-browser-connection.md)。
+
+公开过程保存在独立的 `agent_process` 表中，随所属 Run 级联删除，与 SDK checkpoint 分别维护。过程段有稳定身份和 revision，区分模型思考、行动说明、工具事实与未完成内容；工具事实只从实际业务执行记录投影。文本和思考经跨分片尾部缓冲及已知私有值脱敏后才进入 SSE 和存储，已收口的段不能被迟到分片重新打开。保存累计内容，不保存逐 token 播放轨迹；更新时约每秒保存一次，收口时强制保存，突然断电仍可能丢失自上次保存以来的内容。
+
+`GET /api/v1/agent-runs/{id}/process` 读取公开快照，`/events` 通过 SSE 观察原 Run，沿用原访问权限校验。服务端先注册订阅再读取快照；每次连接（包括携带旧 Last-Event-ID 的重连）先发送完整 `snapshot`，随后 `process.updated` 发送变更段的累计完整内容，本轮执行收尾时发送 `settled`。客户端按 epoch 和段 revision 归并，忽略旧连接和旧修订；事件 id 不用于逐 token 重放。慢客户端读取最新累计状态，订阅断开不取消执行，重连不创建或重新派发任务。
+
+Markdown 段接收结束、模型调用结束和任务完成是不同阶段；正式回答与 Run 成功状态一起提交后，保存正文替换实时预览。历史与复制使用公开原始 Markdown，显示修补不写回记录或模型上下文。模型思考和行动说明不作为科研证据。
+
 ## 状态、失败与重试
 
 `AgentRun` 是业务状态的权威记录，checkpoint 只负责模型续轮。Run 可等待用户补充或确认；短事务、版本和 claim 控制唯一推进者。外部 LLM、Runtime、MinIO 调用不应跨越数据库长事务。已派发操作发生断连或超时时，只核查原回执，不因为请求失败而重新派发。
@@ -63,4 +73,4 @@ ML Engine 只做数值表格回归，目前支持 LR/RF。Service 管理数据�
 
 前端以聊天为唯一工作入口：问题在原输入框补充，运行状态和结果跟随消息展示，附件详情通过只读 Viewer 查看。查看或下载不改变工具输入、草稿或 Agent 状态。界面文案使用用户能理解的进度和错误，不暴露内部 ID、原始 JSON 或调试异常。样式与响应式规则以 `frontend/src/styles.css` 和组件测试为准。
 
-研究过程与流式协议详见 [流式展示设计](design/streaming-research-process.md)。正文使用 Markdown；模型思考、行动说明和工具事实分开标注，完成后默认折叠，公式在所属消息接收完成后渲染。该实现依赖单 Backend 进程的运行托管与广播，不能直接以多个独立 Uvicorn worker 部署。
+正文使用 Markdown；模型思考、行动说明和工具事实分开标注，完成后默认折叠，并保留用户主动展开的选择。`AssistantMarkdown` 使用 remend 修补流中显示副本，完成后由 markdown-it 直接解析原文，KaTeX 在所属段接收完成后排版公式。渲染禁用原始 HTML，限制链接协议并隔离外链；Markdown 图片只显示替代文字，结果图片通过原受控附件展示。用户向上阅读时不强制滚回底部。该实现依赖单 Backend 进程的运行托管与广播，不能直接以多个独立 Uvicorn worker 部署。

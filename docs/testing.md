@@ -57,10 +57,18 @@ ML 自动验收需与浏览器 ML 验收、常驻 Worker 串行运行；单实�
 
 `backend/tests/api/test_agent_recovery_api.py` 使用真实 PostgreSQL，注入提交前失败和提交回包丢失，检查答案原子性、原操作身份、恢复版本及同进程遗留运行修复；并发回归覆盖扫描期间的新提交与人工恢复，确认正常答案仍能提交。`backend/tests/api/test_ebsd.py` 检查传输结果未知时 Invocation 确实持久化为 `OUTCOME_UNKNOWN`、核查不重新执行，以及存在未决 Managed 记录时拒绝降级数据库。`backend/tests/integration/db/test_migrations.py` 覆盖迁移 head 与空历史的升降级往返。`backend/tests/integration/storage/test_minio_storage.py` 包含真实上传回包丢失后核查同一对象，以及核查不可用时禁止重传/删除。前端 `agent-recovery.test.ts` 验证恢复动作、待核查按钮、Retry-After 倒计时与预算耗尽禁用。
 
-运行这些测试后，再执行完整 Backend 回归和单独的 Mock Runtime 回归；涉及 MCP 时，用独立 ML 环境开启 `ML_INTEGRATION=1` 执行 `test_platform_mcp.py`、`test_mcp.py`。这些故障由替身或受控边界注入，不会关闭共享 PostgreSQL/MinIO 服务。真实 Provider/GPU、浏览器断网与真实进程崩溃的覆盖情况分别记录在 [容错验收](acceptance/reliability.md)。
+运行这些测试后，再执行完整 Backend 回归和单独的 Mock Runtime 回归；涉及 MCP 时，用独立 ML 环境开启 `ML_INTEGRATION=1` 执行 `test_platform_mcp.py`、`test_mcp.py`。这些故障由替身或受控边界注入，不会关闭共享 PostgreSQL/MinIO 服务；不能据此宣称真实 Provider/GPU 或浏览器断网与进程崩溃场景已通过。
 
 ## 研究过程流式展示
 
 相关测试：`backend/tests/unit/test_agent_process.py` 验证分片、脱敏、晚到消息归并与调度交接；`backend/tests/api/test_agent_process_stream.py` 验证 SSE、所有权、历史、显式恢复、回执与删除；`test_agent_sdk_recovery.py` 保留 SDK 崩溃窗口重放验证。
 
-前端 `assistant-markdown.test.ts` 覆盖完成态原文、数学延迟渲染和不安全输入；`process-streams.test.ts` 覆盖重连归并、旧连接隔离与折叠选择。实际验证及未覆盖边界见 [流式功能验收](acceptance/streaming-research-process.md)。
+前端 `assistant-markdown.test.ts` 覆盖完成态原文、数学延迟渲染和不安全输入；`process-streams.test.ts` 覆盖重连归并、旧连接隔离与折叠选择；`app-flow.test.ts` 覆盖聊天提交和回答展示。
+
+## 真实链路验收
+
+- 流式界面：使用有延迟分片的模型检查完成前内容可见、过程展开/折叠、Markdown 与公式、向上阅读和窄屏；刷新或断网重连后恢复同一 Run，核对后端工具次数，确认没有重复派发。
+- 容错与恢复：在隔离环境注入模型超时、退避等待和提交回包丢失，检查暂停、Retry-After、停止、原 Run 继续与预算累计；后端进程重启后核查原回执，不能仅以页面恢复或健康探针代替执行结果验证。
+- 真实模型与 ML：分别使用真实 Provider、Python 3.8 GPU Runtime、独立 ML Service/Worker 环境；ML 训练/预测及真实浏览器入口见 [ML 服务说明](../services/materials_ml/README.md#独立服务真实验收)。合成数据、测试模型与独立 GPU 通过结果不能推导真实 Provider 驱动的完整科研流程或科学准确性。
+
+单次验收在对应 Issue 或交付回复中记录版本、环境、实际执行场景、结果与未覆盖项。历史验收可从 Git 历史追溯，不能据此推导当前部署或当前测试结果；默认不为每次验收新增长期报告文件。

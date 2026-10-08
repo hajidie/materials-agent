@@ -20,7 +20,7 @@
 | `services/materials_ml/`、`packages/materials_storage/` | 独立 ML 服务与对象存储引用合同 |
 | `scripts/dev/`、`scripts/acceptance/` | 本地启动与验收脚本 |
 
-业务流程和关键边界见 [架构说明](docs/architecture.md)；流式协议见 [流式展示设计](docs/design/streaming-research-process.md)，已有验收及其限制见 [流式验收记录](docs/acceptance/streaming-research-process.md) 和 [容错验收记录](docs/acceptance/reliability.md)；按改动选择检查项见 [验证指南](docs/testing.md)。
+业务流程、流式协议和关键边界见 [架构说明](docs/architecture.md)；测试入口、验收场景和证据边界见 [验证指南](docs/testing.md)。
 
 ## 本地启动
 
