@@ -11,6 +11,10 @@ param(
     [string]$RuntimePython,
     [string]$MaterialsMlPython,
     [string]$EbsdModelRoot = $env:EBSD_MODEL_ROOT,
+    [switch]$AllFeatures,
+    [switch]$EnableTc4Segmentation,
+    [string]$Tc4Weights = $env:TC4_SEGMENTATION_WEIGHTS,
+    [string]$Tc4RuntimeDataDir = $env:TC4_RUNTIME_DATA_DIR,
     [ValidateRange(10, 900)]
     [int]$ReadyTimeoutSeconds = 300,
     [switch]$LoadFunctionsOnly
@@ -144,8 +148,11 @@ function Get-ConfiguredMaterialsMlEnabled {
     return $values.Values -contains $true
 }
 
-function Get-RootDotenvEbsdModelRoot {
+function Get-RootDotenvModelPath {
     param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('EBSD_MODEL_ROOT', 'TC4_SEGMENTATION_WEIGHTS', 'TC4_RUNTIME_DATA_DIR')]
+        [string]$Name,
         [string]$Path = (Join-Path $RepoRoot '.env')
     )
 
@@ -163,12 +170,12 @@ function Get-RootDotenvEbsdModelRoot {
         if ($separator -le 0) {
             continue
         }
-        $name = $trimmed.Substring(0, $separator).Trim()
-        if ($name -cne 'EBSD_MODEL_ROOT') {
+        $entryName = $trimmed.Substring(0, $separator).Trim()
+        if ($entryName -cne $Name) {
             continue
         }
         if ($seen) {
-            throw 'LOCAL_DEV_CONFIGURATION_INVALID duplicate=EBSD_MODEL_ROOT source=root_dotenv'
+            throw "LOCAL_DEV_CONFIGURATION_INVALID duplicate=$Name source=root_dotenv"
         }
         $seen = $true
         $value = $trimmed.Substring($separator + 1).Trim()
@@ -192,7 +199,7 @@ function Resolve-EbsdModelRoot {
 
     $candidate = $ConfiguredPath
     if ([string]::IsNullOrWhiteSpace($candidate)) {
-        $candidate = Get-RootDotenvEbsdModelRoot -Path $DotenvPath
+        $candidate = Get-RootDotenvModelPath -Name EBSD_MODEL_ROOT -Path $DotenvPath
     }
     if ([string]::IsNullOrWhiteSpace($candidate)) {
         throw 'LOCAL_DEV_CONFIGURATION_MISSING name=EBSD_MODEL_ROOT source=parameter_process_or_root_dotenv'
@@ -216,6 +223,58 @@ function Resolve-EbsdModelRoot {
         throw 'LOCAL_DEV_CONFIGURATION_INVALID name=EBSD_MODEL_ROOT reason=weights_missing'
     }
     return $resolved
+}
+
+function Resolve-Tc4RuntimePaths {
+    param(
+        [string]$Weights,
+        [string]$DataDirectory,
+        [string]$DotenvPath = (Join-Path $RepoRoot '.env')
+    )
+
+    $values = @{
+        TC4_SEGMENTATION_WEIGHTS = $Weights
+        TC4_RUNTIME_DATA_DIR = $DataDirectory
+    }
+    foreach ($name in @('TC4_SEGMENTATION_WEIGHTS', 'TC4_RUNTIME_DATA_DIR')) {
+        $candidate = [string]$values[$name]
+        if ([string]::IsNullOrWhiteSpace($candidate)) {
+            $candidate = Get-RootDotenvModelPath -Name $name -Path $DotenvPath
+        }
+        if ([string]::IsNullOrWhiteSpace($candidate)) {
+            throw "LOCAL_DEV_CONFIGURATION_MISSING name=$name source=parameter_process_or_root_dotenv"
+        }
+        try {
+            $values[$name] = if ([IO.Path]::IsPathRooted($candidate)) {
+                [IO.Path]::GetFullPath($candidate)
+            }
+            else {
+                [IO.Path]::GetFullPath((Join-Path $RepoRoot $candidate))
+            }
+        }
+        catch {
+            throw "LOCAL_DEV_CONFIGURATION_INVALID name=$name reason=invalid_path"
+        }
+    }
+    if (-not (Test-Path -LiteralPath $values.TC4_SEGMENTATION_WEIGHTS -PathType Leaf)) {
+        throw 'LOCAL_DEV_CONFIGURATION_INVALID name=TC4_SEGMENTATION_WEIGHTS reason=file_not_found'
+    }
+    if (Test-Path -LiteralPath $values.TC4_RUNTIME_DATA_DIR -PathType Leaf) {
+        throw 'LOCAL_DEV_CONFIGURATION_INVALID name=TC4_RUNTIME_DATA_DIR reason=not_a_directory'
+    }
+    return $values
+}
+
+function Get-AllFeaturesEnvironment {
+    # Business capabilities only; fault-injection tools and debug routes stay off.
+    return @{
+        ENABLE_TC4_SEGMENTATION = 'true'
+        ENABLE_DEV_MATERIALS_ML_TOOLS = 'true'
+        ENABLE_MATERIALS_ML_RESOURCES = 'true'
+        ENABLE_MATERIALS_ML_RESOURCE_CONTEXT = 'true'
+        ENABLE_DEV_FAKE_SIDE_EFFECT_TOOL = 'false'
+        M5_DEV_ROUTES_ENABLED = 'false'
+    }
 }
 
 function Test-PortInUse {
@@ -256,6 +315,37 @@ function Get-OccupiedPorts {
         if (& $Probe $port) {
             Write-Output $port
         }
+    }
+}
+
+function Get-ReusableComposePorts {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Docker,
+        [scriptblock]$Query
+    )
+
+    if ($null -eq $Query) {
+        $Query = {
+            param($service, $port)
+            if (-not (Test-ComposeServiceRunning -Docker $Docker -Service $service)) { return '' }
+            $output = @(& $Docker @ComposeArguments port $service $port 2>$null)
+            if ($LASTEXITCODE -ne 0) { return '' }
+            return ($output -join '').Trim()
+        }
+    }
+    foreach ($binding in @(
+        @{ service = 'postgresql'; port = 5432 },
+        @{ service = 'minio'; port = 9000 },
+        @{ service = 'minio'; port = 9001 }
+    )) {
+        try {
+            $address = & $Query $binding.service $binding.port
+            if ([string]$address -ceq ('127.0.0.1:{0}' -f $binding.port)) {
+                Write-Output ([int]$binding.port)
+            }
+        }
+        catch { continue }
     }
 }
 
@@ -431,9 +521,17 @@ function New-LaunchProfile {
         [Parameter(Mandatory = $true)]
         [string]$RuntimePython,
         [AllowNull()]
-        [string]$ResolvedEbsdModelRoot
+        [string]$ResolvedEbsdModelRoot,
+        [switch]$AllFeatures,
+        [switch]$EnableTc4Segmentation,
+        [string]$Tc4Weights,
+        [string]$Tc4RuntimeDataDir
     )
 
+    if ($AllFeatures -and ($Runtime -ne 'Real' -or $Llm -ne 'Provider')) {
+        throw 'LOCAL_DEV_CONFIGURATION_INVALID name=ALL_FEATURES reason=real_runtime_and_provider_required'
+    }
+    $EnableTc4Segmentation = $EnableTc4Segmentation -or $AllFeatures
     $backendEnvironment = @{
         APP_ENV = 'local'
         POSTGRES_HOST = '127.0.0.1'
@@ -446,6 +544,14 @@ function New-LaunchProfile {
         ZTA35G_RUNTIME_TIMEOUT_SECONDS = '1200'
         ZTA35G_RUNTIME_TOKEN = $RuntimeToken
         EBSD_MODEL_ROOT = $null
+        ENABLE_TC4_SEGMENTATION = $(if ($EnableTc4Segmentation) { 'true' } else { 'false' })
+        TC4_SEGMENTATION_WEIGHTS = $null
+        TC4_RUNTIME_DATA_DIR = $null
+    }
+    if ($AllFeatures) {
+        foreach ($entry in (Get-AllFeaturesEnvironment).GetEnumerator()) {
+            $backendEnvironment[$entry.Key] = $entry.Value
+        }
     }
     if ($Llm -eq 'Mock') {
         $backendEnvironment['DEEPSEEK_API_KEY'] = ''
@@ -477,7 +583,14 @@ function New-LaunchProfile {
     if ($Runtime -eq 'Real' -and [string]::IsNullOrWhiteSpace($ResolvedEbsdModelRoot)) {
         throw 'LOCAL_DEV_CONFIGURATION_MISSING name=EBSD_MODEL_ROOT source=launch_profile'
     }
+    if ($EnableTc4Segmentation -and ($Runtime -ne 'Real' -or [string]::IsNullOrWhiteSpace($Tc4Weights) -or
+            -not (Test-Path -LiteralPath $Tc4Weights -PathType Leaf) -or [string]::IsNullOrWhiteSpace($Tc4RuntimeDataDir))) {
+        throw 'LOCAL_DEV_CONFIGURATION_INVALID name=TC4_SEGMENTATION reason=real_weights_and_receipt_directory_required'
+    }
     $runtimeEnvironment = @{
+        TC4_SEGMENTATION_WEIGHTS = $(if ($EnableTc4Segmentation) { [IO.Path]::GetFullPath($Tc4Weights) } else { $null })
+        TC4_RUNTIME_DATA_DIR = $(if ($EnableTc4Segmentation) { [IO.Path]::GetFullPath($Tc4RuntimeDataDir) } else { $null })
+        ENABLE_TC4_SEGMENTATION = $null
         ZTA35G_RUNTIME_PORT = '8100'
         PYTHONPATH = $runtimeSource
         ZTA35G_RUNTIME_TOKEN = $RuntimeToken
@@ -519,6 +632,9 @@ function New-LaunchProfile {
         backend_working_directory = $RepoRoot
         backend_environment = $backendEnvironment
         frontend_environment = @{
+            TC4_SEGMENTATION_WEIGHTS = $null
+            TC4_RUNTIME_DATA_DIR = $null
+            ENABLE_TC4_SEGMENTATION = $null
             MATERIALSAGENT_BACKEND_ORIGIN = 'http://127.0.0.1:8000'
             DEEPSEEK_API_KEY = $null
             DASHSCOPE_API_KEY = $null
@@ -531,6 +647,9 @@ function New-LaunchProfile {
             TIMELINE_CURSOR_SIGNING_KEY = $null
         }
         compose_environment = @{
+            TC4_SEGMENTATION_WEIGHTS = $null
+            TC4_RUNTIME_DATA_DIR = $null
+            ENABLE_TC4_SEGMENTATION = $null
             POSTGRES_PORT = '5432'
             MINIO_API_PORT = '9000'
             MINIO_CONSOLE_PORT = '9001'
@@ -1389,6 +1508,24 @@ function Invoke-RuntimeReadyViaBackendProbe {
     }
 }
 
+function Invoke-MaterialsMlCapabilitiesReadyProbe {
+    param([scriptblock]$Request)
+
+    if ($null -eq $Request) {
+        $Request = {
+            Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8000/api/v1/capabilities' -TimeoutSec 4
+        }
+    }
+    try {
+        $response = & $Request
+        if ([int]$response.StatusCode -ne 200) { return $false }
+        $data = ([string]$response.Content | ConvertFrom-Json).data
+        return ($data.ml_resources -eq $true -and $data.ml_context -eq $true -and
+            $data.ml_tools -eq $true -and $data.coordination -eq $true)
+    }
+    catch { return $false }
+}
+
 function Invoke-BackendReadyProbe {
     try {
         $live = Invoke-WebRequest `
@@ -1826,6 +1963,8 @@ function Invoke-LocalDevStart {
     $runRelative = "tmp/local-dev/$runId"
     $materialsMlEnabled = $false
     $resolvedEbsdModelRoot = $null
+    $tc4Enabled = $EnableTc4Segmentation -or $AllFeatures
+    $tc4Paths = @{ TC4_SEGMENTATION_WEIGHTS = $Tc4Weights; TC4_RUNTIME_DATA_DIR = $Tc4RuntimeDataDir }
     $runtimeToolIds = @(
         'materials_unit_conversion',
         'zta35g_sem_virtual_lab'
@@ -1833,10 +1972,19 @@ function Invoke-LocalDevStart {
     if ($Runtime -eq 'Real') {
         $runtimeToolIds += 'ebsd_yield_strength_predictor'
     }
+    if ($tc4Enabled) {
+        $runtimeToolIds += 'tc4_primary_alpha_segmentation'
+    }
 
     try {
         $currentStage = 'feature_preflight'
-        $materialsMlEnabled = Get-ConfiguredMaterialsMlEnabled
+        if ($AllFeatures -and ($Runtime -ne 'Real' -or $Llm -ne 'Provider')) {
+            throw 'LOCAL_DEV_CONFIGURATION_INVALID name=ALL_FEATURES reason=real_runtime_and_provider_required'
+        }
+        $materialsMlEnabled = $AllFeatures -or (Get-ConfiguredMaterialsMlEnabled)
+        if ($tc4Enabled) {
+            $tc4Paths = Resolve-Tc4RuntimePaths -Weights $Tc4Weights -DataDirectory $Tc4RuntimeDataDir
+        }
         if ($materialsMlEnabled) {
             $runtimeToolIds += @(
                 'materials_ml_analyze_tabular_dataset',
@@ -1880,7 +2028,8 @@ function Invoke-LocalDevStart {
                 }
                 $backendReady = Invoke-BackendReadyProbe
                 $runtimeReady = $(if ($backendReady) {
-                    Invoke-RuntimeReadyViaBackendProbe -ToolIds $runtimeToolIds
+                    (Invoke-RuntimeReadyViaBackendProbe -ToolIds $runtimeToolIds) -and
+                        (-not $AllFeatures -or (Invoke-MaterialsMlCapabilitiesReadyProbe))
                 }
                 else {
                     $false
@@ -1926,6 +2075,12 @@ function Invoke-LocalDevStart {
                 -Ports @(Get-RequiredPorts -MaterialsMlEnabled $materialsMlEnabled) |
                 Sort-Object
         )
+        if (@($occupied | Where-Object { $_ -in @(5432, 9000, 9001) }).Count -gt 0) {
+            $dockerIdentity = Get-DockerIdentity
+            $docker = $dockerIdentity.executable
+            $reusable = @(Get-ReusableComposePorts -Docker $docker)
+            $occupied = @($occupied | Where-Object { $reusable -notcontains $_ })
+        }
         if ($occupied.Count -gt 0) {
             Write-Output ('LOCAL_DEV_PORT_CONFLICT ports={0} no_action_taken=true' -f ($occupied -join ','))
             return 3
@@ -1988,6 +2143,11 @@ function Invoke-LocalDevStart {
                     (Join-Path $RepoRoot 'packages\materials_storage\src')
                 ) -join [IO.Path]::PathSeparator
             }
+            if ($AllFeatures) {
+                foreach ($entry in (Get-AllFeaturesEnvironment).GetEnumerator()) {
+                    $probeEnvironment[$entry.Key] = $entry.Value
+                }
+            }
             foreach ($name in @(
                 'ML_DATABASE_URL', 'ML_MINIO_ENDPOINT', 'ML_MINIO_BUCKET',
                 'ML_MINIO_ACCESS_KEY', 'ML_MINIO_SECRET_KEY', 'ML_MINIO_SECURE',
@@ -2034,7 +2194,11 @@ function Invoke-LocalDevStart {
             -RuntimeToken $runtimeToken `
             -BackendPython $backendPythonPath `
             -RuntimePython $runtimePythonPath `
-            -ResolvedEbsdModelRoot $resolvedEbsdModelRoot
+            -ResolvedEbsdModelRoot $resolvedEbsdModelRoot `
+            -AllFeatures:$AllFeatures `
+            -EnableTc4Segmentation:$tc4Enabled `
+            -Tc4Weights $tc4Paths.TC4_SEGMENTATION_WEIGHTS `
+            -Tc4RuntimeDataDir $tc4Paths.TC4_RUNTIME_DATA_DIR
         $dockerIdentity = Get-DockerIdentity
         $docker = $dockerIdentity.executable
 
@@ -2155,7 +2319,10 @@ function Invoke-LocalDevStart {
         $currentStage = 'runtime_tools_ready'
         Wait-ForReady `
             -Name RuntimeTools `
-            -Probe { Invoke-RuntimeReadyViaBackendProbe -ToolIds $runtimeToolIds } `
+            -Probe {
+                (Invoke-RuntimeReadyViaBackendProbe -ToolIds $runtimeToolIds) -and
+                    (-not $AllFeatures -or (Invoke-MaterialsMlCapabilitiesReadyProbe))
+            } `
             -ProcessRecord $backendRecord `
             -TimeoutSeconds ([Math]::Min($ReadyTimeoutSeconds, 120))
 

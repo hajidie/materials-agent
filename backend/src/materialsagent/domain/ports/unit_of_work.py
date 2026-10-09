@@ -301,6 +301,15 @@ class ConversationLifecycleRepository(Protocol):
     ) -> list[Asset]: ...
 
 
+class ToolRunItemRepository(Protocol):
+    def list_for_tool_run(self, tool_run_id: str) -> list: ...
+    def add(self, item) -> None: ...
+    def update(self, item, *, expected_version: int): ...
+    def queue_cleanup(self, actor_id: str, conversation_id: str) -> None: ...
+    def pending_cleanup(self, limit: int) -> list: ...
+    def complete_cleanup(self, request_id: str) -> None: ...
+
+
 class UnitOfWork(Protocol):
     actors: ActorRepository
     conversations: ConversationRepository
@@ -308,6 +317,7 @@ class UnitOfWork(Protocol):
     tasks: TaskRepository
     task_input_revisions: TaskInputRevisionRepository
     tool_runs: ToolRunRepository
+    tool_run_items: ToolRunItemRepository
     invocation_runs: InvocationRunRepository
     invocation_results: InvocationResultRepository
     assets: AssetRepository

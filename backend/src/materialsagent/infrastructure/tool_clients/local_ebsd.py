@@ -36,6 +36,12 @@ class LocalEBSDToolClientAdapter(LocalZTA35GToolClientAdapter):
             asset = require_asset(self.asset_service, actor, request_context.conversation_id,
                 validated_input.input_assets["ebsd_asset_id"])
             image = self.asset_service.get_content(actor, asset.asset_id)
+            from io import BytesIO
+            from PIL import Image
+            with Image.open(BytesIO(image.payload)) as decoded:
+                if decoded.mode != "RGB" or decoded.width != decoded.height:
+                    raise ToolClientRuntimeError(code="INVALID_RUNTIME_REQUEST",
+                        safe_message="EBSD 需要正方形 RGB 图片，请重新上传。", retryable=False)
         except ApplicationError:
             raise ToolClientRuntimeError(code="EBSD_INPUT_UNAVAILABLE", safe_message="EBSD 输入图片不可用，请重新上传。", retryable=False) from None
         request = {"request_id": request_context.request_id, "task_id": request_context.task_id,

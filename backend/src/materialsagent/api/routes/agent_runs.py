@@ -47,6 +47,7 @@ class AgentRunView(BaseModel):
     recovery_action: Literal["CONTINUE", "RECONCILE", "FIX_CONFIGURATION", "NONE"] = "NONE"
     attachments: list[dict]
     result_attachments: list[dict]
+    segmentation_items: list[dict] = Field(default_factory=list)
     created_at: str
 
 
@@ -73,7 +74,7 @@ class ReplyTo(BaseModel):
 class Submission(BaseModel):
     model_config = ConfigDict(extra="forbid")
     content_text: str = Field(min_length=1, max_length=32768)
-    attachments: list[Attachment] = Field(default_factory=list, max_length=1)
+    attachments: list[Attachment] = Field(default_factory=list, max_length=10)
     reply_to: ReplyTo | None = None
 
     @model_validator(mode="after")
@@ -165,6 +166,13 @@ def public(run: AgentRun):
     if run.error_code == "TOOL_EXECUTION_FAILED" and any(o.kind == "TOOL_RESULT" and o.status == "FAILED" for o in run.observations):
         # The projected failed result already explains this same failure.
         value["error_message"] = None
+    value["segmentation_items"] = run.segmentation_items
+    if run.status == "INTERRUPTED" and run.pending_execution and run.pending_execution.tool_name == "tc4_primary_alpha_segmentation":
+        value["recovery_action"] = "CONTINUE"
+        value["can_resume"] = run.active_seconds < run.budget.max_active_seconds and run.llm_tokens < run.budget.max_llm_tokens
+        if run.segmentation_items and not any(item["status"] in {"DISPATCHED", "OUTCOME_UNKNOWN"} for item in run.segmentation_items):
+            value["outcome_unknown"] = False
+            value["error_message"] = "本批图片处理已暂停，已完成结果仍保留。可以继续处理。"
     return value
 
 
@@ -400,7 +408,13 @@ async def reconcile_receipt(run_id: str, invocation_id: str, request: Request,
                   if r.invocation_run_id == invocation_id)
     if run.pending_execution and run.pending_execution.invocation_run_id == invocation_id:
         from materialsagent.application.reliability import unknown_observation
-        observation = await asyncio.to_thread(runtime.tools.repair, run, record)
+        if (run.status == "TERMINATED" and run.error_code == "USER_STOPPED"
+                and record.tool_name == "tc4_primary_alpha_segmentation" and run.segmentation_items):
+            # Explicit receipt reconciliation may save the already-dispatched
+            # image. The persisted stop prevents dispatching any remaining item.
+            observation = await asyncio.to_thread(runtime.tools.continue_batch, run, record, 60)
+        else:
+            observation = await asyncio.to_thread(runtime.tools.repair, run, record)
         if not unknown_observation(observation):
             run = await asyncio.to_thread(runtime.store.receipt, run_id, actor.actor_id, record, observation)
             await runtime.process.tools(run)

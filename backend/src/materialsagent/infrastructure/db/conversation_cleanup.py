@@ -231,7 +231,13 @@ class SQLAlchemyConversationLifecycleRepository:
             ).all()
 
             unsafe_task_ids: set[str] = set()
+            # TC4 owns durable per-image request identities and resumes by
+            # reconciling them. Preserve its parent and pending asset objects.
+            resumable_tc4 = {run.tool_run_id for run in runs
+                if run.tool_id == "tc4_primary_alpha_segmentation" and run.current_status in {"PENDING", "RUNNING"}}
             for run in runs:
+                if run.tool_run_id in resumable_tc4:
+                    continue
                 if run.created_at >= process_cutoff or run.current_status not in {"PENDING", "RUNNING"}:
                     continue
                 run.current_status = "FAILED"
@@ -246,6 +252,8 @@ class SQLAlchemyConversationLifecycleRepository:
                 unsafe_task_ids.add(run.task_id)
 
             for asset in assets:
+                if asset.producer_tool_run_id in resumable_tc4:
+                    continue
                 if asset.created_at >= process_cutoff or asset.current_status != "PENDING":
                     continue
                 asset.current_status = "ORPHANED"

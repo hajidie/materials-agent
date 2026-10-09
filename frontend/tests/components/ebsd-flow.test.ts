@@ -120,5 +120,5 @@ it("isolates an uncertain upload from another conversation and preserves its rec
   expect(uploads).toHaveLength(1);
   expect(wrapper.get(".composer__attachment img").attributes("alt")).toBe("ebsd.png");
   await wrapper.get('[aria-label="移除附件"]').trigger("click");
-  expect(JSON.parse(sessionStorage.getItem("materials-agent.pending-upload.v2")!)["other:new"].key).toBe("unknown-upload");
+  expect(JSON.parse(sessionStorage.getItem("materials-agent.pending-upload.v3")!)["unknown-upload"].context).toBe("other:new");
 });

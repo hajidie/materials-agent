@@ -38,7 +38,7 @@ class ToolRunRow(Base):
         CheckConstraint("cardinality(requested_outputs) > 0", name="ck_tool_run_requested_outputs_nonempty"),
         CheckConstraint("completed_outputs <@ requested_outputs", name="ck_tool_run_completed_subset"),
         CheckConstraint("failed_outputs <@ requested_outputs", name="ck_tool_run_failed_subset"),
-        CheckConstraint("NOT (completed_outputs && failed_outputs)", name="ck_tool_run_output_sets_disjoint"),
+        CheckConstraint("tool_id = 'tc4_primary_alpha_segmentation' OR NOT (completed_outputs && failed_outputs)", name="ck_tool_run_output_sets_disjoint"),
         CheckConstraint("jsonb_typeof(execution_input) = 'object'", name="ck_tool_run_execution_input_object"),
         CheckConstraint("jsonb_typeof(normalized_input_snapshot) = 'object'", name="ck_tool_run_normalized_input_snapshot_object"),
         CheckConstraint("execution_policy_snapshot IN ('ANY_TASK', 'EXISTING_TASK_ONLY', 'NONE')", name="ck_tool_run_execution_policy_snapshot_allowed"),

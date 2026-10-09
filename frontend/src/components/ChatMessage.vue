@@ -6,12 +6,14 @@ import MessageAttachment from "./MessageAttachment.vue";
 import MessageActionBar from "./MessageActionBar.vue";
 import AssistantMarkdown from "./AssistantMarkdown.vue";
 import ResearchProcess from "./ResearchProcess.vue";
-import type { ProcessSnapshot } from "../api/agent";
-const props = defineProps<{ message: ChatMessage; conversationId: string; disabled: boolean; process?: ProcessSnapshot | undefined; showProcess?: boolean }>();
+import type { ProcessSnapshot, SegmentationItem } from "../api/agent";
+import SegmentationBatch from "./SegmentationBatch.vue";
+const props = defineProps<{ message: ChatMessage; conversationId: string; disabled: boolean; process?: ProcessSnapshot | undefined; showProcess?: boolean; segmentationItems?: SegmentationItem[] | undefined }>();
 defineEmits<{ regenerate: [message: ChatMessage]; artifact: [value: { message: string; attachment: Attachment }] }>();
 const selected = ref<ChatMessage | null>(null), loading = ref(false), error = ref("");
 const versions = ref<ChatMessage[]>([]);
 const displayed = computed(() => selected.value ?? props.message);
+const groupedIds = computed(() => new Set((props.segmentationItems ?? []).flatMap(item => Object.values(item.artifacts))));
 watch(() => props.message.message_id, () => { selected.value = null; versions.value = []; });
 async function switchVersion(delta: number) {
   if (loading.value) return;
@@ -37,10 +39,11 @@ async function switchVersion(delta: number) {
     <AssistantMarkdown v-if="displayed.role === 'ASSISTANT'" :text="displayed.text" />
     <p v-else class="agent-answer">{{ displayed.text }}</p>
     <div class="message-attachments">
-      <MessageAttachment v-for="attachment in [...displayed.attachments, ...displayed.artifacts]" :key="attachment.attachment_id"
+      <MessageAttachment v-for="attachment in [...displayed.attachments, ...displayed.artifacts.filter(a => !groupedIds.has(a.attachment_id))]" :key="attachment.attachment_id"
         :conversation-id="conversationId" :message-id="displayed.message_id" :attachment="attachment"
         @open="$emit('artifact', { message: displayed.message_id, attachment })" />
     </div>
+    <SegmentationBatch v-if="segmentationItems?.length" :items="segmentationItems" :message="displayed.message_id" @artifact="$emit('artifact', $event)" />
     <div v-if="message.role === 'ASSISTANT'" class="message-footer">
       <MessageActionBar :text="displayed.text" :can-regenerate="displayed.phase === 'answer'" :disabled="disabled"
         @regenerate="$emit('regenerate', displayed)" />

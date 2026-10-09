@@ -102,7 +102,7 @@ def _freeze_safe_json(value: object, field_name: str, depth: int = 0) -> object:
     raise ValueError(f"{field_name} must contain safe JSON values.")
 
 
-def _safe_json_size(value: object, field_name: str) -> None:
+def _safe_json_size(value: object, field_name: str, max_bytes=MAX_SAFE_JSON_BYTES) -> None:
     def plain_json(item: object) -> object:
         if isinstance(item, Mapping):
             return {
@@ -125,16 +125,16 @@ def _safe_json_size(value: object, field_name: str) -> None:
         raise ValueError(
             f"{field_name} must contain safe JSON values."
         ) from None
-    if len(encoded) > MAX_SAFE_JSON_BYTES:
+    if len(encoded) > max_bytes:
         raise ValueError(f"{field_name} exceeds the safe size limit.")
 
 
-def _freeze_json_object(value: object, field_name: str) -> Mapping[str, object]:
+def _freeze_json_object(value: object, field_name: str, max_bytes=MAX_SAFE_JSON_BYTES) -> Mapping[str, object]:
     if type(value) is not dict:
         raise ValueError(f"{field_name} must be a JSON object.")
     frozen = _freeze_safe_json(value, field_name)
     assert isinstance(frozen, Mapping)
-    _safe_json_size(frozen, field_name)
+    _safe_json_size(frozen, field_name, max_bytes)
     return frozen
 
 
@@ -242,7 +242,8 @@ class ToolResult:
             "failed_outputs",
             requested_outputs,
         )
-        if set(completed_outputs) & set(failed_outputs):
+        from .tc4 import TOOL_ID, validate_batch
+        if self.tool_id != TOOL_ID and set(completed_outputs) & set(failed_outputs):
             raise ValueError("completed_outputs and failed_outputs must be disjoint.")
         if set(completed_outputs) | set(failed_outputs) != set(requested_outputs):
             raise ValueError("terminal ToolResult outputs must cover all requested outputs.")
@@ -253,9 +254,11 @@ class ToolResult:
             if completed_outputs
             else FAILED
         )
-        if self.status != expected_status:
+        if self.tool_id == TOOL_ID:
+            validate_batch(self.data, self.status)
+        elif self.status != expected_status:
             raise ValueError("status must match completed and failed outputs.")
-        data = _freeze_json_object(self.data, "data")
+        data = _freeze_json_object(self.data, "data", 16384 if self.tool_id == TOOL_ID else MAX_SAFE_JSON_BYTES)
         warnings = _freeze_json_array(self.warnings, "warnings")
         provenance = _freeze_json_object(self.provenance, "provenance")
         error = None if self.error is None else _freeze_json_object(self.error, "error")

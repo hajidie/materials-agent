@@ -75,7 +75,7 @@ class ToolResultRow(Base):
         CheckConstraint(
             "completed_outputs <@ requested_outputs "
             "AND failed_outputs <@ requested_outputs "
-            "AND NOT (completed_outputs && failed_outputs) "
+            "AND (tool_id = 'tc4_primary_alpha_segmentation' OR NOT (completed_outputs && failed_outputs)) "
             "AND requested_outputs <@ (completed_outputs || failed_outputs)",
             name="ck_tool_result_output_sets",
         ),

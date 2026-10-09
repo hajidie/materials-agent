@@ -182,6 +182,14 @@ class _RuntimeRequestHandler(BaseHTTPRequestHandler):
         # type: () -> None
         if not self._authorized():
             return
+        if self.path == "/internal/v1/tc4/health/ready":
+            from .tc4 import ready
+            ready(self)
+            return
+        if self.path.startswith("/internal/v1/tc4/receipts/"):
+            from .tc4 import get
+            get(self)
+            return
         if self.path == "/internal/v1/ebsd/health/ready":
             from .ebsd import ready
             ready(self)
@@ -207,8 +215,16 @@ class _RuntimeRequestHandler(BaseHTTPRequestHandler):
         # type: () -> None
         if not self._authorized():
             return
+        if self.path == "/internal/v1/tc4/cleanup":
+            from .tc4 import cleanup
+            cleanup(self)
+            return
         if self.path == "/internal/v1/ebsd/execute":
             from .ebsd import execute
+            execute(self)
+            return
+        if self.path == "/internal/v1/tc4/execute":
+            from .tc4 import execute
             execute(self)
             return
         if self.path != "/internal/v1/execute":
@@ -600,6 +616,20 @@ def create_runtime_server(
         except Exception:
             ebsd_engine.close()
             _log_event("ebsd_model_load_failed", status="FAILED", error_code="MODEL_LOAD_FAILED")
+    server.tc4_engine = None
+    server.tc4_receipts = None
+    if settings.tc4_segmentation_weights is not None:
+        from .tc4 import TC4Engine, ReceiptStore
+        tc4_engine = TC4Engine(settings.tc4_segmentation_weights)
+        try:
+            if settings.tc4_data_dir is None:
+                raise ValueError("TC4_RUNTIME_DATA_DIR is required.")
+            server.tc4_receipts = ReceiptStore(settings.tc4_data_dir)
+            tc4_engine.load()
+            server.tc4_engine = tc4_engine
+        except Exception:
+            tc4_engine.close()
+            _log_event("tc4_model_load_failed", status="FAILED", error_code="MODEL_LOAD_FAILED")
     return server
 
 
@@ -626,6 +656,8 @@ def close_runtime_server(server):
         )
         try:
             with state.execution_lock:
+                if getattr(server, "tc4_engine", None) is not None:
+                    server.tc4_engine.close()
                 if getattr(server, "ebsd_engine", None) is not None:
                     server.ebsd_engine.close()
                 if not state.engine_closed:

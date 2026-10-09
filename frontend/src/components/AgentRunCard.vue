@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import ResultPresentation from "./ResultPresentation.vue";
 import ResearchProcess from "./ResearchProcess.vue";
+import SegmentationBatch from "./SegmentationBatch.vue";
 import { toolLabel } from "../api/agent";
 import type { AgentRun, ProcessSnapshot } from "../api/agent";
 import type { Attachment } from "../api/artifacts";
@@ -26,6 +27,7 @@ function valueText(value: unknown): string {
   <article class="chat-turn">
     <section class="chat-assistant" aria-label="助手回复">
       <ResearchProcess :run-id="run.agent_run_id" :snapshot="process" :active="['PENDING', 'RUNNING'].includes(run.status)" show-current :reconnecting="reconnecting" />
+      <SegmentationBatch v-if="run.segmentation_items?.length" :items="run.segmentation_items" :message="run.source_message_id" @artifact="$emit('artifact', $event)" />
       <p v-if="run.status === 'RUNNING' || run.status === 'PENDING'" class="muted" role="status">{{ run.pending_execution?.status === "RUNNING" ? `正在执行${toolLabel(run.pending_execution.tool_name)}…` : "正在处理你的请求…" }}</p>
       <section v-if="run.status === 'WAITING_FOR_CONFIRMATION' && run.pending_execution" class="chat-confirmation">
         <p>将执行{{ toolLabel(run.pending_execution.tool_name) }}，请确认以下内容。</p>

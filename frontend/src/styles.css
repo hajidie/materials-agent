@@ -1562,3 +1562,14 @@ a {
 .research-process__step { border-left: 2px solid #dedfd8; padding-left: 12px; margin: 12px 0; font-size: 13px; }
 .research-process__label { color: #73776e; font-size: 12px; margin-bottom: 6px; }
 .research-process__current { margin-top: 18px; }
+/* Multi-image segmentation remains inside the chat turn. */
+.segmentation-batch { margin-block: 1rem; }
+.segmentation-batch__table { overflow-x: auto; }
+.segmentation-batch table { width: 100%; border-collapse: collapse; }
+.segmentation-batch th, .segmentation-batch td { padding: .5rem; text-align: left; border-bottom: 1px solid var(--border, #ddd); }
+.segmentation-batch th:not(:first-child), .segmentation-batch td:not(:first-child) { white-space: nowrap; word-break: normal; }
+.segmentation-batch__item { margin-block: 1rem; }
+.segmentation-batch__images { display: flex; flex-wrap: wrap; gap: .75rem; }
+.segmentation-batch__image { max-width: min(240px, 100%); border: 1px solid var(--border, #ddd); border-radius: .5rem; padding: .5rem; background: transparent; cursor: pointer; }
+.segmentation-batch__image img { max-width: 100%; height: auto; }
+.composer__upload-state { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; padding: .25rem; }

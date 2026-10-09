@@ -25,6 +25,8 @@ def build_tool_registry(
     client: ToolClientPort | None = None,
     *,
     ebsd_client: ToolClientPort | None = None,
+    tc4_client: ToolClientPort | None = None,
+    enable_tc4_segmentation: bool = False,
     enable_dev_fake_side_effect_tool: bool = False,
     fake_side_effect_sink: FakeSideEffectSink | None = None,
     ml_registrations: tuple[RegisteredTool, ...] = (),
@@ -41,6 +43,9 @@ def build_tool_registry(
                 fake_side_effect_sink or FakeSideEffectSink()
             )
         )
+    if enable_tc4_segmentation:
+        from materialsagent.application.tc4_tool import build_tc4_tool
+        registrations.append(build_tc4_tool(tc4_client))
     return ToolRegistry(tuple(registrations) + ml_registrations)
 
 

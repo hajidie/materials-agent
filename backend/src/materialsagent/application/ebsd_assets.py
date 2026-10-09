@@ -1,4 +1,4 @@
-"""Lifecycle operations limited to user-uploaded EBSD images."""
+"""Lifecycle operations for uploaded images, including historical EBSD images."""
 from contextlib import contextmanager
 from dataclasses import replace
 from threading import Lock
@@ -46,13 +46,21 @@ def inspect_image(payload):
         if not payload or len(payload) > MAX_IMAGE_BYTES:
             raise ValueError()
         with Image.open(BytesIO(payload)) as image:
-            if (image.format not in {"PNG", "JPEG"} or image.mode != "RGB" or getattr(image, "n_frames", 1) != 1
-                    or image.width != image.height or not 128 <= image.width <= 4096):
+            if (image.format not in {"PNG", "JPEG"} or image.mode not in {"RGB", "L", "RGBA"} or getattr(image, "n_frames", 1) != 1
+                    or not (128 <= image.width <= 4096 and 128 <= image.height <= 4096)):
+                raise ValueError()
+            # Pillow exposes 16-bit RGB PNGs as RGB, so validate the encoded IHDR.
+            if image.format == "PNG" and (payload[8:16] != b"\x00\x00\x00\rIHDR" or payload[24] != 8):
                 raise ValueError()
             image.load()
-            return ("image/png" if image.format == "PNG" else "image/jpeg", image.width)
+            if ((image.mode == "RGBA" or "transparency" in image.info)
+                    and image.convert("RGBA").getchannel("A").getextrema() != (255, 255)):
+                raise ApplicationValidationError("图片含透明或半透明像素，请先导出为无透明区域的 RGB 或灰度 PNG/JPEG 图片。")
+            return ("image/png" if image.format == "PNG" else "image/jpeg", image.width, image.height)
+    except ApplicationValidationError:
+        raise
     except Exception:
-        raise ApplicationValidationError("请上传不超过 10 MiB、边长 128–4096 像素的正方形 RGB PNG/JPEG 图片。") from None
+        raise ApplicationValidationError("请上传不超过 10 MiB、宽高均为 128–4096 像素的 8 位灰度或 RGB PNG/JPEG 图片。") from None
 
 
 def identity(asset):
@@ -65,7 +73,7 @@ def upload(service, actor, conversation_id, payload, key):
 
 
 def _upload(service, actor, conversation_id, payload, key):
-    media_type, width = inspect_image(payload)
+    media_type, width, height = inspect_image(payload)
     digest = sha256(payload).hexdigest()
     # A stable ID makes network replay safe without storing bytes in idempotency records.
     operation = sha256((actor.actor_id + "\0" + conversation_id + "\0" + key).encode()).hexdigest()
@@ -89,7 +97,7 @@ def _upload(service, actor, conversation_id, payload, key):
         else:
             pending = Asset(asset_id=asset_id, task_id=None, producer_tool_run_id=None,
                 conversation_id=conversation_id, actor_id=actor.actor_id, operation_id="ebsd_" + operation + "_" + digest,
-                current_status="PENDING", asset_type="ebsd_image", source_type="UPLOADED", role="supporting",
+                current_status="PENDING", asset_type="image", source_type="UPLOADED", role="supporting",
                 object_key=f"assets/{service._environment}/{asset_id}.{'png' if media_type == 'image/png' else 'jpg'}",
                 media_type=None, width=None, height=None, bit_depth=None, sha256=None, size_bytes=None,
                 encoding_rule=None, pending_since=timestamp, created_at=timestamp, available_at=None,
@@ -119,7 +127,7 @@ def _upload(service, actor, conversation_id, payload, key):
         if current.current_status != "PENDING":
             raise ApplicationConflictError()
         available = replace(current, current_status="AVAILABLE", media_type=media_type,
-            width=width, height=width, bit_depth=8, sha256=digest, size_bytes=len(payload),
+            width=width, height=height, bit_depth=8, sha256=digest, size_bytes=len(payload),
             encoding_rule="ebsd-rgb-original-v1", available_at=service._clock())
         if uow.assets.update(available, expected_status="PENDING") is None:
             raise ApplicationConflictError()
@@ -129,7 +137,7 @@ def _upload(service, actor, conversation_id, payload, key):
 
 def require_asset(service, actor, conversation_id, asset_id):
     asset = service.get(actor, asset_id)
-    if (asset.asset_type != "ebsd_image" or asset.source_type != "UPLOADED"
+    if (asset.asset_type not in {"image", "ebsd_image"} or asset.source_type != "UPLOADED"
             or asset.conversation_id != conversation_id or asset.current_status != "AVAILABLE"):
         raise ResourceNotFoundError()
     return asset
@@ -138,7 +146,7 @@ def require_asset(service, actor, conversation_id, asset_id):
 def reconcile_upload(service, actor, conversation_id, asset_id):
     """Read the original object; never upload again after an uncertain response."""
     asset = service.get(actor, asset_id)
-    if asset.conversation_id != conversation_id or asset.source_type != "UPLOADED" or asset.asset_type != "ebsd_image":
+    if asset.conversation_id != conversation_id or asset.source_type != "UPLOADED" or asset.asset_type not in {"image", "ebsd_image"}:
         raise ResourceNotFoundError()
     if asset.current_status != "PENDING":
         return asset
@@ -149,7 +157,7 @@ def reconcile_upload(service, actor, conversation_id, asset_id):
     payload = service._storage.get(asset.object_key, max_bytes=MAX_IMAGE_BYTES)
     if sha256(payload).hexdigest() != expected_hash:
         raise ApplicationConflictError()
-    media_type, width = inspect_image(payload)
+    media_type, width, height = inspect_image(payload)
     with service._unit_of_work_factory() as uow:
         conversation = uow.conversations.get_owned_for_update(conversation_id, actor.actor_id)
         if conversation is None or conversation.deletion_fence_operation_id is not None:
@@ -159,7 +167,7 @@ def reconcile_upload(service, actor, conversation_id, asset_id):
             raise ResourceNotFoundError()
         if current.current_status != "PENDING":
             return current
-        available = replace(current, current_status="AVAILABLE", media_type=media_type, width=width, height=width,
+        available = replace(current, current_status="AVAILABLE", media_type=media_type, width=width, height=height,
             bit_depth=8, sha256=expected_hash, size_bytes=len(payload), encoding_rule="ebsd-rgb-original-v1", available_at=service._clock())
         if uow.assets.update(available, expected_status="PENDING") is None:
             raise ApplicationConflictError()
@@ -179,7 +187,7 @@ def content(service, asset):
         raise DependencyUnavailableError() from None
     if len(payload) != asset.size_bytes or sha256(payload).hexdigest() != asset.sha256:
         raise ApplicationConflictError()
-    media_type, width = inspect_image(payload)
-    if media_type != asset.media_type or width != asset.width:
+    media_type, width, height = inspect_image(payload)
+    if media_type != asset.media_type or (width, height) != (asset.width, asset.height):
         raise ApplicationConflictError()
     return AssetContent(payload, media_type, asset.asset_id + (".png" if media_type == "image/png" else ".jpg"))

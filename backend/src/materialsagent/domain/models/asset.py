@@ -92,6 +92,10 @@ class Asset:
     storage_bucket: str | None = None
     storage_namespace: str | None = None
     conversation_id: str | None = None
+    producer_tool_run_item_id: str | None = None
+    input_asset_id: str | None = None
+    model_version: str | None = None
+    preprocessing_version: str | None = None
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -116,12 +120,12 @@ class Asset:
             self.storage_bucket is None or self.storage_namespace is None
         ):
             raise ValueError("METADATA_V1 requires persisted storage identity.")
-        if self.asset_type == "ebsd_image" and self.source_type == "UPLOADED":
+        if self.asset_type in {"image", "ebsd_image"} and self.source_type == "UPLOADED":
             _require_text(self.conversation_id, "conversation_id")
             if self.task_id is not None or self.producer_tool_run_id is not None or self.role != "supporting":
                 raise ValueError("Uploaded EBSD assets cannot have a producer.")
         else:
-            if self.asset_type != "sem_image" or self.source_type != "GENERATED" or self.conversation_id is not None:
+            if self.asset_type not in {"sem_image", "image"} or self.source_type != "GENERATED" or self.conversation_id is not None:
                 raise ValueError("Only generated SEM or uploaded EBSD assets are supported.")
             _require_text(self.task_id, "task_id")
             _require_text(self.producer_tool_run_id, "producer_tool_run_id")

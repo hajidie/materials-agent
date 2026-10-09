@@ -53,13 +53,13 @@ async def upload_attachment(conversation_id: str, request: Request,
     if len(payload) > 10 * 1024**2:
         raise HTTPException(413, detail="ATTACHMENT_TOO_LARGE")
     asset = await run_in_threadpool(upload, get_asset_service(request), actor, conversation_id, payload, key)
-    return {"data": receipt("ebsd_image", name, asset.asset_id)}
+    return {"data": receipt("image", name, asset.asset_id)}
 
 
 class UploadCheck(BaseModel):
     model_config = ConfigDict(extra="forbid")
     key: str
-    kind: Literal["dataset", "ebsd_image"]
+    kind: Literal["dataset", "ebsd_image", "image"]
     name: str = Field(min_length=1, max_length=200)
 
 

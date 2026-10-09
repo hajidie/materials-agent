@@ -126,6 +126,8 @@ class RuntimeState:
     image_npy: bytes
     image_base64: str
     image_sha256: str
+    tc4_receipts: dict = field(default_factory=dict)
+    tc4_artifacts: dict = field(default_factory=dict)
 
 
 def _utc_text(value: datetime | None = None) -> str:
@@ -465,6 +467,8 @@ def create_app(
 
     from .ebsd import install
     install(app, state, authorize, RuntimeRequestError)
+    from .tc4 import install as install_tc4
+    install_tc4(app, state, authorize, RuntimeRequestError)
     return app
 
 

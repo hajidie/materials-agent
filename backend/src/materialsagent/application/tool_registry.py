@@ -191,9 +191,9 @@ class ToolRegistry:
                 raise InvalidToolRegistrationError("Resource execution argument is missing from the input schema.")
             if item.required != (item.execution_argument in input_required):
                 raise InvalidToolRegistrationError("Resource parameter requiredness does not match the input schema.")
-            if item.provider is ResourceProvider.ASSET and item.expected_resource_type is not ResourceType.EBSD_IMAGE:
+            if item.provider is ResourceProvider.ASSET and item.expected_resource_type not in {ResourceType.EBSD_IMAGE, ResourceType.IMAGE}:
                 raise InvalidToolRegistrationError("Asset resource type is unsupported.")
-            if item.provider is ResourceProvider.ML_RESOURCE and item.expected_resource_type is ResourceType.EBSD_IMAGE:
+            if item.provider is ResourceProvider.ML_RESOURCE and item.expected_resource_type in {ResourceType.EBSD_IMAGE, ResourceType.IMAGE}:
                 raise InvalidToolRegistrationError("ML resource type is unsupported.")
         try:
             input_schema_bytes = _canonical_schema_bytes(definition.input_schema)
@@ -214,6 +214,7 @@ class ToolRegistry:
                         "expected_resource_type": item.expected_resource_type.value,
                         "provider": item.provider.value,
                         "required": item.required,
+                        **({"collection": True} if item.collection else {}),
                     }
                     for item in definition.resource_parameters
                 ]

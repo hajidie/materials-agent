@@ -743,4 +743,146 @@ print("QUOTED_PROBE_OK" if value.endswith("/mcp") else "QUOTED_PROBE_BAD")
     Assert-Equal $probeOutput 'QUOTED_PROBE_OK' 'Quoted probe output'
 }
 
+Invoke-Test 'TC4 launch profile isolates weights and receipts to real Runtime' {
+    $fixtureWeights = [IO.Path]::GetTempFileName()
+    try {
+        $profile = New-LaunchProfile -Runtime Real -Llm Mock -RuntimeToken 'offline-token' `
+            -BackendPython 'C:\tools\backend.exe' -RuntimePython 'C:\tools\runtime.exe' `
+            -ResolvedEbsdModelRoot 'C:\models\ebsd' -EnableTc4Segmentation `
+            -Tc4Weights $fixtureWeights -Tc4RuntimeDataDir 'C:\runtime-data\tc4'
+        Assert-Equal $profile.backend_environment['ENABLE_TC4_SEGMENTATION'] 'true' 'TC4 enabled'
+        Assert-Equal $profile.backend_environment['TC4_SEGMENTATION_WEIGHTS'] $null 'Backend weight isolation'
+        Assert-Equal $profile.runtime_environment['TC4_SEGMENTATION_WEIGHTS'] $fixtureWeights 'Runtime weights'
+        Assert-Equal $profile.runtime_environment['TC4_RUNTIME_DATA_DIR'] 'C:\runtime-data\tc4' 'Durable receipts'
+        Assert-Equal $profile.frontend_environment['TC4_SEGMENTATION_WEIGHTS'] $null 'Frontend weight isolation'
+    } finally { Remove-Item -LiteralPath $fixtureWeights }
+}
+
+Invoke-Test 'TC4 cannot be enabled against Mock launch profile' {
+    $rejected = $false
+    try {
+        New-LaunchProfile -Runtime Mock -Llm Mock -RuntimeToken 'offline-token' `
+            -BackendPython 'C:\tools\backend.exe' -RuntimePython 'C:\tools\runtime.exe' `
+            -EnableTc4Segmentation -Tc4Weights 'C:\missing.pth' -Tc4RuntimeDataDir 'C:\runtime-data' | Out-Null
+    } catch { $rejected = $_.Exception.Message -like 'LOCAL_DEV_CONFIGURATION_INVALID name=TC4_SEGMENTATION*' }
+    Assert-True $rejected 'Mock TC4 launch must be rejected'
+}
+
+Invoke-Test 'all-features profile enables real business capabilities and isolates TC4 paths' {
+    $fixtureWeights = [IO.Path]::GetTempFileName()
+    try {
+        $profile = New-LaunchProfile -Runtime Real -Llm Provider -RuntimeToken 'offline-token' `
+            -BackendPython 'C:\tools\backend.exe' -RuntimePython 'C:\tools\runtime.exe' `
+            -ResolvedEbsdModelRoot 'C:\models\ebsd' -AllFeatures `
+            -Tc4Weights $fixtureWeights -Tc4RuntimeDataDir 'C:\runtime-data\tc4'
+        foreach ($name in @('ENABLE_TC4_SEGMENTATION', 'ENABLE_DEV_MATERIALS_ML_TOOLS',
+                'ENABLE_MATERIALS_ML_RESOURCES', 'ENABLE_MATERIALS_ML_RESOURCE_CONTEXT')) {
+            Assert-Equal $profile.backend_environment[$name] 'true' "All-features switch $name"
+        }
+        Assert-Equal $profile.backend_environment['ENABLE_DEV_FAKE_SIDE_EFFECT_TOOL'] 'false' 'Fake tool disabled'
+        Assert-Equal $profile.backend_environment['M5_DEV_ROUTES_ENABLED'] 'false' 'Debug routes disabled'
+        Assert-Equal $profile.runtime_environment['TC4_SEGMENTATION_WEIGHTS'] $fixtureWeights 'Runtime weights'
+        Assert-Equal $profile.backend_environment['TC4_SEGMENTATION_WEIGHTS'] $null 'Backend path isolation'
+        Assert-Equal $profile.compose_environment['TC4_SEGMENTATION_WEIGHTS'] $null 'Compose path isolation'
+    }
+    finally { Remove-Item -LiteralPath $fixtureWeights }
+}
+
+Invoke-Test 'all-features launch refuses Mock Runtime or Mock LLM' {
+    foreach ($modes in @(@('Mock', 'Provider'), @('Real', 'Mock'))) {
+        $rejected = $false
+        try {
+            New-LaunchProfile -Runtime $modes[0] -Llm $modes[1] -RuntimeToken 'offline-token' `
+                -BackendPython 'C:\tools\backend.exe' -RuntimePython 'C:\tools\runtime.exe' `
+                -AllFeatures | Out-Null
+        }
+        catch { $rejected = $_.Exception.Message -eq 'LOCAL_DEV_CONFIGURATION_INVALID name=ALL_FEATURES reason=real_runtime_and_provider_required' }
+        Assert-True $rejected 'All-features launch accepted a Mock mode.'
+    }
+}
+
+Invoke-Test 'TC4 paths read quoted root dotenv and explicit overrides without reading credentials' {
+    $fixtureWeights = [IO.Path]::GetTempFileName()
+    $dotenv = [IO.Path]::GetTempFileName()
+    try {
+        [IO.File]::WriteAllText($dotenv, (@(
+            "TC4_SEGMENTATION_WEIGHTS=`"$fixtureWeights`"",
+            'TC4_RUNTIME_DATA_DIR=outputs\tc4 receipts',
+            'IGNORED_SECRET=secret-canary'
+        ) -join "`n"))
+        $paths = Resolve-Tc4RuntimePaths -DotenvPath $dotenv
+        Assert-Equal $paths.TC4_SEGMENTATION_WEIGHTS $fixtureWeights 'Quoted weights'
+        Assert-Equal $paths.TC4_RUNTIME_DATA_DIR (Join-Path $repoRoot 'outputs\tc4 receipts') 'Relative data directory'
+        $override = Resolve-Tc4RuntimePaths -DotenvPath $dotenv -Weights $fixtureWeights -DataDirectory 'C:\other\receipts'
+        Assert-Equal $override.TC4_RUNTIME_DATA_DIR 'C:\other\receipts' 'Explicit data override'
+        [IO.File]::WriteAllText($dotenv, "TC4_SEGMENTATION_WEIGHTS=$fixtureWeights`nTC4_SEGMENTATION_WEIGHTS=duplicate")
+        $rejected = $false
+        try { Resolve-Tc4RuntimePaths -DotenvPath $dotenv | Out-Null }
+        catch { $rejected = $_.Exception.Message -eq 'LOCAL_DEV_CONFIGURATION_INVALID duplicate=TC4_SEGMENTATION_WEIGHTS source=root_dotenv' }
+        Assert-True $rejected 'Duplicate TC4 configuration was accepted.'
+    }
+    finally {
+        Remove-Item -LiteralPath $fixtureWeights
+        Remove-Item -LiteralPath $dotenv
+    }
+}
+
+Invoke-Test 'TC4 startup rejects missing paths and a receipt path that is a file' {
+    $dotenv = [IO.Path]::GetTempFileName()
+    try {
+        $missing = $null
+        try { Resolve-Tc4RuntimePaths -DotenvPath $dotenv | Out-Null }
+        catch { $missing = $_.Exception.Message }
+        Assert-Equal $missing 'LOCAL_DEV_CONFIGURATION_MISSING name=TC4_SEGMENTATION_WEIGHTS source=parameter_process_or_root_dotenv' 'Missing weights'
+        $invalid = $null
+        try { Resolve-Tc4RuntimePaths -Weights $dotenv -DataDirectory $dotenv | Out-Null }
+        catch { $invalid = $_.Exception.Message }
+        Assert-Equal $invalid 'LOCAL_DEV_CONFIGURATION_INVALID name=TC4_RUNTIME_DATA_DIR reason=not_a_directory' 'Receipt file rejected'
+    }
+    finally { Remove-Item -LiteralPath $dotenv }
+}
+
+Invoke-Test 'all-features readiness requires CSV resources tools and trusted context' {
+    Assert-True (Invoke-MaterialsMlCapabilitiesReadyProbe -Request {
+        [PSCustomObject]@{ StatusCode = 200; Content = '{"data":{"ml_resources":true,"ml_context":true,"ml_tools":true,"coordination":true}}' }
+    }) 'Enabled capabilities were rejected.'
+    Assert-True (-not (Invoke-MaterialsMlCapabilitiesReadyProbe -Request {
+        [PSCustomObject]@{ StatusCode = 200; Content = '{"data":{"ml_resources":true,"ml_context":false,"ml_tools":true,"coordination":true}}' }
+    })) 'Missing trusted context was accepted.'
+    Assert-True (-not (Invoke-MaterialsMlCapabilitiesReadyProbe -Request { throw 'offline' })) 'Unavailable capabilities were accepted.'
+}
+
+Invoke-Test 'one-command launcher forwards real all-features defaults and child exit status' {
+    $fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('materialsagent-start-all-' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $fixtureRoot | Out-Null
+    try {
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'start-all.ps1') -Destination $fixtureRoot
+        [IO.File]::WriteAllText((Join-Path $fixtureRoot 'local-dev.ps1'), @'
+param($Action, $Runtime, $Llm, [switch]$AllFeatures, $ReadyTimeoutSeconds, $Tc4Weights)
+if ($Runtime -ne 'Real' -or $Llm -ne 'Provider' -or -not $AllFeatures) { exit 9 }
+if ($Action -eq 'Start' -and $Tc4Weights -eq 'C:\models with spaces\weights.pth') { exit 0 }
+if ($Action -eq 'Stop') { exit 7 }
+exit 8
+'@)
+        $shell = (Get-Command powershell.exe).Source
+        & $shell -NoProfile -File (Join-Path $fixtureRoot 'start-all.ps1') -Tc4Weights 'C:\models with spaces\weights.pth'
+        Assert-Equal $LASTEXITCODE 0 'Start forwarding'
+        & $shell -NoProfile -File (Join-Path $fixtureRoot 'start-all.ps1') Stop
+        Assert-Equal $LASTEXITCODE 7 'Stop exit forwarding'
+    }
+    finally { Remove-Item -LiteralPath $fixtureRoot -Recurse -Force }
+}
+
+Invoke-Test 'port preflight reuses only verified Compose loopback bindings' {
+    $verified = @(Get-ReusableComposePorts -Docker 'offline-docker' -Query {
+        param($service, $port)
+        if ($service -eq 'postgresql' -and $port -eq 5432) { return '127.0.0.1:5432' }
+        if ($service -eq 'minio' -and $port -eq 9000) { return '127.0.0.1:19000' }
+        throw 'unverified'
+    })
+    Assert-Equal ($verified -join ',') '5432' 'Only matching running Compose binding may be reused'
+    $missing = @(Get-ReusableComposePorts -Docker 'offline-docker' -Query { return '' })
+    Assert-Equal $missing.Count 0 'Missing Compose service may not claim any port'
+}
+
 Write-Output ("LOCAL_DEV_OFFLINE_TESTS_OK tests={0}" -f $script:Passed)

@@ -28,6 +28,7 @@ from materialsagent.infrastructure.db.tool_result import (
     ToolResultRow,
 )
 from materialsagent.infrastructure.db.tool_run import ToolRunRow
+from materialsagent.infrastructure.db.tool_run_item import ToolRunItemRow
 from materialsagent.infrastructure.db.tool_invocation import (
     InvocationResultRow,
     InvocationRunRow,

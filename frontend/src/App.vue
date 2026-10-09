@@ -37,7 +37,7 @@ watch(() => [agent.messages.value, agent.processes.value, agent.runs.value], () 
 watch(agent.selectedId, () => { following.value = true; });
 onUnmounted(() => cancelAnimationFrame(scrollFrame));
 const composerText = computed(() => !pendingHere.value?.accepted && typeof pendingHere.value?.body.content_text === "string" ? pendingHere.value.body.content_text : agent.draft.value.text);
-const composerAttachment = computed(() => !pendingHere.value?.accepted && Array.isArray(pendingHere.value?.body.attachments) ? pendingHere.value.body.attachments[0] as Attachment | undefined : agent.draft.value.attachment);
+const composerAttachments = computed(() => !pendingHere.value?.accepted && Array.isArray(pendingHere.value?.body.attachments) ? pendingHere.value.body.attachments as Attachment[] : agent.draftAttachments.value);
 const timeline = computed(() => {
   const entries: Array<{key:string;sequence:number;message:Message|null;run:AgentRun|null}> = agent.messages.value.map(message => ({ key: message.answer_root_message_id ?? message.message_id,
     sequence: message.sequence, message, run: null as AgentRun | null }));
@@ -133,13 +133,14 @@ function safely(promise: Promise<unknown>) { void promise.catch(() => { agent.er
       <section v-if="timeline.length" class="agent-timeline" aria-label="对话消息">
         <template v-for="item in timeline" :key="item.key">
           <ChatMessage v-if="item.message" :message="item.message" :conversation-id="agent.selectedId.value!" :disabled="agent.busy.value"
+            :segmentation-items="item.message.phase === 'answer' ? agent.runs.value.find(run => run.agent_run_id === item.message?.agent_run_id)?.segmentation_items : undefined"
             :process="agent.processes.value[item.message.agent_run_id ?? '']" :show-process="showProcess(item.message)"
             @regenerate="safely(agent.regenerate($event))" @artifact="view($event)" />
-          <AgentRunCard v-else-if="item.run" :run="item.run" :disabled="agent.busy.value" :reconciling="reconciling !== null" :receipt="receipts[item.run.agent_run_id]"
+          <AgentRunCard v-if="item.run" :run="item.run" :disabled="agent.busy.value" :reconciling="reconciling !== null" :receipt="receipts[item.run.agent_run_id]"
             :process="agent.processes.value[item.run.agent_run_id]" :reconnecting="agent.reconnecting.value[item.run.agent_run_id]"
             @resume="safely(agent.resume(item.run))" @stop="safely(agent.stop())"
             @confirm="safely(agent.confirm(item.run, $event))" @retry="safely(agent.retry(item.run, $event))"
-            @reconcile="safely(reconcileRun(item.run, $event))" />
+            @reconcile="safely(reconcileRun(item.run, $event))" @artifact="view($event)" />
         </template>
       </section>
       <section v-else-if="!agent.loading.value" class="chat-welcome">
@@ -158,8 +159,8 @@ function safely(promise: Promise<unknown>) { void promise.catch(() => { agent.er
       <ChatComposer :key="`${agent.selectedId.value}:${agent.resumeTarget.value?.agent_run_id ?? 'new'}`" :disabled="agent.busy.value || awaitingConfirmation || interrupted" :sending="agent.sending.value" :generating="agent.generating.value" :stopping="agent.stopping.value" :completed="agent.completed.value"
         :waiting-question="agent.resumeTarget.value?.waiting ? agent.resumeTarget.value.waiting.question : null"
         :initial-draft="composerText"
-        :attachment="composerAttachment" :uploading="agent.uploading.value" :upload-error="agent.uploadError.value" :can-retry-upload="agent.canRetryUpload.value"
-        @update-draft="agent.setDraftText($event)" @upload="safely(agent.uploadAttachment($event))" @remove-attachment="agent.removeAttachment()" @check-upload="safely(agent.checkUpload())"
+        :attachments="composerAttachments" :upload-entries="agent.uploadEntries.value" :uploading="agent.uploading.value" :upload-error="agent.uploadError.value" :can-retry-upload="agent.canRetryUpload.value"
+        @update-draft="agent.setDraftText($event)" @upload="safely(agent.uploadAttachments($event))" @remove-attachment="agent.removeAttachment($event)" @remove-upload="agent.removeUpload($event)" @check-upload="safely(agent.checkUpload($event))"
         @submit="safely(submit($event))" @stop="safely(agent.stop())" />
     </main>
 

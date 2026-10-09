@@ -290,6 +290,7 @@ def create_app(
     runtime_config = parse_zta35g_runtime_config(resolved_settings)
     runtime_client = None
     ebsd_client = None
+    tc4_client = None
     if runtime_config:
         runtime_client = LocalZTA35GToolClientAdapter(base_url=runtime_config.base_url,
             token=runtime_config.token.get_secret_value(), timeout_seconds=runtime_config.timeout_seconds)
@@ -297,6 +298,12 @@ def create_app(
         from materialsagent.infrastructure.tool_clients.local_ebsd import LocalEBSDToolClientAdapter
         ebsd_client = LocalEBSDToolClientAdapter(base_url=runtime_config.base_url,
             token=runtime_config.token.get_secret_value(), timeout_seconds=60)
+    if resolved_settings.enable_tc4_segmentation:
+        if not runtime_config:
+            raise ConfigurationError("TC4 requires the local Python 3.8 Runtime configuration.")
+        from materialsagent.infrastructure.tool_clients.local_tc4 import LocalTC4Client
+        tc4_client = LocalTC4Client(base_url=runtime_config.base_url,
+            token=runtime_config.token.get_secret_value(), timeout_seconds=runtime_config.timeout_seconds)
     mcp_client = None
     ml_registrations = ()
     executors = (StandardSyncExecutor(), ManagedExecutor())
@@ -321,6 +328,7 @@ def create_app(
                 mcp_client.close()
             raise ConfigurationError("ML MCP configuration or optional dependencies are unavailable.") from None
     resolved_tool_registry = tool_registry or build_tool_registry(runtime_client, ebsd_client=ebsd_client,
+        tc4_client=tc4_client, enable_tc4_segmentation=resolved_settings.enable_tc4_segmentation,
         enable_dev_fake_side_effect_tool=resolved_settings.enable_dev_fake_side_effect_tool,
         ml_registrations=ml_registrations)
     if resolved_settings.app_env == "production" and any(
@@ -369,6 +377,17 @@ def create_app(
             clock=clock, id_factory=id_factory, managed_workflow_service=resolved_tool_workflow_service,
             lease_seconds=max(60, int(resolved_settings.zta35g_runtime_timeout_seconds) + 60))
     resolved_agent_store = agent_store or (SQLAlchemyAgentStore(session_factory) if session_factory else None)
+    if tc4_client:
+        tc4_client.asset_service, tc4_client.uow_factory, tc4_client.agent_store = resolved_asset_service, resolved_unit_of_work_factory, resolved_agent_store
+        if tc4_client.readiness(resolved_tool_registry.resolve("tc4_primary_alpha_segmentation").metadata) != "AVAILABLE":
+            raise ConfigurationError("Enabled TC4 segmentation tool must be AVAILABLE at startup.")
+    if resolved_conversation_cleanup_service is not None:
+        cleanup_client = tc4_client
+        if cleanup_client is None and runtime_config is not None:
+            from materialsagent.infrastructure.tool_clients.local_tc4 import LocalTC4Client
+            cleanup_client = LocalTC4Client(base_url=runtime_config.base_url,
+                token=runtime_config.token.get_secret_value(), timeout_seconds=10)
+        resolved_conversation_cleanup_service.tc4_client = cleanup_client
     resolved_agent_model = agent_model
     if resolved_agent_model is None:
         if resolved_settings.llm_adapter == "mock":

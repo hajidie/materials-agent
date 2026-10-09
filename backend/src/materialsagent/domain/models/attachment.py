@@ -6,5 +6,5 @@ from pydantic import BaseModel, ConfigDict, Field
 class Attachment(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     attachment_id: str = Field(min_length=1, max_length=128)
-    kind: Literal["dataset", "ebsd_image"]
+    kind: Literal["dataset", "ebsd_image", "image"]
     name: str = Field(min_length=1, max_length=200)

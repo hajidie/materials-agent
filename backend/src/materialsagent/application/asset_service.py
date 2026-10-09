@@ -679,7 +679,10 @@ class AssetService:
         asset_id: str,
     ) -> AssetContent:
         asset = self.get(actor_context, asset_id)
-        if asset.asset_type == "ebsd_image":
+        if asset.encoding_rule in {"tc4-overlay-png-v1", "tc4-mask-png-v1"}:
+            from .tc4_assets import content
+            return content(self, asset)
+        if asset.source_type == "UPLOADED":
             from .ebsd_assets import content
             return content(self, asset)
         if asset.current_status != "AVAILABLE":

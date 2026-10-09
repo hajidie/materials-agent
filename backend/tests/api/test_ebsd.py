@@ -88,11 +88,23 @@ def test_ebsd_upload_managed_prediction_replay_history_and_cleanup(ebsd):
     assert client.get(f"/api/v1/assets/{asset}/content").status_code == 404
 
 
-@pytest.mark.parametrize("payload", [b"broken", image_bytes("L"), image_bytes(size=(200, 201)), image_bytes(size=(64, 64)), image_bytes("RGBA")])
+@pytest.mark.parametrize("payload", [b"broken", image_bytes(size=(64, 64)), image_bytes("RGBA")])
 def test_invalid_upload_never_creates_object(ebsd, payload):
     client, conversation, storage, runtime = ebsd
     assert upload(client, conversation, payload).status_code == 422
     assert not storage.objects and runtime.execution_count == 0
+
+
+@pytest.mark.parametrize("payload", [image_bytes("L"), image_bytes(size=(200, 201))])
+def test_generic_image_upload_allowed_but_ebsd_tool_rejects(ebsd, payload):
+    client, conversation, storage, runtime = ebsd
+    uploaded = upload(client, conversation, payload)
+    assert uploaded.status_code == 200
+    attachment = uploaded.json()["data"]["attachment"]
+    assert attachment["kind"] == "image"
+    run = stored_run(client, submit(client, conversation, attachment["attachment_id"]).json()["data"]["agent_run"])
+    assert run["status"] == "TERMINATED"
+    assert runtime.execution_count == 0
 
 
 def test_missing_image_resume_and_cross_conversation_rejection(ebsd, api_harness):
@@ -223,7 +235,7 @@ def test_unavailable_ebsd_runtime_requires_explicit_retry(ebsd, connection_refus
         from alembic.config import Config
         config = Config(str(Path(__file__).resolve().parents[2] / "alembic.ini"))
         config.attributes["settings"] = api_harness.settings
-        with pytest.raises(RuntimeError, match="Resolve unknown Managed outcomes"):
+        with pytest.raises(RuntimeError, match="Resolve unknown Managed outcomes|Preserve image and batch evidence"):
             command.downgrade(config, "0025_agent_process_stream")
         assert client.app.state.invocation_service.get(
             ActorContext(actor_id="ebsd-test", user_id=None), invocation_id).run.status is InvocationStatus.OUTCOME_UNKNOWN

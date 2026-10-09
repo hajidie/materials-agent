@@ -142,9 +142,13 @@ class MockAgentModel:
         if match:
             return {"type": "CallTool", "tool_name": "materials_unit_conversion",
                     "arguments": {"value": float(match[1]), "from_unit": match[2], "to_unit": match[3]}}
+        if "TC4" in text.upper():
+            images = [item for item in payload.get("resource_context", {}).get("resources", []) if item.get("resource_type") in {"image", "ebsd_image"}]
+            return {"type": "CallTool", "tool_name": "tc4_primary_alpha_segmentation", "arguments": {
+                "image_references": [{"resource_ref": image["resource_ref"]} for image in images]}}
         if any(a.get("type") == "ebsd_image" for a in payload.get("attachments", [])) or "EBSD" in text.upper():
             image = next((item for item in payload.get("resource_context", {}).get("resources", [])
-                          if item.get("resource_type") == "ebsd_image"), None)
+                          if item.get("resource_type") in {"ebsd_image", "image"}), None)
             return {"type": "CallTool", "tool_name": "ebsd_yield_strength_predictor",
                 "arguments": {"image_reference": {"resource_ref": image["resource_ref"]}}
                 if image else {"image_reference": {"unresolved": True}}}

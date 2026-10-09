@@ -51,7 +51,7 @@ def ebsd_source(unit_of_work, task, tool_run, revision):
             or tool_run.execution_input.get("input_assets") != {"ebsd_asset_id": value["ebsd_asset_id"]}):
         raise ApplicationConflictError(task_id=task.task_id)
     asset = unit_of_work.assets.get_owned(value["ebsd_asset_id"], task.actor_id)
-    if (asset is None or asset.conversation_id != task.conversation_id or asset.asset_type != "ebsd_image"
+    if (asset is None or asset.conversation_id != task.conversation_id or asset.asset_type not in {"image", "ebsd_image"}
             or asset.source_type != "UPLOADED" or asset.current_status != "AVAILABLE"):
         raise ApplicationConflictError(task_id=task.task_id)
     return {"input_asset": {"asset_id": asset.asset_id, "sha256": asset.sha256},

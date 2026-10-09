@@ -67,6 +67,9 @@ class ManagedToolWorkflow:
         return self._commit(actor, receipt, retry=True)
 
     def _commit(self, actor, receipt, *, retry):
+        if receipt.tool_run.tool_id == "tc4_primary_alpha_segmentation":
+            from .tc4_results import commit
+            return commit(self, actor, receipt)
         task_id, tool_run_id = receipt.tool_run.task_id, receipt.tool_run.tool_run_id
         try:
             assets = self.assets.create_from_output(actor, task_id=task_id, tool_run_id=tool_run_id,
@@ -408,7 +411,7 @@ class ToolArgResolver:
                 field = item["resource_parameter"]
                 if item["provenance"] == "confirmed" and normalized.get(field) == item["unit"]:
                     confirmed_units[field] = item["unit"]
-        if previous and resource_tool:
+        if previous and resource_tool and previous.unit_annotations:
             # A confirmed unit is a trusted fact about one bound resource field.
             # Later model proposals may restate an inference, but cannot demote
             # that fact while the underlying binding identity is unchanged.
@@ -564,6 +567,7 @@ class RegistryAgentGateway:
                     "expected_resource_type": item.expected_resource_type.value,
                     "provider": item.provider.value,
                     "required": item.required,
+                    "collection": item.collection,
                 } for item in registration.resource_parameters],
                 "execution_profile": registration.execution_profile.value})
         return result
@@ -668,6 +672,49 @@ class RegistryAgentGateway:
             self.invocations.confirm(actor, record.invocation_run_id, defer_execution=True)
         else:
             self.invocations.reject(actor, record.invocation_run_id)
+
+    def continue_batch(self, run, record, timeout):
+        """Explicit user resume uses the original parent and each frozen item identity."""
+        from materialsagent.application.tool_execution import _PreparedToolAttempt
+        actor = ActorContext(run.actor_id, None)
+        with tool_deadline(timeout), execution_owner(run.agent_run_id, run.version, run.claim, record.invocation_run_id):
+            with self.uow_factory() as uow:
+                invocation = uow.invocation_runs.get_owned(record.invocation_run_id, run.actor_id)
+                if not invocation or invocation.tool_id != "tc4_primary_alpha_segmentation" or invocation.conversation_id != run.conversation_id:
+                    raise AgentFailure("OBSERVATION_SOURCE_MISMATCH")
+                task = uow.tasks.get_owned(invocation.task_id, run.actor_id)
+                if task is None:
+                    raise AgentFailure("OBSERVATION_SOURCE_MISMATCH")
+                if task.selected_result_id:
+                    return self.repair(run, record)
+                attempts = uow.tool_runs.list_for_task(task.task_id)
+                current = next((attempt for attempt in attempts if attempt.current_status in {"PENDING", "RUNNING"}), None)
+            if invocation.status is InvocationStatus.PENDING:
+                return self.execute(run, record, timeout)
+            # A crash can precede the parent start. No item can have been
+            # dispatched without a RUNNING ToolRun, so reuse the pending parent
+            # or create the first one under the original Invocation.
+            if current is None and not attempts:
+                prepared = self.workflow.execution._prepare_initial_attempt(actor, task_id=task.task_id,
+                    task_input_revision_id=run.draft.revision_id,
+                    request_id=invocation.request_id)
+                current = prepared.tool_run
+            elif current is None:
+                return self.repair(run, record)
+            elif current.current_status == "PENDING":
+                current = self.workflow.execution._start_pending_attempt(current.tool_run_id, task_id=task.task_id).tool_run
+            registration = self.registry.resolve(record.tool_name)
+            validated = registration.tool.validate_input(current.normalized_input_snapshot,
+                seed=current.execution_input["runtime_parameters"]["seed"])
+            prepared = _PreparedToolAttempt(current, validated, run.conversation_id, True)
+            try:
+                output = self.workflow.execution._invoke_runtime(actor, prepared=prepared, request_id=current.request_id)
+                receipt = self.workflow.execution._persist_runtime_success(prepared, output)
+                self.workflow._commit(actor, receipt, retry=False)
+            except Exception:
+                # Reconciliation failures cannot authorize a new computation.
+                return self.repair(run, record)
+            return self.repair(run, record)
 
     def repair(self, run, record):
         def tool_observation(**values):

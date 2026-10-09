@@ -17,6 +17,7 @@ export interface AgentExecution {
   retryable: boolean;
 }
 export interface AgentRun {
+  segmentation_items?: SegmentationItem[];
   agent_run_id: string;
   conversation_id: string;
   source_message_id: string;
@@ -73,9 +74,15 @@ export async function agentRequest<T>(path: string, options: { body?: unknown; k
 
 
 export function toolLabel(name: string): string {
-  return ({ebsd_yield_strength_predictor: "EBSD 屈服强度预测", materials_unit_conversion: "材料单位换算", zta35g_sem_virtual_lab: "ZTA35G 虚拟实验",
+  return ({tc4_primary_alpha_segmentation: "TC4 初生 α 相分割", ebsd_yield_strength_predictor: "EBSD 屈服强度预测", materials_unit_conversion: "材料单位换算", zta35g_sem_virtual_lab: "ZTA35G 虚拟实验",
     materials_ml_analyze_tabular_dataset: "表格数据分析", materials_ml_train_tabular_regression: "模型训练",
     materials_ml_get_training_run: "训练状态查询", materials_ml_predict_with_model: "模型预测"} as Record<string, string>)[name] ?? name;
+}
+
+export interface SegmentationItem {
+  ordinal: number; name: string; status: string; width?: number; height?: number;
+  foreground_pixels?: number; total_pixels?: number; area_fraction?: number;
+  artifacts: { overlay?: string; mask?: string }; error?: { code: string; message: string } | null;
 }
 
 export interface ChatMessage {

@@ -60,7 +60,7 @@ class ToolExecutionInput:
     requested_outputs: tuple[str, ...]
     runtime_parameters: dict[str, int | float]
 
-    input_assets: dict[str, str] = field(default_factory=dict)
+    input_assets: dict[str, str | list[str]] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, object]:
         return {

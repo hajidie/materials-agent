@@ -131,7 +131,7 @@ class ToolRun:
                 raise ValueError(f"{field_name} must be a unique text array.")
             if not set(value) <= set(self.requested_outputs):
                 raise ValueError(f"{field_name} must be a requested output subset.")
-        if set(self.completed_outputs) & set(self.failed_outputs):
+        if self.tool_id != "tc4_primary_alpha_segmentation" and set(self.completed_outputs) & set(self.failed_outputs):
             raise ValueError("completed_outputs and failed_outputs must be disjoint.")
         normalized_snapshot = _safe_json_object(
             self.normalized_input_snapshot,
@@ -336,7 +336,7 @@ class ToolRun:
         completed = list(completed_outputs)
         failed = list(failed_outputs)
         if (
-            set(completed) & set(failed)
+            (self.tool_id != "tc4_primary_alpha_segmentation" and set(completed) & set(failed))
             or set(completed) | set(failed) != set(self.requested_outputs)
         ):
             raise ValueError("Terminal output sets must exactly cover requested outputs.")
@@ -347,6 +347,8 @@ class ToolRun:
             if completed
             else FAILED
         )
+        if self.tool_id == "tc4_primary_alpha_segmentation" and completed and failed:
+            status = PARTIALLY_SUCCEEDED
         if status == SUCCEEDED and (
             error_code is not None or safe_error_message is not None
         ):

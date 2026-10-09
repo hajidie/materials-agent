@@ -16,6 +16,8 @@ class RuntimeSettings:
     model_root: Path
     port: int = DEFAULT_PORT
     ebsd_model_root: Optional[Path] = None
+    tc4_segmentation_weights: Optional[Path] = None
+    tc4_data_dir: Optional[Path] = None
     host: str = field(default=HOST, init=False)
 
     def __post_init__(self):
@@ -58,6 +60,8 @@ def load_settings(
         return RuntimeSettings(
             token=token,
             ebsd_model_root=Path(source["EBSD_MODEL_ROOT"]) if source.get("EBSD_MODEL_ROOT") else None,
+            tc4_segmentation_weights=Path(source["TC4_SEGMENTATION_WEIGHTS"]) if source.get("TC4_SEGMENTATION_WEIGHTS") else None,
+            tc4_data_dir=Path(source["TC4_RUNTIME_DATA_DIR"]) if source.get("TC4_RUNTIME_DATA_DIR") else None,
             port=port,
             model_root=Path(model_root_text),
         )

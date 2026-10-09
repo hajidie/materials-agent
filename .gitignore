@@ -110,6 +110,7 @@ temp/
 # Local Codex/agent-generated state
 # Keep .codex/config.toml and AGENTS.md trackable as project configuration.
 .codex-tmp/
+.playwright-cli/
 .agents/
 .codex/cache/
 .codex/logs/

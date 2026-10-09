@@ -111,7 +111,7 @@ class Observation(Contract):
 class ResourceBinding(Contract):
     version: Literal["resource-binding-v1"] = "resource-binding-v1"
     provider: Literal["ml_resource", "asset"]
-    resource_type: Literal["dataset", "training_run", "model", "prediction", "ebsd_image"]
+    resource_type: Literal["dataset", "training_run", "model", "prediction", "ebsd_image", "image"]
     model_argument: str = Field(min_length=1, max_length=128)
     execution_argument: str = Field(min_length=1, max_length=128)
     platform_resource_id: str = Field(min_length=1, max_length=128)
@@ -129,9 +129,43 @@ class ResourceBinding(Contract):
         return self
 
 
+class ResourceCollectionBinding(Contract):
+    version: Literal["resource-collection-v1"] = "resource-collection-v1"
+    items: list[ResourceBinding] = Field(min_length=1, max_length=10)
+
+    @model_validator(mode="after")
+    def valid_collection(self):
+        first = self.items[0]
+        if (any((i.provider, i.model_argument, i.execution_argument) !=
+                (first.provider, first.model_argument, first.execution_argument) or i.resource_type not in {"image", "ebsd_image"} for i in self.items)
+                or first.provider != "asset" or len({i.platform_resource_id for i in self.items}) != len(self.items)):
+            raise ValueError("Invalid ordered asset collection.")
+        return self
+
+    @property
+    def execution_value(self):
+        return [item.execution_value for item in self.items]
+
+    @property
+    def model_argument(self):
+        return self.items[0].model_argument
+
+    @property
+    def execution_argument(self):
+        return self.items[0].execution_argument
+
+    @property
+    def resource_type(self):
+        return self.items[0].resource_type
+
+    @property
+    def safe_description(self):
+        return {"name": "、".join(item.safe_description.get("name", "图片") for item in self.items)}
+
+
 class ArgumentDraft(Contract):
     unit_annotations: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
-    resource_bindings: dict[str, ResourceBinding] = Field(default_factory=dict)
+    resource_bindings: dict[str, ResourceBinding | ResourceCollectionBinding] = Field(default_factory=dict)
     tool_name: str
     version: str
     schema_hash: str
@@ -145,7 +179,7 @@ class ArgumentDraft(Contract):
 
 class ExecutionRecord(Contract):
     unit_annotations: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
-    resource_bindings: dict[str, ResourceBinding] = Field(default_factory=dict)
+    resource_bindings: dict[str, ResourceBinding | ResourceCollectionBinding] = Field(default_factory=dict)
     tool_call_id: str
     tool_name: str
     version: str
@@ -198,8 +232,9 @@ class AgentRun(Contract):
     messages: list[dict[str, Any]] = Field(default_factory=list, exclude=True)
     pending_message: dict[str, Any] | None = Field(default=None, exclude=True)
     current_unit_assertions: list[dict[str, str]] = Field(default_factory=list, exclude=True)
-    attachments: list[dict[str, Any]] = Field(default_factory=list, max_length=1)
+    attachments: list[dict[str, Any]] = Field(default_factory=list, max_length=10)
     result_attachments: list[dict[str, Any]] = Field(default_factory=list, exclude=True)
+    segmentation_items: list[dict[str, Any]] = Field(default_factory=list, exclude=True)
     error_code: str | None = None
     pending_tool_call_id: str | None = None
     pending_resource_map: dict[str, dict[str, Any]] = Field(default_factory=dict)

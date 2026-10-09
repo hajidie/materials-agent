@@ -72,6 +72,7 @@ class AppSettings(BaseSettings):
     agent_standard_timeout_seconds: float = Field(default=10, gt=0, le=3600)
     m5_dev_routes_enabled: bool = False
     enable_dev_fake_side_effect_tool: bool = False
+    enable_tc4_segmentation: bool = False
     enable_materials_ml_resources: bool = False
     enable_materials_ml_resource_context: bool = False
     enable_dev_materials_ml_tools: bool = False
@@ -131,6 +132,7 @@ class AppSettings(BaseSettings):
 
 
 ENVIRONMENT_FIELDS = {
+    "ENABLE_TC4_SEGMENTATION": "enable_tc4_segmentation",
     "APP_ENV": "app_env",
     "LOG_LEVEL": "log_level",
     "LOCAL_ACTOR_ID": "local_actor_id",

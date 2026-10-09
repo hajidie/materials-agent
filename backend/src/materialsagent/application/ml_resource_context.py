@@ -8,7 +8,7 @@ from copy import deepcopy
 from time import monotonic
 from uuid import uuid4
 
-from materialsagent.domain.models.agent import ResourceBinding, canonical
+from materialsagent.domain.models.agent import ResourceBinding, ResourceCollectionBinding, canonical
 from materialsagent.domain.models.ml_resource_context import BINDING_VERSION
 from materialsagent.domain.ports.agent import AgentFailure
 from materialsagent.domain.ports.tool_registry import ResourceProvider
@@ -123,7 +123,14 @@ class ResourceContextResolver:
                 return False
             return True
 
-        for ref in candidates[:20]:
+        # Current uploaded images must remain visible even with a long ML history.
+        for attachment in run.attachments:
+            if attachment["kind"] in {"image", "ebsd_image"}:
+                append({"resource_type": "image", "name": attachment["name"],
+                        "source": "current_message_attachment"},
+                       {"provider": "asset", "resource_type": "image", "platform_resource_id": attachment["attachment_id"]})
+
+        for ref in candidates[:20 - len(projected)]:
             detail = description(ref)
             item = {
                 "resource_type": ref["resource_type"],
@@ -140,15 +147,7 @@ class ResourceContextResolver:
                                  "platform_resource_id": ref["reference_id"]}):
                 break
 
-        for attachment in run.attachments:
-            if len(projected) >= 20 or attachment["kind"] != "ebsd_image":
-                continue
-            append({"resource_type": "ebsd_image", "name": attachment["name"],
-                    "source": "current_message_attachment"},
-                   {"provider": "asset", "resource_type": "ebsd_image",
-                    "platform_resource_id": attachment["attachment_id"]})
-
-        total = len(refs) + sum(1 for item in run.attachments if item["kind"] == "ebsd_image")
+        total = len(refs) + sum(1 for item in run.attachments if item["kind"] in {"image", "ebsd_image"})
         return {"view": {"resources": projected, "complete": len(projected) == total,
                          "omitted_count": max(0, total - len(projected))}, "mapping": handles}
 
@@ -156,7 +155,7 @@ class ResourceContextResolver:
         with self.uow_factory() as uow:
             asset = uow.assets.get_owned(identity, run.actor_id)
             if (asset is None or asset.conversation_id != run.conversation_id
-                    or asset.asset_type != "ebsd_image" or asset.source_type != "UPLOADED"):
+                    or asset.asset_type not in {"image", "ebsd_image"} or asset.source_type != "UPLOADED"):
                 raise AgentFailure("RESOURCE_ASSET_IDENTITY_MISMATCH")
             if asset.current_status != "AVAILABLE" or not asset.sha256:
                 raise AgentFailure("RESOURCE_NOT_AVAILABLE")
@@ -176,10 +175,10 @@ class ResourceContextResolver:
 
     def _asset_binding(self, run, spec, identity):
         asset = self._asset(run, identity)
-        if spec.expected_resource_type.value != "ebsd_image":
+        if spec.expected_resource_type.value not in {"image", "ebsd_image"}:
             raise AgentFailure("RESOURCE_TYPE_MISMATCH")
         name = next((item["name"] for item in run.attachments if item["attachment_id"] == asset.asset_id), "已上传 EBSD 图片")
-        return ResourceBinding(provider="asset", resource_type="ebsd_image",
+        return ResourceBinding(provider="asset", resource_type=asset.asset_type,
             model_argument=spec.model_argument, execution_argument=spec.execution_argument,
             platform_resource_id=asset.asset_id, execution_value=asset.asset_id,
             content_digest=asset.sha256, safe_description={"name": name})
@@ -187,13 +186,16 @@ class ResourceContextResolver:
     def bind(self, run, spec, handle):
         if not isinstance(handle, dict) or set(handle) != {"provider", "resource_type", "platform_resource_id"}:
             raise AgentFailure("RESOURCE_REFERENCE_INVALID")
-        if handle["provider"] != spec.provider.value or handle["resource_type"] != spec.expected_resource_type.value:
+        compatible_image = spec.provider is ResourceProvider.ASSET and handle["resource_type"] in {"image", "ebsd_image"} and spec.expected_resource_type.value in {"image", "ebsd_image"}
+        if handle["provider"] != spec.provider.value or (handle["resource_type"] != spec.expected_resource_type.value and not compatible_image):
             raise AgentFailure("RESOURCE_TYPE_MISMATCH")
         if spec.provider is ResourceProvider.ML_RESOURCE:
             return self._ml_binding(run, spec, handle["platform_resource_id"])
         return self._asset_binding(run, spec, handle["platform_resource_id"])
 
     def verify(self, run, binding: ResourceBinding):
+        if isinstance(binding, ResourceCollectionBinding):
+            return [self.verify(run, item) for item in binding.items]
         if binding.version != BINDING_VERSION:
             raise AgentFailure("RESOURCE_BINDING_VERSION_MISMATCH")
         if binding.provider == "ml_resource":
@@ -217,6 +219,17 @@ class ResourceContextResolver:
         for spec in registration.resource_parameters:
             field = spec.execution_argument
             supplied = values.pop(field, None)
+            if spec.collection:
+                if not isinstance(supplied, list) or not 1 <= len(supplied) <= 10:
+                    issues[field] = "Missing" if supplied is None else "Invalid"
+                    continue
+                try:
+                    binding = ResourceCollectionBinding(items=[self.bind(run, spec, item) for item in supplied])
+                except (AgentFailure, ApplicationError, ValueError):
+                    issues[field] = "Conflict"
+                    continue
+                bindings[field], values[field] = binding, binding.execution_value
+                continue
             if isinstance(supplied, dict) and supplied.get("_resource_unresolved") is True:
                 issues[field] = "Ambiguous"
                 continue
@@ -229,7 +242,8 @@ class ResourceContextResolver:
             if (not isinstance(supplied, dict)
                     or set(supplied) != {"provider", "resource_type", "platform_resource_id"}
                     or supplied.get("provider") != spec.provider.value
-                    or supplied.get("resource_type") != spec.expected_resource_type.value):
+                    or (supplied.get("resource_type") != spec.expected_resource_type.value and not
+                        (spec.provider is ResourceProvider.ASSET and supplied.get("resource_type") in {"image", "ebsd_image"}))):
                 issues[field] = "Invalid"
                 continue
             try:

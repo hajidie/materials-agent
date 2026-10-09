@@ -1,4 +1,4 @@
-import { computed, onUnmounted, ref, watch } from "vue";
+import { computed, onUnmounted, reactive, ref, watch } from "vue";
 import { createMaterialsAgentApi } from "../api/client";
 import { agentRequest, AgentRequestError, type AgentRun, type ChatMessage, type AcceptedSubmission } from "../api/agent";
 import type { Attachment } from "../api/artifacts";
@@ -62,99 +62,153 @@ export function useAgentRuns() {
     }
   } catch { error.value = "待提交操作无法读取，请检查当前处理状态。"; }
   const uploading = ref(false);
-  const canRetryUpload = ref(false);
   const uploadError = ref<string | null>(null);
   const draftKey = computed(() => `${selectedId.value ?? 'new'}:${resumeTarget.value?.agent_run_id ?? 'new'}`);
   const DRAFT_KEY = "materials-agent.attachments-drafts.v3";
-  const drafts = ref<Record<string, { text: string; attachment?: Attachment }>>({});
+  type Draft = { text: string; attachments?: Attachment[]; attachment?: Attachment };
+  const drafts = ref<Record<string, Draft>>({});
+  const validAttachment = (value: Attachment) => value && typeof value.attachment_id === "string" && typeof value.name === "string" && ["dataset", "ebsd_image", "image"].includes(value.kind);
   try {
     const stored = JSON.parse(sessionStorage.getItem(DRAFT_KEY) ?? "{}");
-    if (stored && typeof stored === "object" && !Array.isArray(stored)) {
-      for (const [key, value] of Object.entries(stored)) {
-        const item = value as { text?: unknown; attachment?: Attachment };
-        if (typeof item?.text === "string" && (!item.attachment ||
-            (typeof item.attachment.attachment_id === "string" && typeof item.attachment.name === "string" &&
-              ["dataset", "ebsd_image"].includes(item.attachment.kind)))) drafts.value[key] = item as { text: string; attachment?: Attachment };
-      }
+    for (const [key, raw] of Object.entries(stored)) {
+      const value = raw as Draft;
+      const attachments = value.attachments ?? (value.attachment ? [value.attachment] : []);
+      if (typeof value.text === "string" && attachments.length <= 10 && attachments.every(validAttachment))
+        drafts.value[key] = { text: value.text, ...(attachments.length ? { attachments } : {}) };
     }
-  } catch { /* Discard invalid local drafts. */ }
+  } catch { /* Invalid local drafts cannot be submitted. */ }
   const draft = computed(() => drafts.value[draftKey.value] ?? { text: "" });
-  function saveDraft(value: { text: string; attachment?: Attachment }, key = draftKey.value) {
+  const draftAttachments = computed(() => draft.value.attachments ?? []);
+  watch(draftKey, () => { uploadError.value = null; });
+  function saveDraft(value: Draft, key = draftKey.value) {
     drafts.value[key] = value;
     sessionStorage.setItem(DRAFT_KEY, JSON.stringify(drafts.value));
   }
   function setDraftText(text: string) { if (!pending.value) saveDraft({ ...draft.value, text }); }
-  function removeAttachment() { saveDraft({ text: draft.value.text }); uploadError.value = null; canRetryUpload.value = false; delete uploadAttempts[draftKey.value]; persistUploads(); }
-  const UPLOAD_KEY = "materials-agent.pending-upload.v2";
-  type UploadAttempt = { key: string; kind: "dataset" | "ebsd_image"; name: string; createKey: string; conversationId: string | null; context: string };
-  const uploadAttempts: Record<string, UploadAttempt> = {};
-  function persistUploads() { sessionStorage.setItem(UPLOAD_KEY, JSON.stringify(uploadAttempts)); }
+  type UploadAttempt = { key: string; kind: "dataset" | "ebsd_image" | "image"; name: string; createKey: string; conversationId: string | null; context: string; status?: "uploading" | "uncertain" | "failed"; stage?: "conversation" | "upload"; message?: string };
+  const UPLOAD_KEY = "materials-agent.pending-upload.v3";
+  const uploadAttempts = ref<Record<string, UploadAttempt>>({});
+  function persistUploads() { sessionStorage.setItem(UPLOAD_KEY, JSON.stringify(uploadAttempts.value)); }
   try {
-    const values = JSON.parse(sessionStorage.getItem(UPLOAD_KEY) ?? "{}");
+    const values = JSON.parse(sessionStorage.getItem(UPLOAD_KEY) ?? sessionStorage.getItem("materials-agent.pending-upload.v2") ?? "{}");
     for (const value of Object.values(values) as UploadAttempt[]) {
-      if (value && typeof value.key === "string" && typeof value.name === "string" && typeof value.context === "string" && ["dataset", "ebsd_image"].includes(value.kind)) uploadAttempts[value.context] = value;
+      if (value && typeof value.key === "string" && typeof value.name === "string" && typeof value.context === "string" && ["dataset", "ebsd_image", "image"].includes(value.kind))
+        uploadAttempts.value[value.key] = { ...value, status: value.status === "failed" ? "failed" : "uncertain" };
     }
-  } catch { /* Invalid pending uploads cannot be replayed. */ }
-  function showPendingUpload() {
-    canRetryUpload.value = Boolean(uploadAttempts[draftKey.value]);
-    uploadError.value = canRetryUpload.value ? "上传结果尚未确认，请核查原请求。" : null;
+    sessionStorage.removeItem("materials-agent.pending-upload.v2");
+    persistUploads();
+  } catch { /* Unknown uploads require the original identity. */ }
+  const uploadEntries = computed(() => Object.values(uploadAttempts.value).filter(value => value.context === draftKey.value));
+  const canRetryUpload = computed(() => uploadEntries.value.some(value => value.status === "uncertain"));
+  function removeAttachment(identity?: string) {
+    saveDraft({ text: draft.value.text, attachments: draftAttachments.value.filter(value => value.attachment_id !== identity) });
+    if (!identity) saveDraft({ text: draft.value.text });
+    uploadError.value = null;
   }
-  watch(draftKey, showPendingUpload, { immediate: true });
+  function removeUpload(key: string) { delete uploadAttempts.value[key]; persistUploads(); }
+  function acceptUpload(attempt: UploadAttempt, attachment: Attachment) {
+    const current = drafts.value[attempt.context] ?? { text: "" };
+    const attachments = current.attachments ?? [];
+    if (!attachments.some(value => value.attachment_id === attachment.attachment_id)) attachments.push(attachment);
+    saveDraft({ ...current, attachments }, attempt.context);
+    removeUpload(attempt.key);
+  }
   const generating = computed(() => sending.value || stopping.value || runs.value.some(r => ["PENDING", "RUNNING"].includes(r.status)));
   const busy = computed(() => generating.value || pending.value !== null || uploading.value || writeBlocked.value);
 
-  async function checkUpload() {
-    const attempt = uploadAttempts[draftKey.value];
-    if (!attempt?.conversationId || busy.value) return;
+  async function checkUpload(key?: string) {
+    if (busy.value) return;
     uploading.value = true;
     try {
-      const result = await agentRequest<{ attachment: Attachment | null; message: string }>(`/conversations/${encodeURIComponent(attempt.conversationId)}/attachments/reconcile`,
-        { body: { key: attempt.key, kind: attempt.kind, name: attempt.name } });
-      if (attempt.context !== draftKey.value) return;
-      if (result.attachment) {
-        saveDraft({ ...draft.value, attachment: result.attachment }); delete uploadAttempts[attempt.context]; persistUploads(); uploadError.value = null; canRetryUpload.value = false;
-      } else uploadError.value = result.message;
-    } catch { uploadError.value = "仍无法确认上传结果，请稍后核查原请求。"; }
-    finally { uploading.value = false; }
+      for (const attempt of uploadEntries.value.filter(value => value.status === "uncertain" && (!key || value.key === key))) {
+        try {
+          if (!attempt.conversationId) {
+            const originalContext = attempt.context;
+            const created = await conversationsApi.createConversation(undefined, attempt.createKey);
+            selectedId.value = attempt.conversationId = created.data.conversation_id;
+            sessionStorage.setItem(SELECTED_KEY, selectedId.value);
+            for (const value of Object.values(uploadAttempts.value)) if (value.context === originalContext) {
+              value.context = draftKey.value;
+              value.conversationId = selectedId.value;
+            }
+            if (drafts.value[originalContext]) saveDraft(drafts.value[originalContext]!, attempt.context);
+            attempt.status = "failed";
+            attempt.message = "对话已恢复，该图片尚未上传，请重新选择文件。";
+            continue;
+          }
+          const result = await agentRequest<{ attachment: Attachment | null; message: string }>(`/conversations/${encodeURIComponent(attempt.conversationId)}/attachments/reconcile`,
+            { body: { key: attempt.key, kind: attempt.kind, name: attempt.name } });
+          if (result.attachment) acceptUpload(attempt, result.attachment);
+          else attempt.message = result.message;
+        } catch { attempt.message = "仍无法确认上传结果，请稍后核查原请求。"; }
+      }
+    } finally { persistUploads(); uploading.value = false; }
   }
 
-  async function uploadAttachment(file: File) {
-    if (busy.value) return;
-    if (uploadAttempts[draftKey.value]) { showPendingUpload(); return; }
-    uploadError.value = null; canRetryUpload.value = false;
-    const isCsv = file.name.toLowerCase().endsWith(".csv");
-    if ((!isCsv && !['image/png', 'image/jpeg'].includes(file.type)) || !file.size || file.size > (isCsv ? 20 : 10) * 1024 * 1024) {
-      uploadError.value = "请选择 CSV（不超过 20 MiB）或 PNG/JPEG 图片（不超过 10 MiB）。"; return;
+  async function uploadAttachments(files: File[]) {
+    if (busy.value || !files.length) return;
+    uploadError.value = null;
+    const existing = draftAttachments.value;
+    const csvCount = files.filter(file => file.name.toLowerCase().endsWith(".csv")).length;
+    const pendingUploads = uploadEntries.value.filter(value => value.status !== "failed");
+    if (pendingUploads.some(value => !value.conversationId)) {
+      uploadError.value = "请先核查原对话创建请求，再上传图片。"; return;
     }
-    const attempt: UploadAttempt = { key: crypto.randomUUID(), createKey: crypto.randomUUID(), conversationId: selectedId.value,
-      name: file.name, kind: isCsv ? "dataset" : "ebsd_image", context: draftKey.value };
-    const originalDraft = { ...draft.value };
+    if ((csvCount && (files.length !== 1 || existing.length || pendingUploads.length)) || (!csvCount && (existing.some(a => a.kind === "dataset") || pendingUploads.some(a => a.kind === "dataset")))) {
+      uploadError.value = "CSV 只支持单附件，请移除现有附件后单独上传。"; return;
+    }
+    const uncertainCount = uploadEntries.value.filter(value => value.status !== "failed").length;
+    if (existing.length + uncertainCount + files.length > 10) { uploadError.value = "每次最多上传 10 张图片。"; return; }
     uploading.value = true;
+    const createKey = crypto.randomUUID();
+    let conversationUnknown = false;
     try {
-      if (!attempt.conversationId) {
-        const created = await conversationsApi.createConversation(undefined, attempt.createKey);
-        attempt.conversationId = created.data.conversation_id;
-        await select(attempt.conversationId, true); saveDraft(originalDraft); await refreshConversations();
+      for (const file of files) {
+        const isCsv = file.name.toLowerCase().endsWith(".csv");
+        const attempt = reactive<UploadAttempt>({ key: crypto.randomUUID(), createKey, conversationId: selectedId.value,
+          name: file.name, kind: isCsv ? "dataset" : "image", context: draftKey.value, status: "uploading", stage: selectedId.value ? "upload" : "conversation" });
+        uploadAttempts.value[attempt.key] = attempt;
+        if (conversationUnknown) {
+          attempt.status = "failed"; attempt.message = "尚未上传：请先核查原对话创建请求。"; persistUploads(); continue;
+        }
+        if ((!isCsv && !['image/png', 'image/jpeg'].includes(file.type)) || !file.size || file.size > (isCsv ? 20 : 10) * 1024 * 1024) {
+          attempt.status = "failed"; attempt.message = "请选择 CSV（不超过 20 MiB）或 PNG/JPEG 图片（不超过 10 MiB）。"; persistUploads(); continue;
+        }
+        try {
+          if (!attempt.conversationId) {
+            const originalDraft = { ...draft.value };
+            const originalContext = attempt.context;
+            persistUploads();
+            const created = await conversationsApi.createConversation(undefined, attempt.createKey);
+            attempt.conversationId = created.data.conversation_id;
+            await select(attempt.conversationId, true); saveDraft(originalDraft); await refreshConversations();
+            for (const value of Object.values(uploadAttempts.value)) if (value.context === originalContext) value.context = draftKey.value;
+          }
+          attempt.context = draftKey.value;
+          // Reloads reconcile this identity; they never repeat the upload.
+          attempt.stage = "upload"; attempt.status = "uncertain"; persistUploads();
+          const form = new FormData(); form.append("file", file);
+          const response = await fetch(`/api/v1/conversations/${encodeURIComponent(attempt.conversationId)}/attachments`, {
+            method: 'POST', headers: { 'Idempotency-Key': attempt.key }, body: form,
+          });
+          const payload = await response.json();
+          if (!response.ok) {
+            if (response.status >= 400 && response.status < 500) {
+              attempt.status = "failed";
+              attempt.message = payload.error?.message ?? "上传失败：需为宽高 128–4096 像素的 8 位灰度或 RGB PNG/JPEG。";
+            }
+            throw new Error();
+          }
+          if (payload.data?.attachment) acceptUpload(attempt, payload.data.attachment);
+          else attempt.message = "上传结果尚未确认，请核查原请求。";
+        } catch {
+          if (attempt.stage === "conversation") { attempt.status = "uncertain"; conversationUnknown = true; }
+          attempt.message ??= "上传结果尚未确认，请核查原请求。";
+        } finally { persistUploads(); }
       }
-      attempt.context = draftKey.value;
-      uploadAttempts[attempt.context] = attempt; persistUploads();
-      const form = new FormData(); form.append("file", file);
-      const response = await fetch(`/api/v1/conversations/${encodeURIComponent(attempt.conversationId)}/attachments`, {
-        method: 'POST', headers: { 'Idempotency-Key': attempt.key }, body: form,
-      });
-      const payload = await response.json();
-      if (attempt.context !== draftKey.value) return;
-      if (!response.ok) {
-        if (response.status >= 400 && response.status < 500) { delete uploadAttempts[attempt.context]; persistUploads(); }
-        throw new Error();
-      }
-      if (!payload.data?.attachment) { showPendingUpload(); return; }
-      saveDraft({ ...draft.value, attachment: payload.data.attachment }); delete uploadAttempts[attempt.context]; persistUploads();
-    } catch {
-      canRetryUpload.value = Boolean(uploadAttempts[draftKey.value]);
-      uploadError.value = uploadAttempts[draftKey.value] ? "上传结果尚未确认，请核查原请求。" : "上传未完成，请检查文件格式。图片需为边长 128–4096 像素的正方形 RGB 图片。";
     } finally { uploading.value = false; }
   }
+  async function uploadAttachment(file: File) { await uploadAttachments([file]); }
 
 
   function persistPending() {
@@ -189,6 +243,15 @@ export function useAgentRuns() {
       const messageQuery = messageBefore ? `?before=${encodeURIComponent(messageBefore)}` : "";
       const messagePage = await agentRequest<{ items: ChatMessage[]; next_cursor: number | null }>(`/conversations/${encodeURIComponent(id)}/messages${messageQuery}`);
       if (epoch !== generation || selectedId.value !== id) return;
+      // Message history can reach beyond the latest Run page. Load only the
+      // missing owners of this message page so their grouped results survive reopening.
+      const missingRunIds = [...new Set(messagePage.items.flatMap(message =>
+        message.phase === "answer" && message.agent_run_id && !runs.value.some(run => run.agent_run_id === message.agent_run_id)
+          ? [message.agent_run_id] : []))];
+      const relatedRuns = await Promise.all(missingRunIds.map(runId =>
+        agentRequest<AgentRun>(`/agent-runs/${encodeURIComponent(runId)}`)));
+      if (epoch !== generation || selectedId.value !== id) return;
+      for (const run of relatedRuns) { updateRun(run); streams.observe(run); }
       const groups = new Map(messages.value.map(m => [m.answer_root_message_id ?? m.message_id, m]));
       for (const message of messagePage.items) groups.set(message.answer_root_message_id ?? message.message_id, message);
       messages.value = [...groups.values()].sort((a, b) => a.sequence - b.sequence);
@@ -295,7 +358,7 @@ export function useAgentRuns() {
       draftKey: draftKey.value,
       ...(selectedId.value ? {} : { createKey: crypto.randomUUID() }),
     };
-    pending.value.body.attachments = draft.value.attachment ? [draft.value.attachment] : [];
+    pending.value.body.attachments = draftAttachments.value;
     persistPending();
     await sendPending();
   }
@@ -370,7 +433,7 @@ export function useAgentRuns() {
   }
   onUnmounted(() => { if (timer) clearInterval(timer); generation++; streams.reset(); });
   return { conversations, selectedId, runs, messages, loading, sending, generating, stopping, stop, regenerate, completed, busy, writeBlocked, error, pending, nextCursor, conversationCursor, ensureConversation, deleted,
-    uploading, uploadError, canRetryUpload, draft, setDraftText, uploadAttachment, checkUpload, removeAttachment,
+    uploading, uploadError, canRetryUpload, uploadEntries, draft, draftAttachments, setDraftText, uploadAttachment, uploadAttachments, checkUpload, removeAttachment, removeUpload,
     processes: streams.processes, reconnecting: streams.reconnecting, resume,
     resumeTarget, initialize, select, refresh, refreshConversations, submit, sendPending, confirm, retry, remove };
 }

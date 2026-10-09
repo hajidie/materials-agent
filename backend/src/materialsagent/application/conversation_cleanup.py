@@ -152,6 +152,9 @@ class ConversationCleanupService:
                     actor_id=actor_context.actor_id,
                     conversation_id=conversation_id,
                 )
+                items = getattr(unit_of_work, "tool_run_items", None)
+                if items is not None:
+                    items.queue_cleanup(actor_context.actor_id, conversation_id)
                 for asset in assets:
                     cleanup = ConversationObjectCleanup(
                         cleanup_id=self._id_factory("cleanup"),
@@ -197,6 +200,7 @@ class ConversationCleanupService:
         preferred_ids: tuple[str, ...] = (),
     ) -> CleanupDrainSummary:
         bounded_limit = max(0, min(int(limit), MAX_CLEANUP_DRAIN))
+        self._drain_runtime_receipts(bounded_limit)
         if bounded_limit == 0:
             return CleanupDrainSummary()
         try:
@@ -293,6 +297,23 @@ class ConversationCleanupService:
                 cleanup.pending_after(attempted_at=now, error_code="STORAGE_UNAVAILABLE")
             )
         return self._persist_outcome(cleanup.complete(completed_at=now))
+
+    def _drain_runtime_receipts(self, limit):
+        client = getattr(self, "tc4_client", None)
+        if client is None or not limit:
+            return
+        try:
+            with self._unit_of_work_factory() as uow:
+                items = getattr(uow, "tool_run_items", None)
+                pending = items.pending_cleanup(limit) if items is not None else []
+            for request_id, request in pending:
+                if client.cleanup(request):
+                    with self._unit_of_work_factory() as uow:
+                        uow.tool_run_items.complete_cleanup(request_id)
+                        uow.commit()
+        except Exception:
+            # The durable outbox remains pending; later startup/delete drains retry it.
+            _logger.info("tc4_receipt_cleanup_pending")
 
     def _persist_outcome(self, cleanup: ConversationObjectCleanup) -> str:
         try:

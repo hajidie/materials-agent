@@ -31,7 +31,7 @@ IMMEDIATE_PREVIOUS_REVISION = "0006_asset"
 M8_REVISION = "0008_idempotency_record"
 M9_REVISION = "0009_timeline_query_indexes"
 M10_REVISION = "0010_registry_routing_state"
-EXPECTED_REVISION = "0026_managed_outcome_unknown"
+EXPECTED_REVISION = "0027_tc4_batch_segmentation"
 
 
 def test_process_migration_preserves_existing_runs_and_guards_downgrade(temporary_database):
@@ -85,7 +85,7 @@ M8_TABLES = M7_TABLES | {
     "idempotency_record",
     "conversation_object_cleanup",
 }
-HEAD_TABLES = (M8_TABLES - {"llm_call", "natural_language_explanation"}) | {"ml_scope_binding", "ml_resource_ref", "ml_resource_operation", "conversation_deletion", "invocation_run", "invocation_result", "agent_run", "agent_submission", "agent_observation", "agent_execution", "agent_model_call", "agent_checkpoint_cleanup", "agent_process"}
+HEAD_TABLES = (M8_TABLES - {"llm_call", "natural_language_explanation"}) | {"ml_scope_binding", "ml_resource_ref", "ml_resource_operation", "conversation_deletion", "invocation_run", "invocation_result", "agent_run", "agent_submission", "agent_observation", "agent_execution", "agent_model_call", "agent_checkpoint_cleanup", "agent_process", "tool_run_item", "runtime_receipt_cleanup"}
 
 
 def _make_alembic_config(settings: AppSettings) -> Config:
@@ -383,6 +383,7 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "safe_error_message",
             },
             "asset": {
+                "producer_tool_run_item_id", "input_asset_id", "model_version", "preprocessing_version",
                 "asset_id",
                 "conversation_id",
                 "task_id",
@@ -628,6 +629,8 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "fk_asset_conversation": "conversation",
                 "fk_asset_task": "task",
                 "fk_asset_tool_run": "tool_run",
+                "fk_asset_item": "tool_run_item",
+                "fk_asset_input": "asset",
             },
             "tool_result": {
                 "fk_tool_result_actor": "actor",
@@ -678,6 +681,8 @@ def test_migration_round_trip_has_one_head_and_exact_schema(
                 "fk_asset_conversation": "CASCADE",
                 "fk_asset_task": "CASCADE",
                 "fk_asset_tool_run": "CASCADE",
+                "fk_asset_item": "CASCADE",
+                "fk_asset_input": "CASCADE",
             },
             "tool_result": {
                 "fk_tool_result_actor": "RESTRICT",

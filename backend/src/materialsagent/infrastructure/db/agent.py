@@ -134,7 +134,8 @@ class SQLAlchemyAgentStore:
                 raise AgentConflictError("Recovery version is stale.")
             from materialsagent.application.reliability import validate_resume
             validate_resume(run, now())
-            if run.pending_execution and run.pending_execution.dispatched:
+            if (run.pending_execution and run.pending_execution.dispatched
+                    and run.pending_execution.tool_name != "tc4_primary_alpha_segmentation"):
                 raise AgentFailure("TOOL_OUTCOME_UNKNOWN")
             run.status, run.error_code, run.resumed_version = "PENDING", None, requested_version
             run.recovery_replay = bool(run.calls or run.pending_tool_call_id)
@@ -230,6 +231,26 @@ class SQLAlchemyAgentStore:
             MessageRow.conversation_id == run.conversation_id)).all()]
         final = next((m for m in run.messages if m["message_id"] == run.final_message_id), None)
         run.result_attachments = list(final["artifacts"]) if final else []
+        records = [*run.executions, *([run.pending_execution] if run.pending_execution else [])]
+        batch_ids = [record.invocation_run_id for record in records if record.tool_name == "tc4_primary_alpha_segmentation"]
+        if batch_ids:
+            from .tool_run_item import ToolRunItemRow
+            from .tool_run import ToolRunRow
+            from .tool_invocation import InvocationRunRow
+            from materialsagent.domain.models.tc4 import ToolRunItem
+            import json
+            documents = session.scalars(select(ToolRunItemRow.document)
+                .join(ToolRunRow, ToolRunItemRow.tool_run_id == ToolRunRow.tool_run_id)
+                .join(InvocationRunRow, InvocationRunRow.task_id == ToolRunRow.task_id)
+                .where(InvocationRunRow.invocation_run_id.in_(batch_ids), ToolRunItemRow.actor_id == run.actor_id)
+                .order_by(ToolRunItemRow.ordinal)).all()
+            run.segmentation_items = [ToolRunItem.model_validate_json(json.dumps(document)).public() for document in documents]
+        elif run.retry_type == "ANSWER_REGENERATION":
+            # Regeneration explains the same verified facts without another
+            # ToolRun; preserve the original per-image result grouping.
+            run.segmentation_items = [dict(item) for observation in run.observations
+                if observation.tool_name == "tc4_primary_alpha_segmentation" and observation.result_summary
+                for item in observation.result_summary.get("data", {}).get("items", [])]
         return run
 
     def submit(self, conversation_id, actor_id, content, key, *, run_id=None, waiting_version=None,
@@ -237,7 +258,8 @@ class SQLAlchemyAgentStore:
                retry_invocation_id=None, source_answer_message_id=None, attachments=None):
         from materialsagent.domain.models.attachment import Attachment
         attachments = [Attachment.model_validate(a).model_dump() for a in (attachments or [])]
-        if len(attachments) > 1:
+        if (len(attachments) > 10 or len({a["attachment_id"] for a in attachments}) != len(attachments)
+                or (len(attachments) > 1 and any(a["kind"] == "dataset" for a in attachments))):
             raise AgentFailure("ATTACHMENT_LIMIT_EXCEEDED")
         digest = fingerprint([content, run_id, waiting_version, question_message_id, attachments,
                               retry_source.agent_run_id if retry_source else None, retry_type,
@@ -261,10 +283,11 @@ class SQLAlchemyAgentStore:
             if active:
                 raise AgentConflictError("A submission is already active.")
             for attachment in attachments:
-                if attachment["kind"] == "ebsd_image":
+                if attachment["kind"] in {"image", "ebsd_image"}:
                     from .asset import AssetRow
                     asset = session.get(AssetRow, attachment["attachment_id"])
-                    if not asset or asset.actor_id != actor_id or asset.conversation_id != conversation_id or asset.current_status != "AVAILABLE":
+                    if (not asset or asset.actor_id != actor_id or asset.conversation_id != conversation_id or asset.current_status != "AVAILABLE"
+                            or asset.asset_type not in {"image", "ebsd_image"} or asset.source_type != "UPLOADED"):
                         raise AgentFailure("EBSD_ASSET_NOT_FOUND")
                 else:
                     from .ml_resources import references

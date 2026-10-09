@@ -157,7 +157,7 @@ class AgentRuntime:
         if checkpoint is None and (run.calls or run.pending_tool_call_id):
             raise AgentFailure("CHECKPOINT_MISSING")
         record = run.pending_execution
-        if record is not None and record.dispatched:
+        if record is not None and record.dispatched and record.tool_name != "tc4_primary_alpha_segmentation":
             found = next((o for o in run.observations if o.invocation_run_id == record.invocation_run_id), None)
             if found is None:
                 found = await asyncio.to_thread(self.tools.repair, run, record)
@@ -519,7 +519,9 @@ class AgentRuntime:
         async def observation_message(call_id: str, observation: Observation) -> ToolMessage:
             if observation.kind != "TOOL_RESULT":
                 raise AgentFailure("OBSERVATION_INCONSISTENT")
-            if observation.status != "SUCCEEDED":
+            terminal_batch = (observation.tool_name == "tc4_primary_alpha_segmentation" and observation.result_id is not None
+                and observation.status in {"SUCCEEDED", "PARTIALLY_SUCCEEDED", "FAILED"})
+            if observation.status != "SUCCEEDED" and not terminal_batch:
                 code = (observation.error or {}).get("code")
                 raise AgentFailure("MCP_OUTCOME_UNKNOWN" if code == "MCP_OUTCOME_UNKNOWN"
                                    else "TOOL_EXECUTION_FAILED")
@@ -532,8 +534,15 @@ class AgentRuntime:
                 # A checkpoint replay may revisit the tool node. Never dispatch a
                 # committed call twice, even if the external outcome is unknown.
                 found = next((o for o in run.observations if o.invocation_run_id == record.invocation_run_id), None)
+                if found is None and record.tool_name == "tc4_primary_alpha_segmentation":
+                    found = await asyncio.to_thread(self.tools.continue_batch, run, record,
+                        min(run.budget.managed_timeout_seconds, remaining_time()))
                 if found is None:
                     found = await asyncio.to_thread(self.tools.repair, run, record)
+                    if unknown_observation(found):
+                        raise AgentFailure("TOOL_OUTCOME_UNKNOWN")
+                    run = await asyncio.to_thread(self.store.receipt, run_id, actor_id, record, found)
+                elif record.tool_name == "tc4_primary_alpha_segmentation":
                     if unknown_observation(found):
                         raise AgentFailure("TOOL_OUTCOME_UNKNOWN")
                     run = await asyncio.to_thread(self.store.receipt, run_id, actor_id, record, found)

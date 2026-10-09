@@ -86,7 +86,20 @@ class ChatArtifacts:
             target = next((a for a in [*content.get("attachments", []), *content.get("artifacts", [])]
                 if a["attachment_id"] == identity), None)
             if target is None:
-                raise ResourceNotFoundError()
+                # Completed batch item assets remain viewable before the parent
+                # ToolResult/final answer exists, including after stop/restart.
+                from materialsagent.infrastructure.db.asset import AssetRow
+                from materialsagent.infrastructure.db.tool_run_item import ToolRunItemRow
+                from materialsagent.infrastructure.db.tool_run import ToolRunRow
+                from materialsagent.infrastructure.db.conversation_task import TaskRow
+                asset = session.scalar(select(AssetRow).join(ToolRunItemRow, AssetRow.producer_tool_run_item_id == ToolRunItemRow.item_id)
+                    .join(ToolRunRow, ToolRunItemRow.tool_run_id == ToolRunRow.tool_run_id)
+                    .join(TaskRow, ToolRunRow.task_id == TaskRow.task_id)
+                    .where(AssetRow.asset_id == identity, AssetRow.actor_id == actor, AssetRow.current_status == "AVAILABLE",
+                        TaskRow.conversation_id == conversation, ToolRunItemRow.status == "SUCCEEDED"))
+                if asset is None:
+                    raise ResourceNotFoundError()
+                target = {"attachment_id": identity, "kind": "image", "name": "分割叠加图" if asset.encoding_rule == "tc4-overlay-png-v1" else "二值掩膜"}
             return dict(target)
 
     def view(self, actor, conversation, message, identity):

@@ -79,7 +79,8 @@ def proposal_catalog(catalog):
             execution = spec["execution_argument"]
             model = spec["model_argument"]
             schema["properties"].pop(execution, None)
-            schema["properties"][model] = selection_schema()
+            schema["properties"][model] = ({"type": "array", "items": selection_schema(),
+                "minItems": 1, "maxItems": 10, "uniqueItems": True} if spec.get("collection") else selection_schema())
             required = [model if field == execution else field for field in required]
         if "required" in schema:
             schema["required"] = required

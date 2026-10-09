@@ -65,7 +65,7 @@ def project_result_artifacts(observation):
         # and its CSV download. Project the fact, never the storage identity.
         artifacts.append({"kind": "prediction", "role": "requested_output",
             "available_to_user": True, "download_formats": ["csv"]})
-    for artifact in observation.artifacts[:16]:
+    for artifact in observation.artifacts[:20 if observation.tool_name == "tc4_primary_alpha_segmentation" else 16]:
         if not isinstance(artifact, Mapping):
             continue
         role = artifact.get("role")
@@ -140,6 +140,12 @@ def _project_resource(resource, *, kind=None):
 
 
 def project_result(observation):
+    if observation.tool_name == "tc4_primary_alpha_segmentation" and observation.data.get("items"):
+        items = [{key: item[key] for key in ("ordinal", "name", "status", "width", "height", "foreground_pixels", "total_pixels", "area_fraction") if key in item}
+                 for item in observation.data["items"]]
+        count = sum(item["status"] == "SUCCEEDED" for item in items)
+        return {"title": "TC4 初生 α 相分割", "summary": f"完成 {count}/{len(items)} 张图片。",
+                "facts": {"items": items}, "metrics": [], "notes": ["整图处理，包含文件中的边框；预测面积占比不代表分割准确率。"]}
     if observation.error and observation.error.get("code") == "MCP_OUTCOME_UNKNOWN":
         return {"title": "结果待确认", "summary": "暂时无法确认处理结果，请检查原提交，不要重复执行。", "facts": {}, "metrics": [], "notes": []}
     if observation.status == "FAILED":

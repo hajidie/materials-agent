@@ -81,6 +81,11 @@ class SQLAlchemyUnitOfWork:
         return self._actors
 
     @property
+    def tool_run_items(self):
+        from .tool_run_item import ToolRunItemRepository
+        return ToolRunItemRepository(self._active_session())
+
+    @property
     def conversations(self) -> ConversationRepository:
         if self._conversations is None:
             raise RuntimeError("UnitOfWork has not been entered.")
@@ -266,6 +271,8 @@ class SQLAlchemyUnitOfWork:
     @staticmethod
     def _inactive_receipt_allowed(session, row, owner):
         """A stopped/interrupted Agent may only finish its frozen Invocation."""
+        if session.info.get("tc4_new_dispatch"):
+            return False
         if (row is None or not (row.status == "INTERRUPTED" or
                 (row.status == "TERMINATED" and row.document.get("error_code") == "USER_STOPPED"))
                 or row.document.get("claim") != owner[2] or len(owner) < 4 or not owner[3]):
@@ -277,7 +284,13 @@ class SQLAlchemyUnitOfWork:
         from .tool_run import ToolRunRow
         from .tool_result import ToolResultRow, ResultAssetLinkRow
         from .asset import AssetRow
-        permitted = (InvocationRunRow, InvocationResultRow, ToolRunRow, ToolResultRow, ResultAssetLinkRow, AssetRow, TaskRow)
+        from .tool_run_item import ToolRunItemRow
+        invocation = session.get(InvocationRunRow, owner[3])
+        tc4_run_id = invocation.managed_tool_run_id if invocation and invocation.tool_id == "tc4_primary_alpha_segmentation" else None
+        if invocation and invocation.tool_id == "tc4_primary_alpha_segmentation" and not tc4_run_id:
+            tc4_run_id = session.scalar(select(ToolRunRow.tool_run_id).where(ToolRunRow.task_id == invocation.task_id,
+                ToolRunRow.current_status == "RUNNING"))
+        permitted = (InvocationRunRow, InvocationResultRow, ToolRunRow, ToolResultRow, ResultAssetLinkRow, AssetRow, TaskRow, ToolRunItemRow)
         for changed in set(session.new) | set(session.dirty):
             if not isinstance(changed, permitted):
                 return False
@@ -285,7 +298,14 @@ class SQLAlchemyUnitOfWork:
                 if changed in session.new or changed.invocation_run_id != owner[3] or changed.status not in ("SUCCEEDED", "FAILED", "OUTCOME_UNKNOWN"):
                     return False
             if isinstance(changed, (ToolRunRow, TaskRow)):
-                if changed in session.new or changed.current_status not in ("SUCCEEDED", "PARTIALLY_SUCCEEDED", "FAILED"):
+                tc4_receipt = isinstance(changed, ToolRunRow) and changed.tool_run_id == tc4_run_id and changed.current_status == "RUNNING"
+                if changed in session.new or (not tc4_receipt and changed.current_status not in ("SUCCEEDED", "PARTIALLY_SUCCEEDED", "FAILED")):
+                    return False
+            if isinstance(changed, ToolRunItemRow):
+                if changed in session.new or changed.tool_run_id != tc4_run_id or changed.status not in ("RESULT_RECEIVED", "SUCCEEDED", "FAILED", "OUTCOME_UNKNOWN", "SKIPPED"):
+                    return False
+            if isinstance(changed, AssetRow) and tc4_run_id:
+                if changed.producer_tool_run_id != tc4_run_id or not changed.producer_tool_run_item_id:
                     return False
         return True
 
@@ -329,3 +349,4 @@ class SQLAlchemyUnitOfWork:
         session_info = getattr(session, "info", None)
         if session_info is not None:
             session_info.pop("routing_state_task_ids", None)
+            session_info.pop("tc4_new_dispatch", None)

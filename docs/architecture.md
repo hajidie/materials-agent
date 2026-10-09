@@ -11,11 +11,13 @@ Vue 聊天界面（frontend/）
 FastAPI Backend（backend/，Python 3.11）
    ├─ PostgreSQL：对话、消息、AgentRun、工具来源、公开过程快照与 SDK checkpoint
    ├─ MinIO：上传图片和生成附件
-   ├─ Mock Runtime（Python 3.11）或真实 ZTA35G/EBSD Runtime（Python 3.8）
+   ├─ Mock Runtime（Python 3.11）或真实 ZTA35G/EBSD/TC4 Runtime（Python 3.8）
    └─ 可选 Materials ML Service / Worker（独立 Python 3.11）
 ```
 
 Backend 是业务协调者；真实 Runtime 是旧模型和 GPU 依赖的隔离层。ML Service 有独立的存储与 Worker，不负责推进平台的 AgentRun。代码入口分别在 `backend/src/materialsagent/main.py`、`zta35g-runtime/src/` 和 `services/materials_ml/src/`。
+
+日常入口 `scripts/dev/start-all.ps1` 通过同一 `local-dev.ps1 -AllFeatures -Runtime Real -Llm Provider` 托管完整栈，开启 TC4、ML 工具、CSV 资源和可信资源上下文。模型路径从参数、进程环境或根 `.env` 读取；TC4 权重与持久回执目录只传给 Python 3.8 Runtime。ML 配置预检与实际 Backend 使用相同的功能覆盖；启动及重复启动检查全部业务工具为 AVAILABLE，并检查 ML 资源能力。缺少依赖时明确失败，原脚本的按需和 Mock 入口继续保留。
 
 ## 一次聊天如何完成
 
@@ -65,12 +67,26 @@ Registry 的内部 `auto_retry_safe` 默认关闭，冻结到 Invocation 策略�
 
 ## 工具与资源边界
 
-默认 Registry 注册单位换算、ZTA35G SEM 虚拟实验和 EBSD 屈服强度预测；可选 ML 工具由配置启用。真实 SEM 与 EBSD 共用 Runtime 执行资源，Backend 不加载权重，也不自动重试模型执行。EBSD 输入图片是来源，不是生成结果；结果必须保留对应 ToolRun、单位和适用限制。
+默认 Registry 注册单位换算、ZTA35G SEM 虚拟实验和 EBSD 屈服强度预测；可选 TC4 与 ML 工具由配置启用。真实 SEM、EBSD 与 TC4 共用 Python 3.8 Runtime GPU 执行锁，Backend 不加载权重，也不自动重试模型执行。EBSD 输入图片是来源，不是生成结果；RGB、正方形等专属要求在 EBSD 派发前校验。
+
+TC4 注册为 `tc4_primary_alpha_segmentation` Managed Tool。模型提交临时图片引用数组，Backend 的统一资源解析器将其绑定成 `ResourceCollectionBinding`，冻结有序的资源身份及内容摘要，单资源合同保持有效。新上传使用通用 `image` 类型，兼容历史 `ebsd_image` 与单附件消息；CSV 单独提交。图片内容与本机路径、权重路径和存储凭据不进入模型上下文。
+
+上传与 TC4 Runtime 同时兼容完全不透明的 8 位 RGBA PNG：检查 PNG 原始编码位深，并逐像素确认 alpha 为 255（包括 RGB/灰度 PNG 的 `tRNS` 透明色），保存原始文件与摘要，推理时沿用 RGB 转换。实际透明或半透明像素拒绝处理，避免未定义背景影响面积统计；不对原文件裁剪、增强或重新编码。EBSD 专属 RGB 与正方形校验保持在其派发前执行。
+
+一次批量只有一个 Invocation、Task、InputRevision、ToolRun；`tool_run_item` 保存每项输入、序号、稳定 Runtime 请求身份、版本、状态、原回执和成果关联。`local_tc4` 在每次派发前检查执行权、持久停止状态和原 Run 时间预算；提交 DISPATCHED 后才发送请求。停止后只收已派发回执，不启动下一张。单张输入失败可继续；Runtime/GPU 故障或未知结果暂停。恢复沿用原父记录，先查询已派发项的原回执或补存已收到的成果，再处理未派发项，不增加 Agent 工具执行次数。
+
+Python 3.8 Runtime 自有 ResNet50 U-Net 推理模块保持原 RGB/512 letterbox/归一化/概率图恢复/argmax 顺序，模型每进程加载一次，FP32/eval/no_grad。同步单图执行在推理前落盘未知回执，终态回执与两个 PNG 原子保存到配置的数据目录。重复身份只读取原操作；重启遗留未知计算也不重跑。Backend 校验回执身份、模型版本、PNG 摘要/模式/尺寸及掩膜前景像素数，再逐张保存统一 Asset。成果关联输入、ToolRunItem、模型与预处理版本。
+
+整批结束才提交专属 ToolResult，成功/部分成功/失败按图片项计算；SEM/EBSD 原有按输出种类统计保持不变。已有图片成果可在父结果形成前授权查看。`0027_tc4_batch_segmentation` 新增批量项、图片来源字段和 Runtime 回执清理队列；对话删除事务先将可证明归属的终态请求写入独立 outbox，再删除业务记录。Runtime 清理核对原身份、拒绝运行中或未知操作，保留删除标记防止复用身份重跑。失败的清理留待后续启动/删除 drain。
+
+沿用 LangChain 的通用工具循环，确定性的逐图顺序、停止与原回执恢复由业务适配层实现，不新增通用调度框架。工具定义/执行解耦参考 [deepseek-harness 工具规范](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/tools.md)和 [LangChain 工具文档](https://docs.langchain.com/oss/python/langchain/tools)；整图范围见 [ADR-0003](adr/0003-tc4-whole-image-batch-segmentation.md)。
 
 ML Engine 只做数值表格回归，目前支持 LR/RF。Service 管理数据、训练和预测，Worker 通过 Service API 交回结果。平台只持有受控资源引用；模型对资源名称和单位的推断须由 Backend 对最终绑定资源再次校验，未知单位在数值换算前需要用户明确确认。
 
 ## 界面边界
 
 前端以聊天为唯一工作入口：问题在原输入框补充，运行状态和结果跟随消息展示，附件详情通过只读 Viewer 查看。查看或下载不改变工具输入、草稿或 Agent 状态。界面文案使用用户能理解的进度和错误，不暴露内部 ID、原始 JSON 或调试异常。样式与响应式规则以 `frontend/src/styles.css` 和组件测试为准。
+
+历史消息分页独立于最近 Run 列表；加载到较早回答时，前端补查该消息页中尚未加载的关联 Run，恢复逐图状态、统计和分组图片，不重新派发工具。
 
 正文使用 Markdown；模型思考、行动说明和工具事实分开标注，完成后默认折叠，并保留用户主动展开的选择。`AssistantMarkdown` 使用 remend 修补流中显示副本，完成后由 markdown-it 直接解析原文，KaTeX 在所属段接收完成后排版公式。渲染禁用原始 HTML，限制链接协议并隔离外链；Markdown 图片只显示替代文字，结果图片通过原受控附件展示。用户向上阅读时不强制滚回底部。该实现依赖单 Backend 进程的运行托管与广播，不能直接以多个独立 Uvicorn worker 部署。

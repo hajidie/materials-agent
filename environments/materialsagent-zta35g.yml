@@ -23,6 +23,7 @@ dependencies:
       - iniconfig==2.1.0
       - joblib==1.4.2
       - numpy==1.22.3
+      - opencv-python-headless==4.10.0.84
       - packaging==26.2
       - pillow==10.4.0
       - pluggy==1.5.0

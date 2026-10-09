@@ -62,6 +62,7 @@ class ResourceType(StrEnum):
     MODEL = "model"
     PREDICTION = "prediction"
     EBSD_IMAGE = "ebsd_image"
+    IMAGE = "image"
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +74,7 @@ class ResourceParameterSpec:
     expected_resource_type: ResourceType
     provider: ResourceProvider
     required: bool = True
+    collection: bool = False
 
     def __post_init__(self) -> None:
         for field_name in ("model_argument", "execution_argument"):
@@ -85,6 +87,8 @@ class ResourceParameterSpec:
             raise ValueError("provider is invalid.")
         if type(self.required) is not bool:
             raise ValueError("required must be boolean.")
+        if type(self.collection) is not bool or (self.collection and self.provider is not ResourceProvider.ASSET):
+            raise ValueError("Only asset collections are supported.")
 
 
 JsonObject: TypeAlias = Mapping[str, object]

@@ -185,6 +185,7 @@ def _safe_runtime_error(error: ToolClientError) -> tuple[str, str, int]:
             "RUNTIME_BUSY": ("Tool Runtime is busy.", 503),
             "MODEL_LOAD_FAILED": ("Tool Runtime model is unavailable.", 503),
             "SEM_GENERATION_FAILED": ("SEM generation failed.", 502),
+            "TC4_BATCH_INCOMPLETE": ("部分图片未完成，请查看逐图状态。", 502),
             "MECHANICAL_PROPERTY_PREDICTION_FAILED": (
                 "Mechanical property prediction failed.",
                 502,

@@ -165,7 +165,14 @@ class ContextFramework:
                     raise AgentFailure("INVALID_UNIT_ANNOTATION") from None
             if key in {item["model_argument"] for item in resource_specs(tool)}:
                 try:
-                    selection(value)
+                    spec = next(item for item in resource_specs(tool) if item["model_argument"] == key)
+                    if spec.get("collection"):
+                        if not isinstance(value, list) or not 1 <= len(value) <= 10:
+                            raise ValueError()
+                        for item in value:
+                            selection(item)
+                    else:
+                        selection(value)
                 except Exception:
                     raise AgentFailure("INVALID_RESOURCE_REFERENCE") from None
         reverse = {item["model_argument"]: item["execution_argument"] for item in resource_specs(tool)}
@@ -173,10 +180,11 @@ class ContextFramework:
         for key, value in values.items():
             internal = reverse.get(key, key)
             if key in reverse:
-                selected = selection(value)
-                if selected.unresolved:
-                    value = {"_resource_unresolved": True}
-                else:
-                    value = deepcopy(resource_map.get(selected.resource_ref, {"_resource_invalid": True}))
+                def resolve_selection(item):
+                    selected = selection(item)
+                    return ({"_resource_unresolved": True} if selected.unresolved else
+                        deepcopy(resource_map.get(selected.resource_ref, {"_resource_invalid": True})))
+                spec = next(item for item in resource_specs(tool) if item["model_argument"] == key)
+                value = [resolve_selection(item) for item in value] if spec.get("collection") else resolve_selection(value)
             result[internal] = value
         return result

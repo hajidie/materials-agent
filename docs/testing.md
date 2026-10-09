@@ -30,6 +30,14 @@ Backend 的 `api/` 与 `integration/` 测试可能使用真实 PostgreSQL；存�
 
 ML 自动验收需与浏览器 ML 验收、常驻 Worker 串行运行；单实例锁和环境准备见 [ML 验收说明](../services/materials_ml/README.md#独立服务真实验收)。受争用影响的失败需在串行环境复验，不能直接计为通过。
 
+## TC4 批量分割
+
+定向入口为 `backend/tests/api/test_tc4.py`、`mock-runtime/tests/test_tc4.py`、`zta35g-runtime/tests/contract/test_tc4_http.py` 和 `frontend/tests/components/tc4-flow.test.ts`，分别使用上文对应环境运行。Backend 测试覆盖 1/5/10 图有序集合绑定、一次父调用、输入失败继续与全部失败、丢失响应查原回执、保存失败与 Backend 重启恢复、Runtime 丢失回执不重派发、停止后保存迟到结果，以及删除清理 outbox。Python 3.8 合同测试覆盖原身份重放、崩溃遗留未知、共享 GPU 锁、成果读取与删除标记；Mock 结果使用 `mock-tc4-bundle` 版本。
+
+图片合同回归覆盖灰度/RGB、完全不透明的 RGBA PNG、原文件无损读取与 RGB 转换像素一致，以及一个像素透明或半透明时拒绝处理。RGB/灰度 PNG 的 `tRNS` 按实际像素判断；16 位 RGB PNG 即使解码模式为 RGB 也拒绝。Backend、真实 Runtime 与 Mock Runtime 分别验证这些输入边界；测试不依赖或提交用户图片。前端回归覆盖加载超过最近 20 个 Run 的较早消息后，仍显示逐图状态、像素统计和面积占比。
+
+真实验收使用一组适用样图（例如五张），逐张比较原程序与新 Runtime 的类别掩膜、叠加图、原尺寸和像素统计；通过真实 Provider 的浏览器批量上传，核实一次 Agent 工具调用、逐图回执与统计，以及每张输入对应两张成果。另检查刷新、停止、故障暂停与继续，以及与 SEM/EBSD 的 GPU 互斥。比较产物放在忽略的本地工作目录；单次结果记录在 Issue/交付回复，没有人工标注时不报告分割准确率。
+
 ## 按风险选择验证
 
 | 改动 | 至少检查 |
@@ -37,10 +45,12 @@ ML 自动验收需与浏览器 ML 验收、常驻 Worker 串行运行；单实�
 | 局部 Python 逻辑 | 直接相关的 `test_*.py`；缺陷修复添加回归用例 |
 | API、工具合同、状态或迁移 | 相关 unit、contract、API 和真实数据库用例；必要时扩大至 Backend 全量 |
 | Vue 组件或交互 | 对应 `*.test.ts`；共享类型运行 typecheck，打包相关改动运行 build |
-| 本地启动脚本 | `scripts/dev/test-local-dev.ps1`；范围检查脚本改动运行 `test-check-scope.ps1` |
+| 本地启动脚本 | `scripts/dev/test-local-dev.ps1`；覆盖完整启动参数与退出码、真实模式约束、功能开关覆盖、TC4 路径解析和 ML 能力就绪检查；范围检查脚本改动运行 `test-check-scope.ps1` |
 | 跨服务 ML 或真实模型 | 对应独立环境的验收；分别记录 Service、MCP、GPU 和浏览器结果 |
 
 最后运行 `git diff --check`，检查实际 diff 与未提交文件，并记录未执行的验证及原因。文档改动至少核对命令、路径和相对链接。
+
+完整栈现场检查使用 `scripts/dev/start-all.ps1`，确认 `/api/v1/tools` 中八个业务工具全部 AVAILABLE，`/api/v1/capabilities` 的 `ml_resources`、`ml_context`、`ml_tools`、`coordination` 全为 true；重复运行应复用原进程，`start-all.ps1 Stop` 沿用原停止流程。启动就绪只能证明当前配置和服务可用，不代替真实 Provider 对话、GPU 推理或 ML 训练验收。
 
 ## 证据能说明什么
 
